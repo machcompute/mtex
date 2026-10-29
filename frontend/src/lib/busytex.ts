@@ -3,131 +3,96 @@
 // Wraps the busytex WebAssembly worker (full TeX Live compiled to WASM).
 // The heavy assets (busytex.js/.wasm, texlive-basic.js/.data) are served by
 // the Go backend at /api/texlive/ and cached there on first use.
+//
+// The worker + pipeline files in /busytex/ are from the same busytex commit
+// as the pinned release (build_b16fdf28) — that build runs xelatex via
+// xdvipdfmx and auto-runs bibtex8 when a .bib file is present.
+//
+// Worker protocol (old, matching the build):
+//   init:    {busytex_js, busytex_wasm, texlive_js: [url], texmf_local, preload, verbose}
+//   compile: {files, main_tex_path, bibtex, verbose}  ->  {pdf, log}
+//   logs:    {print: string}
+// There is no "initialized" handshake; the pipeline is built synchronously
+// on the init message and the first compile awaits asset loading, reporting
+// progress through print messages.
 
 const TEXLIVE_BASE = "http://localhost:8080/api/texlive";
 
 export type CompileResult = {
   pdf: Uint8Array | null;
   log: string;
-  exit_code: number;
 };
-
-export type BusyTexDriver =
-  | "xetex_bibtex8_dvipdfmx"
-  | "pdftex_bibtex8"
-  | "luahbtex_bibtex8"
-  | "luatex_bibtex8";
 
 type WorkerMessage = {
   print?: string;
-  initialized?: Record<string, string>;
-  exception?: string;
-  pdf?: ArrayBuffer | null;
-  log?: string;
-  exit_code?: number;
+  pdf?: Uint8Array | null;
+  log?: string | null;
 };
 
 export class BusyTexCompiler {
   private worker: Worker | null = null;
   private pending: ((msg: WorkerMessage) => void) | null = null;
-  private initPromise: Promise<void> | null = null;
   private disposed = false;
 
   constructor(private workerUrl = "/busytex/busytex_worker.js") {}
 
-  get ready() {
-    return this.initPromise !== null;
-  }
-
-  /** Create the worker and wait for the Emscripten module to initialize. */
+  /** Create the worker and send the init message. */
   init(onLog?: (line: string) => void): Promise<void> {
-    if (!this.initPromise) {
-      this.initPromise = new Promise<void>((resolve, reject) => {
-        const worker = new Worker(this.workerUrl);
-        this.worker = worker;
+    if (!this.worker) {
+      const worker = new Worker(this.workerUrl);
+      this.worker = worker;
 
-        worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
-          const msg = e.data;
-          if (msg.print !== undefined && onLog) onLog(msg.print);
-          if (msg.initialized !== undefined) {
-            resolve();
-            return;
-          }
-          if (msg.exception !== undefined) {
-            if (this.pending) {
-              const resolvePending = this.pending;
-              this.pending = null;
-              resolvePending({ exception: msg.exception });
-              this.dispose();
-              return;
-            }
-            this.dispose();
-            if (this.initPromise) reject(new Error(msg.exception));
-            return;
-          }
-          // Compile results only arrive while pending.
-          if (this.pending) {
-            const resolvePending = this.pending;
-            this.pending = null;
-            resolvePending(msg);
-          }
-        };
-        worker.onerror = (e) => {
-          const message = e.message || "worker error";
-          if (this.initPromise && !this.pending) {
-            this.initPromise = null;
-            this.dispose();
-            reject(new Error(message));
-          } else {
-            this.pending?.({ exception: message });
-          }
-        };
+      worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
+        const msg = e.data;
+        if (msg.print !== undefined && onLog) onLog(msg.print);
+        // Compile results only arrive while pending.
+        if (this.pending && (msg.pdf !== undefined || msg.log !== undefined)) {
+          const resolvePending = this.pending;
+          this.pending = null;
+          resolvePending(msg);
+        }
+      };
+      worker.onerror = (e) => {
+        const message = e.message || "worker error";
+        if (this.pending) {
+          const resolvePending = this.pending;
+          this.pending = null;
+          this.dispose();
+          resolvePending({ pdf: null, log: message });
+        }
+      };
 
-        worker.postMessage({
-          busytex_js: `${TEXLIVE_BASE}/busytex.js`,
-          busytex_wasm: `${TEXLIVE_BASE}/busytex.wasm`,
-          preload_data_packages_js: [`${TEXLIVE_BASE}/texlive-basic.js`],
-          data_packages_js: [] as string[],
-          texmf_local: [] as string[],
-          preload: true,
-          verbose: "silent",
-          driver: "pdftex_bibtex8",
-        });
-      });
-      this.initPromise.catch(() => {
-        // Allow a retry after a failed init.
-        this.initPromise = null;
+      worker.postMessage({
+        busytex_js: `${TEXLIVE_BASE}/busytex.js`,
+        busytex_wasm: `${TEXLIVE_BASE}/busytex.wasm`,
+        texlive_js: [`${TEXLIVE_BASE}/texlive-basic.js`],
+        texmf_local: [] as string[],
+        preload: true,
+        verbose: "silent",
       });
     }
-    return this.initPromise;
+    return Promise.resolve();
   }
 
-  /** Compile a LaTeX source string and return the PDF bytes (null on failure). */
-  compile(
-    source: string,
-    driver: BusyTexDriver = "pdftex_bibtex8",
-    onLog?: (line: string) => void,
-  ): Promise<CompileResult> {
-    return new Promise<CompileResult>((resolve) => {
-      this.worker?.postMessage({
+  /** Compile a LaTeX source string; pdf is null when compilation failed. */
+  compile(source: string): Promise<CompileResult> {
+    return new Promise<CompileResult>((resolve, reject) => {
+      if (!this.worker) {
+        reject(new Error("compiler not initialized"));
+        return;
+      }
+      this.worker.postMessage({
         files: [{ path: "main.tex", contents: source }],
         main_tex_path: "main.tex",
         bibtex: null,
         verbose: "silent",
-        driver,
-        data_packages_js: [] as string[],
       });
-      void onLog; // logs are forwarded via the init onLog channel
       this.pending = (msg) => {
-        if (msg.exception !== undefined) {
-          resolve({ pdf: null, log: msg.exception, exit_code: 1 });
-          return;
-        }
-        const result = msg as CompileResult;
+        // The pipeline reads the PDF back from MEMFS as a Uint8Array
+        // (FS.readFile with encoding 'binary'); copy it out of the worker.
         resolve({
-          pdf: result.pdf ? new Uint8Array(result.pdf) : null,
-          log: result.log ?? "",
-          exit_code: result.exit_code ?? 1,
+          pdf: msg.pdf ? Uint8Array.from(msg.pdf) : null,
+          log: msg.log ?? "",
         });
       };
     });
@@ -139,6 +104,5 @@ export class BusyTexCompiler {
     this.worker?.terminate();
     this.worker = null;
     this.pending = null;
-    this.initPromise = null;
   }
 }
