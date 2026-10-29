@@ -92,15 +92,15 @@ export default function EditorPage() {
             : status.message;
 
   return (
-    <div className="flex h-screen flex-col bg-zinc-50 dark:bg-zinc-950">
-      <header className="flex items-center gap-4 border-b border-zinc-200 bg-white px-4 py-2 dark:border-zinc-800 dark:bg-zinc-900">
-        <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
+    <div className="flex h-screen flex-col bg-cream">
+      <header className="flex items-center gap-4 border-b border-ink/10 bg-cream px-4 py-2">
+        <h1 className="text-base font-semibold text-ink">
           LaTeX Editor
         </h1>
         <select
           value={driver}
           onChange={(e) => setDriver(e.target.value as BusyTexDriver)}
-          className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+          className="rounded border border-stone/40 bg-cream px-2 py-1 text-sm text-ink"
         >
           <option value="pdftex_bibtex8">pdflatex</option>
           <option value="xetex_bibtex8_dvipdfmx">xelatex</option>
@@ -109,23 +109,25 @@ export default function EditorPage() {
         <button
           onClick={compile}
           disabled={status.kind === "compiling" || status.kind === "loading"}
-          className="rounded bg-zinc-900 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-black dark:hover:bg-zinc-300"
+          className="rounded bg-ink px-4 py-1.5 text-sm font-medium text-mint transition-colors hover:bg-mint hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
         >
           Compile
         </button>
-        <span className="min-w-0 flex-1 truncate text-xs text-zinc-500 dark:text-zinc-400">
+        <span
+          className={"min-w-0 flex-1 truncate text-xs " + (status.kind === "error" ? "text-red-600" : "text-stone")}
+        >
           {statusText}
         </span>
         <button
           onClick={() => setShowLog((v) => !v)}
-          className="rounded border border-zinc-300 px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          className="rounded border border-stone/40 px-3 py-1.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
         >
           {showLog ? "Hide log" : "Show log"}
         </button>
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <div className="min-w-0 flex-1 border-r border-zinc-200 dark:border-zinc-800">
+        <div className="min-w-0 flex-1 border-r border-ink/10">
           <Editor
             height="100%"
             defaultLanguage="latex"
@@ -146,7 +148,7 @@ export default function EditorPage() {
       </div>
 
       {showLog && (
-        <pre className="max-h-48 overflow-auto border-t border-zinc-200 bg-zinc-900 p-3 text-xs text-zinc-300 dark:border-zinc-800">
+        <pre className="max-h-48 overflow-auto border-t border-ink/10 bg-ink p-3 text-xs text-cream/90">
           {log || "(no log output)"}
         </pre>
       )}

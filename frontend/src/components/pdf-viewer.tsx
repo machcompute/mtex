@@ -27,7 +27,7 @@ export default function PdfViewer({ data, className }: Props) {
 
     if (!data || data.byteLength === 0) {
       const empty = document.createElement("div");
-      empty.className = "flex h-full items-center justify-center text-sm text-zinc-400";
+      empty.className = "flex h-full items-center justify-center text-sm text-stone";
       empty.textContent = "No PDF output yet";
       container.append(empty);
       return;
