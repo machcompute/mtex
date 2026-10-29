@@ -1,9 +1,37 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
+import Editor, { type BeforeMount } from "@monaco-editor/react";
 import PdfViewer from "@/components/pdf-viewer";
-import { BusyTexCompiler, type BusyTexDriver } from "@/lib/busytex";
+import { BusyTexCompiler } from "@/lib/busytex";
+
+// Light Monaco theme using the HomeHub palette (no dark mode).
+const defineTheme: BeforeMount = (monaco) => {
+  monaco.editor.defineTheme("homehub", {
+    base: "vs",
+    inherit: true,
+    rules: [
+      { token: "comment", foreground: "5e5e5e", fontStyle: "italic" },
+      { token: "keyword", foreground: "333333", fontStyle: "bold" },
+      { token: "string", foreground: "14a98a" },
+      { token: "number", foreground: "b0764a" },
+      { token: "tag", foreground: "333333", fontStyle: "bold" },
+    ],
+    colors: {
+      "editor.background": "#fcfaf9",
+      "editor.foreground": "#333333",
+      "editor.lineHighlightBackground": "#f3d3bd59",
+      "editorLineNumber.foreground": "#5e5e5e",
+      "editorLineNumber.activeForeground": "#333333",
+      "editorCursor.foreground": "#14a98a",
+      "editor.selectionBackground": "#48e5c266",
+      "editorIndentGuide.background1": "#33333322",
+      "editorWidget.background": "#fcfaf9",
+      "editorSuggestWidget.background": "#fcfaf9",
+      "minimap.background": "#fcfaf9",
+    },
+  });
+};
 
 const DEFAULT_SOURCE = `\\documentclass{article}
 \\usepackage[utf8]{inputenc}
@@ -34,7 +62,6 @@ type Status =
 
 export default function EditorPage() {
   const [source, setSource] = useState(DEFAULT_SOURCE);
-  const [driver, setDriver] = useState<BusyTexDriver>("pdftex_bibtex8");
   const [pdf, setPdf] = useState<Uint8Array | null>(null);
   const [log, setLog] = useState("");
   const [showLog, setShowLog] = useState(false);
@@ -65,7 +92,7 @@ export default function EditorPage() {
     const started = performance.now();
     try {
       await compiler.init();
-      const result = await compiler.compile(source, driver);
+      const result = await compiler.compile(source);
       if (result.pdf) {
         setPdf(result.pdf);
         setStatus({ kind: "done", ms: Math.round(performance.now() - started) });
@@ -78,7 +105,7 @@ export default function EditorPage() {
     } finally {
       busyRef.current = false;
     }
-  }, [source, driver]);
+  }, [source]);
 
   const statusText =
     status.kind === "idle"
@@ -94,22 +121,14 @@ export default function EditorPage() {
   return (
     <div className="flex h-screen flex-col bg-cream">
       <header className="flex items-center gap-4 border-b border-ink/10 bg-cream px-4 py-2">
-        <h1 className="text-base font-semibold text-ink">
+        <h1 className="flex items-center gap-2 text-base font-semibold text-ink">
+          <span className="h-3 w-3 rounded-sm bg-mint" />
           LaTeX Editor
         </h1>
-        <select
-          value={driver}
-          onChange={(e) => setDriver(e.target.value as BusyTexDriver)}
-          className="rounded border border-stone/40 bg-cream px-2 py-1 text-sm text-ink"
-        >
-          <option value="pdftex_bibtex8">pdflatex</option>
-          <option value="xetex_bibtex8_dvipdfmx">xelatex</option>
-          <option value="luahbtex_bibtex8">lualatex (harfbuzz)</option>
-        </select>
         <button
           onClick={compile}
           disabled={status.kind === "compiling" || status.kind === "loading"}
-          className="rounded bg-ink px-4 py-1.5 text-sm font-medium text-mint transition-colors hover:bg-mint hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded bg-mint px-4 py-1.5 text-sm font-medium text-ink transition-colors hover:bg-ink hover:text-mint disabled:cursor-not-allowed disabled:opacity-50"
         >
           Compile
         </button>
@@ -133,7 +152,8 @@ export default function EditorPage() {
             defaultLanguage="latex"
             value={source}
             onChange={(value) => setSource(value ?? "")}
-            theme="vs-dark"
+            theme="homehub"
+            beforeMount={defineTheme}
             options={{
               fontSize: 14,
               minimap: { enabled: false },
@@ -148,7 +168,7 @@ export default function EditorPage() {
       </div>
 
       {showLog && (
-        <pre className="max-h-48 overflow-auto border-t border-ink/10 bg-ink p-3 text-xs text-cream/90">
+        <pre className="max-h-48 overflow-auto border-t border-ink/10 bg-peach/60 p-3 text-xs text-ink">
           {log || "(no log output)"}
         </pre>
       )}

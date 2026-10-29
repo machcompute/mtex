@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* No dark mode: always render with a light color scheme. */
+:root {
+  color-scheme: light;
+}
+
 @theme {
   /* Palette from docs/style.png */
   --color-ink: #333333;

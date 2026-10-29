@@ -15,6 +15,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "HomeHub",
   description: "Home automation and document hub",
+  other: {
+    // Always render with a light color scheme (no dark mode).
+    "color-scheme": "light",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

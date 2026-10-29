@@ -12,7 +12,7 @@ export default function Home() {
         </p>
         <Link
           href="/editor"
-          className="flex h-12 items-center justify-center rounded-full bg-ink px-6 font-medium text-cream transition-colors hover:bg-mint hover:text-ink"
+          className="flex h-12 items-center justify-center rounded-full bg-mint px-6 font-medium text-ink transition-colors hover:bg-ink hover:text-mint"
         >
           LaTeX Editor
         </Link>
