@@ -14,6 +14,8 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	mux.HandleFunc("/api/texlive/", handleTexlive)
+
 	addr := os.Getenv("PORT")
 	if addr == "" {
 		addr = ":8080"
