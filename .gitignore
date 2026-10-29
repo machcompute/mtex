@@ -1,0 +1,19 @@
+# Node
+node_modules/
+.next/
+out/
+npm-debug.log*
+
+# Go
+backend/bin/
+*.exe
+
+# Env & secrets
+.env
+.env.local
+.env*.local
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
