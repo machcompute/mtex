@@ -1,10 +1,25 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+import {
+  IconFile,
+  IconFileBib,
+  IconFileImage,
+  IconFilePdf,
+  IconFileTex,
+  IconPencil,
+  IconPlus,
+  IconTrash,
+  IconUpload,
+} from "@/components/icons";
+
+export type FileEntry = {
+  path: string;
+  isBinary: boolean;
+};
 
 type Props = {
-  /** Sorted file paths (flat names, e.g. "main.tex", "refs.bib"). */
-  files: string[];
+  files: FileEntry[];
   activePath: string;
   mainPath: string;
   onOpen: (path: string) => void;
@@ -12,12 +27,15 @@ type Props = {
   onRename: (oldPath: string, newName: string) => void;
   onDelete: (path: string) => void;
   onSetMain: (path: string) => void;
+  /** Read locally in the browser — files never leave the page. */
+  onUpload: (files: File[]) => void;
 };
 
 /**
- * Left-hand file browser for the LaTeX editor: open, add, rename
- * (double-click) and delete files, and pick which .tex is the build
- * target ("main").
+ * Overleaf-style file panel: "Files" header with upload / new-file
+ * actions, per-type file icons, hover rename/delete, a "main" badge for
+ * the build target, and drag-and-drop upload. New files are created in
+ * the row at the bottom. All file bytes stay in the browser.
  */
 export default function FileBrowser({
   files,
@@ -28,10 +46,13 @@ export default function FileBrowser({
   onRename,
   onDelete,
   onSetMain,
+  onUpload,
 }: Props) {
   const [newName, setNewName] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [dragging, setDragging] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const add = () => {
     const name = newName.trim();
@@ -51,13 +72,69 @@ export default function FileBrowser({
     if (name && name !== path) onRename(path, name);
   };
 
+  const pickUpload = () => inputRef.current?.click();
+
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-ink/10 bg-cream">
-      <div className="border-b border-ink/10 px-3 py-2">
+    <aside
+      className={
+        "flex w-64 shrink-0 flex-col border-r border-ink/10 bg-white " +
+        (dragging > 0 ? "bg-mint/10" : "")
+      }
+      onDragEnter={(e) => {
+        e.preventDefault();
+        setDragging((d) => d + 1);
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        setDragging((d) => Math.max(0, d - 1));
+      }}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(0);
+        const list = Array.from(e.dataTransfer.files);
+        if (list.length) onUpload(list);
+      }}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const list = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (list.length) onUpload(list);
+        }}
+      />
+
+      <div className="flex h-9 shrink-0 items-center justify-between border-b border-ink/10 px-3">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
           Files
         </h2>
+        <div className="flex items-center gap-0.5">
+          <button
+            onClick={pickUpload}
+            title="Upload files (kept in your browser)"
+            className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+          >
+            <IconUpload className="h-4 w-4" />
+          </button>
+          <button
+            onClick={() => document.getElementById("new-file-input")?.focus()}
+            title="New file"
+            className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+          >
+            <IconPlus className="h-4 w-4" />
+          </button>
+        </div>
       </div>
+
+      {dragging > 0 && (
+        <div className="border-b border-mint/50 bg-mint/20 px-3 py-1.5 text-xs font-medium text-ink">
+          Drop files to add them
+        </div>
+      )}
 
       <ul className="min-h-0 flex-1 overflow-y-auto py-1">
         {files.length === 0 && (
@@ -65,7 +142,8 @@ export default function FileBrowser({
             No files yet — add one below.
           </li>
         )}
-        {files.map((path) => {
+        {files.map((f) => {
+          const { path, isBinary } = f;
           const isMain = path === mainPath;
           const isActive = path === activePath;
           const isRenaming = renaming === path;
@@ -73,33 +151,18 @@ export default function FileBrowser({
             <li key={path} className="px-1.5 py-0.5">
               <div
                 className={
-                  "group flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 " +
-                  (isActive ? "bg-peach/60" : "hover:bg-peach/30")
+                  "group flex cursor-pointer items-center gap-2 rounded px-2 py-1 " +
+                  (isActive ? "bg-mint/25" : "hover:bg-peach/25")
                 }
                 onClick={() => {
                   if (!isRenaming) onOpen(path);
                 }}
               >
-                <span className="w-11 shrink-0">
-                  {isMain ? (
-                    <span
-                      title="Build target"
-                      className="inline-block rounded bg-mint px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink"
-                    >
-                      main
-                    </span>
-                  ) : path.endsWith(".tex") ? (
-                    <button
-                      title="Set as main file"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSetMain(path);
-                      }}
-                      className="inline-block rounded border border-ink/25 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-stone opacity-0 transition-opacity hover:bg-mint hover:text-ink group-hover:opacity-100"
-                    >
-                      main
-                    </button>
-                  ) : null}
+                <span
+                  className="flex w-4 shrink-0 justify-center text-stone"
+                  data-kind={kindOf(path, isBinary)}
+                >
+                  {fileIcon(path, isBinary)}
                 </span>
 
                 {isRenaming ? (
@@ -113,11 +176,11 @@ export default function FileBrowser({
                       if (e.key === "Escape") setRenaming(null);
                     }}
                     onBlur={() => commitRename(path)}
-                    className="min-w-0 flex-1 rounded border border-mint bg-cream px-1.5 py-0.5 text-sm text-ink focus:outline-none"
+                    className="min-w-0 flex-1 rounded border border-mint bg-white px-1.5 py-0.5 text-sm text-ink focus:outline-none"
                   />
                 ) : (
                   <span
-                    title={path + " (double-click to rename)"}
+                    title={path + (isMain ? " (main file)" : "") + " — double-click to rename"}
                     onDoubleClick={() => startRename(path)}
                     className="min-w-0 flex-1 truncate text-sm text-ink"
                   >
@@ -125,25 +188,60 @@ export default function FileBrowser({
                   </span>
                 )}
 
-                <button
-                  title="Delete file"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(path);
-                  }}
-                  className="shrink-0 rounded px-1 text-stone opacity-0 transition-opacity hover:bg-red-100 hover:text-red-600 group-hover:opacity-100"
-                >
-                  ×
-                </button>
+                {isMain ? (
+                  <span
+                    title="Build target"
+                    className="shrink-0 rounded bg-mint px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-ink"
+                  >
+                    main
+                  </span>
+                ) : path.endsWith(".tex") && !isRenaming ? (
+                  <button
+                    title="Set as main file"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSetMain(path);
+                    }}
+                    className="shrink-0 rounded border border-ink/20 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-stone opacity-0 transition-opacity hover:bg-mint hover:text-ink group-hover:opacity-100"
+                  >
+                    main
+                  </button>
+                ) : null}
+
+                {!isRenaming && (
+                  <>
+                    <button
+                      title="Rename file"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        startRename(path);
+                      }}
+                      className="shrink-0 rounded p-0.5 text-stone opacity-0 transition-opacity hover:bg-peach/60 hover:text-ink group-hover:opacity-100"
+                    >
+                      <IconPencil className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      title="Delete file"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete(path);
+                      }}
+                      className="shrink-0 rounded p-0.5 text-stone opacity-0 transition-opacity hover:bg-red-100 hover:text-red-600 group-hover:opacity-100"
+                    >
+                      <IconTrash className="h-3.5 w-3.5" />
+                    </button>
+                  </>
+                )}
               </div>
             </li>
           );
         })}
       </ul>
 
-      <div className="border-t border-ink/10 p-2">
+      <div className="shrink-0 border-t border-ink/10 p-2">
         <div className="flex items-center gap-1.5">
           <input
+            id="new-file-input"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => {
@@ -161,10 +259,48 @@ export default function FileBrowser({
           </button>
         </div>
         <p className="mt-1.5 text-[11px] leading-snug text-stone">
-          Double-click a name to rename. A .bib file triggers bibtex8
-          automatically.
+          Upload or drag files in — they stay in your browser. Double-click a
+          name to rename. A .bib file triggers bibtex8 automatically.
         </p>
       </div>
     </aside>
   );
+}
+
+const IMAGE_EXT = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "svg",
+  "tif",
+  "tiff",
+  "bmp",
+  "avif",
+]);
+
+export function kindOf(path: string, isBinary: boolean): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "tex") return "tex";
+  if (ext === "bib") return "bib";
+  if (ext === "pdf") return "pdf";
+  if (IMAGE_EXT.has(ext) || isBinary) return "image";
+  return "other";
+}
+
+export function fileIcon(path: string, isBinary: boolean) {
+  const kind = kindOf(path, isBinary);
+  switch (kind) {
+    case "tex":
+      return <IconFileTex className="h-4 w-4" />;
+    case "bib":
+      return <IconFileBib className="h-4 w-4" />;
+    case "pdf":
+      return <IconFilePdf className="h-4 w-4" />;
+    case "image":
+      return <IconFileImage className="h-4 w-4" />;
+    default:
+      return <IconFile className="h-4 w-4" />;
+  }
 }

@@ -126,12 +126,15 @@ export class BusyTexCompiler {
   }
 
   /**
-   * Compile a project of files (a map of path → contents). The build
-   * targets mainTexPath; bibtex8 runs automatically when any file is a
-   * .bib (the pipeline detects it). pdf is null when compilation failed.
+   * Compile a project of files (a map of path → contents). Text files are
+   * strings; binary files (images, PDFs, …) are byte arrays — the pipeline
+   * hands both to FS.writeFile, which writes each type as-is, so uploads
+   * can be used in the document (e.g. \includegraphics). The build targets
+   * mainTexPath; bibtex8 runs automatically when any file is a .bib (the
+   * pipeline detects it). pdf is null when compilation failed.
    */
   compile(
-    files: Record<string, string>,
+    files: Record<string, string | Uint8Array>,
     mainTexPath: string,
   ): Promise<CompileResult> {
     return new Promise<CompileResult>((resolve, reject) => {
