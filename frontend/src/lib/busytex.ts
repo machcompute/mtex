@@ -12,7 +12,7 @@
 //
 // Worker protocol (old, matching the build):
 //   init:    {busytex_js, busytex_wasm, texlive_js: [url], texmf_local, preload, verbose}
-//   compile: {files, main_tex_path, bibtex, verbose}  ->  {pdf, log}
+//   compile: {files, main_tex_path, bibtex, verbose}  ->  {pdf, log, synctex}
 //   logs:    {print: string}
 // There is no "initialized" handshake; the pipeline is built synchronously
 // on the init message and the first compile awaits asset loading, reporting
@@ -25,11 +25,13 @@ const TEXLIVE_BASE = "/api/texlive";
 // Bump whenever public/busytex/busytex_worker.js changes: browsers cache
 // classic worker scripts aggressively and may not refetch them even on a
 // hard reload. Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 5;
+const WORKER_VERSION = 6;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
   log: string;
+  /** Synctex data (gzipped by xetex) for PDF<->source navigation. */
+  synctex: Uint8Array | null;
 };
 
 type WorkerMessage = {
@@ -39,6 +41,7 @@ type WorkerMessage = {
   error?: string;
   pdf?: Uint8Array | null;
   log?: string | null;
+  synctex?: Uint8Array | null;
 };
 
 export class BusyTexCompiler {
@@ -151,6 +154,7 @@ export class BusyTexCompiler {
         resolve({
           pdf: msg.pdf ? Uint8Array.from(msg.pdf) : null,
           log: msg.log ?? "",
+          synctex: msg.synctex ? Uint8Array.from(msg.synctex) : null,
         });
       };
     });

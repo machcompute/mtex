@@ -2,9 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { type BeforeMount } from "@monaco-editor/react";
-import PdfViewer from "@/components/pdf-viewer";
+import type * as monaco from "monaco-editor";
+import PdfViewer, { type PdfViewerHandle } from "@/components/pdf-viewer";
 import FileBrowser from "@/components/file-browser";
 import { BusyTexCompiler } from "@/lib/busytex";
+import {
+  decodeSynctex,
+  findOutputForSource,
+  findSourceForPoint,
+  type SyncEntry,
+} from "@/lib/synctex";
 
 // Light Monaco theme using the HomeHub palette (no dark mode).
 const defineTheme: BeforeMount = (monaco) => {
@@ -94,12 +101,22 @@ export default function EditorPage() {
   const [log, setLog] = useState("");
   const [showLog, setShowLog] = useState(false);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  // Decoded synctex data for the current PDF (null = no navigation yet).
+  const [syncEntries, setSyncEntries] = useState<SyncEntry[] | null>(null);
 
   const compilerRef = useRef<BusyTexCompiler | null>(null);
   const busyRef = useRef(false);
   // Flips once the worker reports {loaded}; stray engine print lines after
   // that must not drag the status back to "Loading engine…".
   const engineReadyRef = useRef(false);
+  const pdfRef = useRef<PdfViewerHandle>(null);
+  const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  // IDs of the mint flash decoration (deltaDecorations returns string[]).
+  const flashDecorationsRef = useRef<string[] | null>(null);
+  const flashTimerRef = useRef<number | undefined>(undefined);
+  // Set when a PDF click lands in a file that isn't active yet; consumed by
+  // the effect below once Monaco has switched to that file's model.
+  const pendingJumpRef = useRef<{ file: string; line: number } | null>(null);
 
   useEffect(() => {
     const compiler = new BusyTexCompiler();
@@ -203,15 +220,102 @@ export default function EditorPage() {
         setPdf(result.pdf);
         setStatus({ kind: "done", ms: Math.round(performance.now() - started) });
       } else {
+        setPdf(null);
         setStatus({ kind: "error", message: "Compilation failed — see log" });
       }
       setLog(result.log);
+      // Decode synctex for PDF<->source navigation; a failed build has no
+      // usable map, and decoding is best-effort (bad bytes = no navigation).
+      if (result.pdf && result.synctex) {
+        setSyncEntries(await decodeSynctex(result.synctex).catch(() => null));
+      } else {
+        setSyncEntries(null);
+      }
     } catch (err) {
       setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     } finally {
       busyRef.current = false;
     }
   }, [files, mainPath]);
+
+  // --- PDF <-> source navigation (synctex) ------------------------------
+
+  /** Move the Monaco cursor to a line, reveal it and flash it mint. */
+  const revealLine = (line: number) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.setPosition({ lineNumber: line, column: 1 });
+    editor.setSelection({
+      startLineNumber: line,
+      startColumn: 1,
+      endLineNumber: line,
+      endColumn: Infinity,
+    });
+    editor.revealLineInCenter(line);
+    const prev = flashDecorationsRef.current;
+    flashDecorationsRef.current = editor.deltaDecorations(prev ?? [], [
+      {
+        range: { startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: 1 },
+        options: { isWholeLine: true, className: "sync-flash" },
+      },
+    ]);
+    window.clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = window.setTimeout(() => {
+      const ids = flashDecorationsRef.current;
+      if (ids) editor.deltaDecorations(ids, []);
+      flashDecorationsRef.current = null;
+    }, 1400);
+  };
+
+  /** Inverse sync: open the source line a PDF position points at. */
+  const jumpToSource = (entry: SyncEntry) => {
+    // The synctex file only names files TeX itself read; content coming
+    // from a .bbl (via \bibliography) is attributed to the .bbl, which is
+    // not part of the project — land on the \bibliography line instead.
+    const file = files[entry.file] !== undefined ? entry.file : mainPath;
+    let line = entry.line;
+    if (file !== entry.file) {
+      const main = files[mainPath] ?? "";
+      const bibLine = main
+        .split("\n")
+        .findIndex((l) => /\\bibliography\s*{/.test(l));
+      line = bibLine >= 0 ? bibLine + 1 : 1;
+    }
+    if (file === activePath) {
+      revealLine(line);
+    } else {
+      pendingJumpRef.current = { file, line };
+      setActivePath(file);
+    }
+  };
+
+  // Monaco switches the model in its own (child) effect, which runs before
+  // this one — so the model for `activePath` is live when we get here.
+  useEffect(() => {
+    const pending = pendingJumpRef.current;
+    if (!pending || pending.file !== activePath) return;
+    pendingJumpRef.current = null;
+    revealLine(pending.line);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePath]);
+
+  /** Inverse sync entry point: a click in the rendered PDF. */
+  const handlePageClick = (page: number, xFromLeftPts: number, yFromTopPts: number) => {
+    if (!syncEntries) return;
+    const entry = findSourceForPoint(syncEntries, page, xFromLeftPts, yFromTopPts);
+    if (entry) jumpToSource(entry);
+  };
+
+  /** Forward sync: jump the PDF to the editor's current line. */
+  const gotoPdf = () => {
+    const editor = editorRef.current;
+    if (!syncEntries || !editor) return;
+    const line =
+      editor.getSelection()?.startLineNumber ?? editor.getPosition()?.lineNumber;
+    if (!line) return;
+    const entry = findOutputForSource(syncEntries, activePath, line);
+    if (entry) pdfRef.current?.scrollToPosition(entry.page, entry.yTop);
+  };
 
   const statusText =
     status.kind === "idle"
@@ -237,6 +341,18 @@ export default function EditorPage() {
           className="rounded bg-mint px-4 py-1.5 text-sm font-medium text-ink transition-colors hover:bg-ink hover:text-mint disabled:cursor-not-allowed disabled:opacity-50"
         >
           Compile
+        </button>
+        <button
+          onClick={gotoPdf}
+          disabled={!syncEntries}
+          title={
+            syncEntries
+              ? "Jump the PDF to the line under the editor cursor"
+              : "Compile first to build the PDF<->source map"
+          }
+          className="rounded border border-stone/40 px-3 py-1.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Go to PDF
         </button>
         <span
           className={"min-w-0 flex-1 truncate text-xs " + (status.kind === "error" ? "text-red-600" : "text-stone")}
@@ -272,6 +388,9 @@ export default function EditorPage() {
               onChange={(value) =>
                 setFiles((f) => ({ ...f, [activePath]: value ?? "" }))
               }
+              onMount={(editor) => {
+                editorRef.current = editor;
+              }}
               theme="homehub"
               beforeMount={defineTheme}
               options={{
@@ -288,7 +407,7 @@ export default function EditorPage() {
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <PdfViewer data={pdf} />
+          <PdfViewer ref={pdfRef} data={pdf} onPageClick={handlePageClick} />
         </div>
       </div>
 

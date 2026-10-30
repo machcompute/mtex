@@ -205,8 +205,12 @@ class BusytexPipeline
         const source_name = main_tex_path.slice(1 + main_tex_path.lastIndexOf('/'));
         const tex_path = source_name;
         const [xdv_path, pdf_path, log_path, aux_path] = ['.xdv', '.pdf', '.log', '.aux'].map(ext => tex_path.replace('.tex', ext));
-        
-        const xetex = ['xetex', '--interaction=nonstopmode', '--halt-on-error', '--no-pdf', '--fmt', this.fmt_latex, tex_path].concat((this.verbose_args[verbose] || this.verbose_args[BusytexPipeline.VerboseSilent]).xetex);
+        // PATCH 4: -synctex=1 makes xetex write <job>.synctex.gz, which
+        // maps source lines to PDF positions (and back) for the page's
+        // PDF<->editor navigation. Read back below.
+        const [synctex_gz_path, synctex_plain_path] = ['.synctex.gz', '.synctex'].map(ext => tex_path.replace('.tex', ext));
+
+        const xetex = ['xetex', '--interaction=nonstopmode', '--halt-on-error', '--no-pdf', '--synctex=1', '--fmt', this.fmt_latex, tex_path].concat((this.verbose_args[verbose] || this.verbose_args[BusytexPipeline.VerboseSilent]).xetex);
         const bibtex8 = ['bibtex8', '--8bit', aux_path].concat((this.verbose_args[verbose] || this.verbose_args[BusytexPipeline.VerboseSilent]).bibtex8);
         const xdvipdfmx = ['xdvipdfmx', '-o', pdf_path, xdv_path].concat((this.verbose_args[verbose] || this.verbose_args[BusytexPipeline.VerboseSilent]).xdvipdfmx);
 
@@ -249,12 +253,17 @@ class BusytexPipeline
 
         const pdf = exit_code == 0 && FS.analyzePath(pdf_path).exists ? FS.readFile(pdf_path, {encoding: 'binary'}) : null;
         const log = FS.analyzePath(log_path).exists ? FS.readFile(log_path, {encoding : 'utf8'}) : null;
-        
+        // TeX writes the synctex file gzipped when built with zlib; the
+        // plain fallback covers builds without it.
+        const synctex = FS.analyzePath(synctex_gz_path).exists
+            ? FS.readFile(synctex_gz_path, {encoding : 'binary'})
+            : (FS.analyzePath(synctex_plain_path).exists ? FS.readFile(synctex_plain_path, {encoding : 'binary'}) : null);
+
         FS.unmount(this.project_dir);
         if(!this.preload)
             this.Module = null;
-        
-        return {pdf : pdf, log : log};
+
+        return {pdf : pdf, log : log, synctex : synctex};
     }
 }
 
@@ -266,3 +275,6 @@ class BusytexPipeline
 //      single-threaded (DedicatedWorkerGlobalScope).
 //   3. bibtex8 exit code 1 (warnings, .bbl still written) no longer
 //      aborts the build; see the loop in compile().
+//   4. xetex runs with -synctex=1 and compile() returns the
+//      <job>.synctex.gz bytes as `synctex` (null when unavailable),
+//      for PDF<->source navigation in the page.

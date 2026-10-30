@@ -22,3 +22,24 @@ body {
   color: var(--color-ink);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Mint text selection (also colors the highlighted line when the PDF
+   view jumps to a source line). */
+::selection {
+  background: #48e5c299;
+}
+
+/* PDF<->source sync: mint flash on the jumped-to editor line. Applied as
+   a Monaco full-line decoration, cleared ~1.4 s later. */
+.sync-flash {
+  animation: sync-flash 1.3s ease-out;
+}
+
+@keyframes sync-flash {
+  from {
+    background-color: #48e5c299;
+  }
+  to {
+    background-color: transparent;
+  }
+}
