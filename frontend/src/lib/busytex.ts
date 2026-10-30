@@ -25,6 +25,7 @@ export type CompileResult = {
 
 type WorkerMessage = {
   print?: string;
+  error?: string;
   pdf?: Uint8Array | null;
   log?: string | null;
 };
@@ -45,6 +46,18 @@ export class BusyTexCompiler {
       worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
         const msg = e.data;
         if (msg.print !== undefined && onLog) onLog(msg.print);
+        // Worker-reported failure (asset load, pipeline crash, …).
+        if (msg.error !== undefined) {
+          if (this.pending) {
+            const resolvePending = this.pending;
+            this.pending = null;
+            this.dispose();
+            resolvePending({ pdf: null, log: msg.error });
+          } else if (onLog) {
+            onLog(msg.error);
+          }
+          return;
+        }
         // Compile results only arrive while pending.
         if (this.pending && (msg.pdf !== undefined || msg.log !== undefined)) {
           const resolvePending = this.pending;
@@ -62,13 +75,16 @@ export class BusyTexCompiler {
         }
       };
 
+      // The worker destructures {data: {...}} — keep the wrapper.
       worker.postMessage({
-        busytex_js: `${TEXLIVE_BASE}/busytex.js`,
-        busytex_wasm: `${TEXLIVE_BASE}/busytex.wasm`,
-        texlive_js: [`${TEXLIVE_BASE}/texlive-basic.js`],
-        texmf_local: [] as string[],
-        preload: true,
-        verbose: "silent",
+        data: {
+          busytex_js: `${TEXLIVE_BASE}/busytex.js`,
+          busytex_wasm: `${TEXLIVE_BASE}/busytex.wasm`,
+          texlive_js: [`${TEXLIVE_BASE}/texlive-basic.js`],
+          texmf_local: [] as string[],
+          preload: true,
+          verbose: "silent",
+        },
       });
     }
     return Promise.resolve();
@@ -82,10 +98,12 @@ export class BusyTexCompiler {
         return;
       }
       this.worker.postMessage({
-        files: [{ path: "main.tex", contents: source }],
-        main_tex_path: "main.tex",
-        bibtex: null,
-        verbose: "silent",
+        data: {
+          files: [{ path: "main.tex", contents: source }],
+          main_tex_path: "main.tex",
+          bibtex: null,
+          verbose: "silent",
+        },
       });
       this.pending = (msg) => {
         // The pipeline reads the PDF back from MEMFS as a Uint8Array
