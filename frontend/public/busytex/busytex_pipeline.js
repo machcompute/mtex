@@ -1,3 +1,6 @@
+// Vendored from busytex build b16fdf28 (same commit as the pinned WASM
+// release), with patches. See the end-of-file note for the patch list.
+//
 //TODO: work with only files paths (without dir paths)
 //TODO: what happens if creating another pipeline (waiting data error?)
 //TODO: TEXMFLOG?
@@ -232,9 +235,15 @@ class BusytexPipeline
             exit_code = NOCLEANUP_callMain(Module, cmd, this.print);
             Module.HEAPU8.fill(0);
             Module.HEAPU8.set(mem_header);
-            
+
             Module.setStatus(`EXIT CODE: ${exit_code}`);
-            if(exit_code != 0)
+            // PATCH 3: bibtex8 exits 1 on warnings (missing fields etc.)
+            // while still writing a usable .bbl — only a real error (2)
+            // should abort the build. Upstream broke on any non-zero
+            // code, which turned every bibtex warning into a failed
+            // compile with no PDF.
+            const is_bibtex = cmd[0] === 'bibtex8';
+            if(exit_code != 0 && !(is_bibtex && exit_code == 1))
                 break;
         }
 
@@ -248,3 +257,12 @@ class BusytexPipeline
         return {pdf : pdf, log : log};
     }
 }
+
+// ---------------------------------------------------------------------------
+// Patch list (vs. upstream b16fdf28):
+//   1. locateFile() maps <package>.js -> <package>.data so the 72 MB
+//      texlive data package is fetched from the same (proxied) URL.
+//   2. ScriptLoaderWorker uses importScripts() so the worker stays
+//      single-threaded (DedicatedWorkerGlobalScope).
+//   3. bibtex8 exit code 1 (warnings, .bbl still written) no longer
+//      aborts the build; see the loop in compile().

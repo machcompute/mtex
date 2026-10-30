@@ -25,7 +25,7 @@ const TEXLIVE_BASE = "/api/texlive";
 // Bump whenever public/busytex/busytex_worker.js changes: browsers cache
 // classic worker scripts aggressively and may not refetch them even on a
 // hard reload. Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 4;
+const WORKER_VERSION = 5;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -122,17 +122,27 @@ export class BusyTexCompiler {
     return Promise.resolve();
   }
 
-  /** Compile a LaTeX source string; pdf is null when compilation failed. */
-  compile(source: string): Promise<CompileResult> {
+  /**
+   * Compile a project of files (a map of path → contents). The build
+   * targets mainTexPath; bibtex8 runs automatically when any file is a
+   * .bib (the pipeline detects it). pdf is null when compilation failed.
+   */
+  compile(
+    files: Record<string, string>,
+    mainTexPath: string,
+  ): Promise<CompileResult> {
     return new Promise<CompileResult>((resolve, reject) => {
       if (!this.worker) {
         reject(new Error("compiler not initialized"));
         return;
       }
       this.worker.postMessage({
-        files: [{ path: "main.tex", contents: source }],
-        main_tex_path: "main.tex",
-        bibtex: null,
+        files: Object.entries(files).map(([path, contents]) => ({
+          path,
+          contents,
+        })),
+        main_tex_path: mainTexPath,
+        bibtex: null, // auto-run bibtex8 when a .bib is present
         verbose: "silent",
       });
       this.pending = (msg) => {

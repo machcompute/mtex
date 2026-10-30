@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { type BeforeMount } from "@monaco-editor/react";
 import PdfViewer from "@/components/pdf-viewer";
+import FileBrowser from "@/components/file-browser";
 import { BusyTexCompiler } from "@/lib/busytex";
 
 // Light Monaco theme using the HomeHub palette (no dark mode).
@@ -33,8 +34,13 @@ const defineTheme: BeforeMount = (monaco) => {
   });
 };
 
-const DEFAULT_SOURCE = `\\documentclass{article}
-\\usepackage[utf8]{inputenc}
+const DEFAULT_MAIN = "main.tex";
+
+// Default project: a two-file bibtex example, so multi-file compilation and
+// bibtex8 (the pipeline auto-runs it whenever a .bib is present) work out of
+// the box.
+const DEFAULT_FILES: Record<string, string> = {
+  [DEFAULT_MAIN]: `\\documentclass{article}
 \\usepackage{amsmath}
 
 \\title{HomeHub LaTeX}
@@ -45,13 +51,33 @@ const DEFAULT_SOURCE = `\\documentclass{article}
 \\maketitle
 
 Hello from a \\textbf{full TeX Live} running in your browser.
+Citations are resolved by bibtex8: Euler's classic
+\\cite{euler1748} and Knuth's \\cite{knuth1984}.
 
 \\begin{equation}
   e^{i\\pi} + 1 = 0
 \\end{equation}
 
+\\bibliographystyle{plain}
+\\bibliography{refs}
+
 \\end{document}
-`;
+`,
+  "refs.bib": `@article{euler1748,
+  author  = {Euler, Leonhard},
+  title   = {Introductio in analysin infinitorum},
+  journal = {Genevae},
+  year    = {1748},
+}
+
+@book{knuth1984,
+  author    = {Knuth, Donald E.},
+  title     = {The {\\TeX}book},
+  publisher = {Addison-Wesley},
+  year      = {1984},
+}
+`,
+};
 
 type Status =
   | { kind: "idle" }
@@ -61,7 +87,9 @@ type Status =
   | { kind: "error"; message: string };
 
 export default function EditorPage() {
-  const [source, setSource] = useState(DEFAULT_SOURCE);
+  const [files, setFiles] = useState<Record<string, string>>(DEFAULT_FILES);
+  const [activePath, setActivePath] = useState(DEFAULT_MAIN);
+  const [mainPath, setMainPath] = useState(DEFAULT_MAIN);
   const [pdf, setPdf] = useState<Uint8Array | null>(null);
   const [log, setLog] = useState("");
   const [showLog, setShowLog] = useState(false);
@@ -69,19 +97,30 @@ export default function EditorPage() {
 
   const compilerRef = useRef<BusyTexCompiler | null>(null);
   const busyRef = useRef(false);
+  // Flips once the worker reports {loaded}; stray engine print lines after
+  // that must not drag the status back to "Loading engine…".
+  const engineReadyRef = useRef(false);
 
   useEffect(() => {
     const compiler = new BusyTexCompiler();
     compilerRef.current = compiler;
     compiler.init(
       (line) => {
-        setStatus((s) =>
-          s.kind === "compiling"
-            ? { kind: "compiling", line: lastLine(line, s.line) }
-            : { kind: "loading", line: lastLine(line, "") },
-        );
+        setStatus((s) => {
+          if (s.kind === "compiling")
+            return { kind: "compiling", line: lastLine(line, s.line) };
+          // Terminal states survive late print lines (the engine can emit
+          // trailing output after a successful compile).
+          if (engineReadyRef.current || s.kind === "done" || s.kind === "error")
+            return s;
+          return {
+            kind: "loading",
+            line: lastLine(line, s.kind === "loading" ? s.line : ""),
+          };
+        });
       },
       () => {
+        engineReadyRef.current = true;
         // Engine finished its background preload; stop showing
         // "Loading engine…" (unless a compile already started).
         setStatus((s) => (s.kind === "loading" ? { kind: "idle" } : s));
@@ -90,16 +129,76 @@ export default function EditorPage() {
     return () => compiler.dispose();
   }, []);
 
+  const activeSource = files[activePath] ?? "";
+
+  // --- file operations -------------------------------------------------
+
+  const addFile = (name: string) => {
+    const path = normalizeName(name);
+    if (!path || files[path] !== undefined) {
+      setStatus({
+        kind: "error",
+        message: `Cannot create “${name}” — use a flat name (no folders), not already taken`,
+      });
+      return;
+    }
+    setFiles((f) => ({ ...f, [path]: "" }));
+    setActivePath(path);
+  };
+
+  const renameFile = (oldPath: string, newName: string) => {
+    const path = normalizeName(newName);
+    if (!path || path === oldPath) return;
+    if (files[path] !== undefined) {
+      setStatus({
+        kind: "error",
+        message: `Cannot rename to “${newName}” — name already taken`,
+      });
+      return;
+    }
+    setFiles((f) => {
+      const next: Record<string, string> = {};
+      for (const [k, v] of Object.entries(f)) next[k === oldPath ? path : k] = v;
+      return next;
+    });
+    setActivePath((p) => (p === oldPath ? path : p));
+    setMainPath((m) => (m === oldPath ? path : m));
+  };
+
+  const deleteFile = (path: string) => {
+    const rest = Object.keys(files).filter((p) => p !== path);
+    const nextMain =
+      path === mainPath ? (rest.find((p) => p.endsWith(".tex")) ?? rest[0] ?? "") : mainPath;
+    setFiles((f) => {
+      const next = { ...f };
+      delete next[path];
+      return next;
+    });
+    setMainPath(nextMain);
+    setActivePath((p) => (p === path ? nextMain : p));
+  };
+
+  // --- compile ----------------------------------------------------------
+
   const compile = useCallback(async () => {
     const compiler = compilerRef.current;
     if (!compiler || busyRef.current) return;
+    if (!mainPath || files[mainPath] === undefined) {
+      setStatus({
+        kind: "error",
+        message: "No main .tex file — add one and mark it “main”",
+      });
+      return;
+    }
     busyRef.current = true;
     setPdf(null);
     setStatus({ kind: "compiling", line: "preparing…" });
     const started = performance.now();
     try {
       await compiler.init();
-      const result = await compiler.compile(source);
+      // All files go to the worker; the pipeline runs bibtex8 itself when
+      // any of them is a .bib.
+      const result = await compiler.compile(files, mainPath);
       if (result.pdf) {
         setPdf(result.pdf);
         setStatus({ kind: "done", ms: Math.round(performance.now() - started) });
@@ -112,7 +211,7 @@ export default function EditorPage() {
     } finally {
       busyRef.current = false;
     }
-  }, [source]);
+  }, [files, mainPath]);
 
   const statusText =
     status.kind === "idle"
@@ -153,21 +252,40 @@ export default function EditorPage() {
       </header>
 
       <div className="flex min-h-0 flex-1">
+        <FileBrowser
+          files={Object.keys(files).sort()}
+          activePath={activePath}
+          mainPath={mainPath}
+          onOpen={setActivePath}
+          onAdd={addFile}
+          onRename={renameFile}
+          onDelete={deleteFile}
+          onSetMain={setMainPath}
+        />
         <div className="min-w-0 flex-1 border-r border-ink/10">
-          <Editor
-            height="100%"
-            defaultLanguage="latex"
-            value={source}
-            onChange={(value) => setSource(value ?? "")}
-            theme="homehub"
-            beforeMount={defineTheme}
-            options={{
-              fontSize: 14,
-              minimap: { enabled: false },
-              wordWrap: "on",
-              automaticLayout: true,
-            }}
-          />
+          {activePath ? (
+            <Editor
+              height="100%"
+              path={activePath}
+              defaultLanguage="latex"
+              value={activeSource}
+              onChange={(value) =>
+                setFiles((f) => ({ ...f, [activePath]: value ?? "" }))
+              }
+              theme="homehub"
+              beforeMount={defineTheme}
+              options={{
+                fontSize: 14,
+                minimap: { enabled: false },
+                wordWrap: "on",
+                automaticLayout: true,
+              }}
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm text-stone">
+              No file selected — add one on the left.
+            </div>
+          )}
         </div>
         <div className="min-w-0 flex-1">
           <PdfViewer data={pdf} />
@@ -187,4 +305,14 @@ function lastLine(line: string, prev: string) {
   const trimmed = line.trim();
   if (trimmed.length <= 80) return trimmed;
   return prev.length > trimmed.length ? prev : trimmed.slice(0, 80) + "…";
+}
+
+// Flat file names only: the busytex pipeline writes straight into the
+// working directory, and the file browser has no folder support.
+function normalizeName(name: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes("/") || trimmed.includes("\\") || trimmed.includes(".."))
+    return null;
+  return trimmed;
 }
