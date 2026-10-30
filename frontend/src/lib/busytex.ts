@@ -1,8 +1,10 @@
 "use client";
 
 // Wraps the busytex WebAssembly worker (full TeX Live compiled to WASM).
-// The heavy assets (busytex.js/.wasm, texlive-basic.js/.data) are served by
-// the Go backend at /api/texlive/ and cached there on first use.
+// The heavy assets (busytex.js/.wasm, texlive-basic.js/.data) are served
+// by the Go backend and proxied same-origin through /api/texlive — the
+// worker loads two of them with importScripts(), which browsers only allow
+// for same-origin URLs, so the browser can't fetch :8080 directly.
 //
 // The worker + pipeline files in /busytex/ are from the same busytex commit
 // as the pinned release (build_b16fdf28) — that build runs xelatex via
@@ -16,7 +18,14 @@
 // on the init message and the first compile awaits asset loading, reporting
 // progress through print messages.
 
-const TEXLIVE_BASE = "http://localhost:8080/api/texlive";
+// Same origin: src/app/api/texlive/[name]/route.ts proxies to the Go
+// backend, which downloads from the pinned release and caches locally.
+const TEXLIVE_BASE = "/api/texlive";
+
+// Bump whenever public/busytex/busytex_worker.js changes: browsers cache
+// classic worker scripts aggressively and may not refetch them even on a
+// hard reload. Keep in sync with SCRIPT_VERSION in busytex_worker.js.
+const WORKER_VERSION = 2;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -24,6 +33,7 @@ export type CompileResult = {
 };
 
 type WorkerMessage = {
+  ready?: boolean;
   print?: string;
   error?: string;
   pdf?: Uint8Array | null;
@@ -33,28 +43,35 @@ type WorkerMessage = {
 export class BusyTexCompiler {
   private worker: Worker | null = null;
   private pending: ((msg: WorkerMessage) => void) | null = null;
+  private onLog: ((line: string) => void) | null = null;
   private disposed = false;
 
-  constructor(private workerUrl = "/busytex/busytex_worker.js") {}
+  constructor(private workerUrl = `/busytex/busytex_worker.js?v=${WORKER_VERSION}`) {}
 
   /** Create the worker and send the init message. */
   init(onLog?: (line: string) => void): Promise<void> {
+    this.onLog = onLog ?? this.onLog;
     if (!this.worker) {
       const worker = new Worker(this.workerUrl);
       this.worker = worker;
 
       worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
         const msg = e.data;
-        if (msg.print !== undefined && onLog) onLog(msg.print);
+        if (msg.ready !== undefined) {
+          console.debug("[busytex] worker ready");
+          return;
+        }
+        if (msg.print !== undefined && this.onLog) this.onLog(msg.print);
         // Worker-reported failure (asset load, pipeline crash, …).
         if (msg.error !== undefined) {
+          console.error("[busytex] worker error:\n" + msg.error);
           if (this.pending) {
             const resolvePending = this.pending;
             this.pending = null;
             this.dispose();
             resolvePending({ pdf: null, log: msg.error });
-          } else if (onLog) {
-            onLog(msg.error);
+          } else if (this.onLog) {
+            this.onLog(msg.error);
           }
           return;
         }
@@ -65,13 +82,18 @@ export class BusyTexCompiler {
           resolvePending(msg);
         }
       };
+      // The worker script itself failed to load or crashed — its own
+      // {error} channel can't report that, so surface it here.
       worker.onerror = (e) => {
-        const message = e.message || "worker error";
+        const message = `worker crashed${e.message ? ": " + e.message : ""}`;
+        console.error("[busytex] worker error event:", e);
         if (this.pending) {
           const resolvePending = this.pending;
           this.pending = null;
           this.dispose();
           resolvePending({ pdf: null, log: message });
+        } else if (this.onLog) {
+          this.onLog(message);
         }
       };
 

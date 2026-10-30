@@ -41,7 +41,7 @@ func handleTexlive(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -49,13 +49,15 @@ func handleTexlive(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/texlive/")
 	src, ok := texliveAssets[name]
 	if !ok {
+		log.Printf("texlive: unknown asset %q", name)
 		http.Error(w, "unknown texlive asset", http.StatusNotFound)
 		return
 	}
 
 	cacheDir := texliveCacheDir()
 	cachePath := filepath.Join(cacheDir, name)
-	if _, err := os.Stat(cachePath); err == nil {
+	if info, err := os.Stat(cachePath); err == nil {
+		log.Printf("texlive: serving %s (%d bytes, cached)", name, info.Size())
 		http.ServeFile(w, r, cachePath)
 		return
 	}

@@ -88,7 +88,7 @@ export default function EditorPage() {
     if (!compiler || busyRef.current) return;
     busyRef.current = true;
     setPdf(null);
-    setStatus({ kind: "compiling", line: "compiling…" });
+    setStatus({ kind: "compiling", line: "preparing…" });
     const started = performance.now();
     try {
       await compiler.init();
