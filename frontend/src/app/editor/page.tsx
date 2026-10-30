@@ -73,13 +73,20 @@ export default function EditorPage() {
   useEffect(() => {
     const compiler = new BusyTexCompiler();
     compilerRef.current = compiler;
-    compiler.init((line) => {
-      setStatus((s) =>
-        s.kind === "compiling"
-          ? { kind: "compiling", line: lastLine(line, s.line) }
-          : { kind: "loading", line: lastLine(line, "") },
-      );
-    });
+    compiler.init(
+      (line) => {
+        setStatus((s) =>
+          s.kind === "compiling"
+            ? { kind: "compiling", line: lastLine(line, s.line) }
+            : { kind: "loading", line: lastLine(line, "") },
+        );
+      },
+      () => {
+        // Engine finished its background preload; stop showing
+        // "Loading engine…" (unless a compile already started).
+        setStatus((s) => (s.kind === "loading" ? { kind: "idle" } : s));
+      },
+    );
     return () => compiler.dispose();
   }, []);
 
@@ -109,7 +116,7 @@ export default function EditorPage() {
 
   const statusText =
     status.kind === "idle"
-      ? "Ready. The TeX engine loads on first compile (~100 MB one-time download)."
+      ? "Ready."
       : status.kind === "loading"
         ? `Loading engine… ${status.line}`
         : status.kind === "compiling"
@@ -127,7 +134,7 @@ export default function EditorPage() {
         </h1>
         <button
           onClick={compile}
-          disabled={status.kind === "compiling" || status.kind === "loading"}
+          disabled={status.kind === "compiling"}
           className="rounded bg-mint px-4 py-1.5 text-sm font-medium text-ink transition-colors hover:bg-ink hover:text-mint disabled:cursor-not-allowed disabled:opacity-50"
         >
           Compile

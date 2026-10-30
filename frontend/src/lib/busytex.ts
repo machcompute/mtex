@@ -25,7 +25,7 @@ const TEXLIVE_BASE = "/api/texlive";
 // Bump whenever public/busytex/busytex_worker.js changes: browsers cache
 // classic worker scripts aggressively and may not refetch them even on a
 // hard reload. Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 2;
+const WORKER_VERSION = 4;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -34,6 +34,7 @@ export type CompileResult = {
 
 type WorkerMessage = {
   ready?: boolean;
+  loaded?: boolean;
   print?: string;
   error?: string;
   pdf?: Uint8Array | null;
@@ -44,13 +45,18 @@ export class BusyTexCompiler {
   private worker: Worker | null = null;
   private pending: ((msg: WorkerMessage) => void) | null = null;
   private onLog: ((line: string) => void) | null = null;
+  private onReady: (() => void) | null = null;
   private disposed = false;
 
   constructor(private workerUrl = `/busytex/busytex_worker.js?v=${WORKER_VERSION}`) {}
 
   /** Create the worker and send the init message. */
-  init(onLog?: (line: string) => void): Promise<void> {
+  init(
+    onLog?: (line: string) => void,
+    onReady?: () => void,
+  ): Promise<void> {
     this.onLog = onLog ?? this.onLog;
+    this.onReady = onReady ?? this.onReady;
     if (!this.worker) {
       const worker = new Worker(this.workerUrl);
       this.worker = worker;
@@ -59,6 +65,11 @@ export class BusyTexCompiler {
         const msg = e.data;
         if (msg.ready !== undefined) {
           console.debug("[busytex] worker ready");
+          return;
+        }
+        if (msg.loaded !== undefined) {
+          console.debug("[busytex] engine loaded");
+          if (this.onReady) this.onReady();
           return;
         }
         if (msg.print !== undefined && this.onLog) this.onLog(msg.print);
@@ -97,16 +108,15 @@ export class BusyTexCompiler {
         }
       };
 
-      // The worker destructures {data: {...}} — keep the wrapper.
+      // The worker reads evt.data and expects the fields at the top level
+      // (the old busytex protocol posts plain message objects, no wrapper).
       worker.postMessage({
-        data: {
-          busytex_js: `${TEXLIVE_BASE}/busytex.js`,
-          busytex_wasm: `${TEXLIVE_BASE}/busytex.wasm`,
-          texlive_js: [`${TEXLIVE_BASE}/texlive-basic.js`],
-          texmf_local: [] as string[],
-          preload: true,
-          verbose: "silent",
-        },
+        busytex_js: `${TEXLIVE_BASE}/busytex.js`,
+        busytex_wasm: `${TEXLIVE_BASE}/busytex.wasm`,
+        texlive_js: [`${TEXLIVE_BASE}/texlive-basic.js`],
+        texmf_local: [] as string[],
+        preload: true,
+        verbose: "silent",
       });
     }
     return Promise.resolve();
@@ -120,12 +130,10 @@ export class BusyTexCompiler {
         return;
       }
       this.worker.postMessage({
-        data: {
-          files: [{ path: "main.tex", contents: source }],
-          main_tex_path: "main.tex",
-          bibtex: null,
-          verbose: "silent",
-        },
+        files: [{ path: "main.tex", contents: source }],
+        main_tex_path: "main.tex",
+        bibtex: null,
+        verbose: "silent",
       });
       this.pending = (msg) => {
         // The pipeline reads the PDF back from MEMFS as a Uint8Array

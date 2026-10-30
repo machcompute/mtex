@@ -6,16 +6,20 @@
 //    the status line.
 // 2. {ready} is posted once the script has loaded, so the page (and the
 //    Node smoke test) can confirm the worker started.
+// 3. {loaded} is posted once the engine (wasm + texlive data) has
+//    finished loading, so the page can stop showing "Loading engine…".
 //
 // The worker + pipeline come from the same commit as the pinned WASM
-// release and speak the old protocol: messages arrive wrapped in
-// {data: {...}}.
+// release and speak the old protocol: the page posts plain message
+// objects ({busytex_js, …} or {files, …}) — no wrapper. Inside the
+// worker, onmessage receives a MessageEvent whose .data is that object,
+// so the fields are read from evt.data.
 //
 // Bump SCRIPT_VERSION whenever this file or busytex_pipeline.js changes —
 // browsers cache worker scripts aggressively and even a hard refresh may
 // not refetch them. Keep it in sync with WORKER_VERSION in
 // src/lib/busytex.ts.
-const SCRIPT_VERSION = 2;
+const SCRIPT_VERSION = 4;
 
 function fail(prefix, e)
 {
@@ -49,18 +53,25 @@ if(typeof BusytexPipeline === "undefined")
 
 postMessage({ready : true});
 
-onmessage = async ({data : {files, main_tex_path, bibtex, busytex_wasm, busytex_js, texlive_js, texmf_local, preload, verbose}}) =>
+onmessage = async (evt) =>
 {
+    // Note: in a destructure pattern like {data : {…}}, `data` is a
+    // property NAME, not a variable — capture it explicitly or the
+    // reference below is a ReferenceError.
+    const data = evt && evt.data;
+    const {files, main_tex_path, bibtex, busytex_wasm, busytex_js, texlive_js, texmf_local, preload, verbose} = data || {};
     try
     {
         if(busytex_wasm && busytex_js && texlive_js)
         {
             pipeline = new BusytexPipeline(busytex_js, busytex_wasm, texlive_js, texmf_local, msg => postMessage({print : msg}), preload, BusytexPipeline.ScriptLoaderWorker);
-            // The constructor kicks off the module preload; forward its
-            // rejection to the page instead of leaving it unhandled (and
-            // invisible).
+            // The constructor kicks off the module preload. Tell the page
+            // when the engine is ready ({loaded}), and forward any load
+            // failure instead of leaving it unhandled (and invisible).
             if(pipeline.Module)
-                pipeline.Module.catch(e => fail("engine failed to load:", e));
+                pipeline.Module
+                    .then(() => postMessage({loaded : true}))
+                    .catch(e => fail("engine failed to load:", e));
         }
         else if(files)
         {
