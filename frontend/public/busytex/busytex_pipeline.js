@@ -230,7 +230,11 @@ class BusytexPipeline
        
         if(bibtex == null)
             bibtex = files.some(({path, contents}) => contents != null && path.endsWith('.bib'));
-        const cmds = bibtex ? [xetex, bibtex8, xetex, xetex, xdvipdfmx] : [xetex, xdvipdfmx];
+        // PATCH 5: a second xetex pass also without bibtex, so \ref/\label
+        // (incl. \subref from subcaption) resolve from the first pass's .aux.
+        // Upstream ran xetex only once in that case — every cross-reference
+        // printed ?? and stayed that way.
+        const cmds = bibtex ? [xetex, bibtex8, xetex, xetex, xdvipdfmx] : [xetex, xetex, xdvipdfmx];
         
         let exit_code = 0;
         const mem_header = Uint8Array.from(Module.HEAPU8.slice(0, this.mem_header_size));
@@ -278,3 +282,5 @@ class BusytexPipeline
 //   4. xetex runs with -synctex=1 and compile() returns the
 //      <job>.synctex.gz bytes as `synctex` (null when unavailable),
 //      for PDF<->source navigation in the page.
+//   5. A second xetex pass runs even without bibtex, so cross-references
+//      resolve; see the cmds line in compile().

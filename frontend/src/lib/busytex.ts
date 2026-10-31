@@ -22,10 +22,68 @@
 // backend, which downloads from the pinned release and caches locally.
 const TEXLIVE_BASE = "/api/texlive";
 
+// The pinned texlive-basic set (~320 packages) lacks `caption` /
+// `subcaption` (and friends), so documents using \subcaption fail with
+// "File `subcaption.sty' not found". The package is vendored in
+// public/texmf-extra/texmf-dist/ and injected into every compile as a local
+// TeX tree: texmf_local: ["texmf-extra"] below makes the pipeline append
+// <project>/texmf-extra/texmf-dist to TEXMFDIST, so the in-worker paths
+// below mirror the on-disk layout one-for-one. Fetched once, then served
+// from the browser cache.
+const EXTRA_TEXMF_DIR = "texmf-extra";
+const EXTRA_STY_FILES = [
+  "texmf-dist/tex/latex/caption/bicaption.sty",
+  "texmf-dist/tex/latex/caption/caption.sty",
+  "texmf-dist/tex/latex/caption/caption3.sty",
+  "texmf-dist/tex/latex/caption/ltcaption.sty",
+  "texmf-dist/tex/latex/caption/subcaption.sty",
+];
+
+type ExtraEntry = { path: string; contents: string | null };
+
+let extraFilesPromise: Promise<ExtraEntry[]> | null = null;
+
+function extraFiles(): Promise<ExtraEntry[]> {
+  if (!extraFilesPromise) {
+    extraFilesPromise = (async () => {
+      const texts = await Promise.all(
+        EXTRA_STY_FILES.map((rel) =>
+          fetch(`${EXTRA_TEXMF_DIR}/${rel}`).then((r) => {
+            if (!r.ok) throw new Error(`cannot load ${rel}: ${r.status}`);
+            return r.text();
+          }),
+        ),
+      );
+      // Directory entries (contents: null) are written before files — the
+      // pipeline sorts by path, and a directory path is a string prefix of
+      // everything inside it, so each level exists when its children are
+      // written (FS.writeFile does not create parents).
+      const dirs = new Set<string>([EXTRA_TEXMF_DIR]);
+      for (const rel of EXTRA_STY_FILES) {
+        const parts = rel.split("/");
+        for (let i = 1; i < parts.length; i++)
+          dirs.add(EXTRA_TEXMF_DIR + "/" + parts.slice(0, i).join("/"));
+      }
+      return [
+        ...[...dirs].map((path) => ({ path, contents: null })),
+        ...EXTRA_STY_FILES.map((rel, i) => ({
+          path: EXTRA_TEXMF_DIR + "/" + rel,
+          contents: texts[i],
+        })),
+      ];
+    })();
+    extraFilesPromise.catch(() => {
+      // Don't cache a failure — the next compile retries.
+      extraFilesPromise = null;
+    });
+  }
+  return extraFilesPromise;
+}
+
 // Bump whenever public/busytex/busytex_worker.js changes: browsers cache
 // classic worker scripts aggressively and may not refetch them even on a
 // hard reload. Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 6;
+const WORKER_VERSION = 7;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -117,7 +175,10 @@ export class BusyTexCompiler {
         busytex_js: `${TEXLIVE_BASE}/busytex.js`,
         busytex_wasm: `${TEXLIVE_BASE}/busytex.wasm`,
         texlive_js: [`${TEXLIVE_BASE}/texlive-basic.js`],
-        texmf_local: [] as string[],
+        // Extra local TeX tree: the vendored caption/subcaption package
+        // (see EXTRA_STY_FILES), written into <project>/texmf-extra by
+        // compile() and added to TEXMFDIST by the pipeline.
+        texmf_local: [EXTRA_TEXMF_DIR] as string[],
         preload: true,
         verbose: "silent",
       });
@@ -133,20 +194,31 @@ export class BusyTexCompiler {
    * mainTexPath; bibtex8 runs automatically when any file is a .bib (the
    * pipeline detects it). pdf is null when compilation failed.
    */
-  compile(
+  async compile(
     files: Record<string, string | Uint8Array>,
     mainTexPath: string,
   ): Promise<CompileResult> {
-    return new Promise<CompileResult>((resolve, reject) => {
-      if (!this.worker) {
-        reject(new Error("compiler not initialized"));
-        return;
-      }
-      this.worker.postMessage({
-        files: Object.entries(files).map(([path, contents]) => ({
-          path,
-          contents,
-        })),
+    if (!this.worker) {
+      throw new Error("compiler not initialized");
+    }
+    // Add the vendored caption package to the project. A load failure
+    // (should be impossible — same-origin static files) must not block
+    // compiling documents that don't need the package.
+    let extra: ExtraEntry[] = [];
+    try {
+      extra = await extraFiles();
+    } catch (e) {
+      console.error("[busytex] extra texmf files unavailable:", e);
+    }
+    return new Promise<CompileResult>((resolve) => {
+      this.worker!.postMessage({
+        files: [
+          ...Object.entries(files).map(([path, contents]) => ({
+            path,
+            contents,
+          })),
+          ...extra,
+        ],
         main_tex_path: mainTexPath,
         bibtex: null, // auto-run bibtex8 when a .bib is present
         verbose: "silent",
