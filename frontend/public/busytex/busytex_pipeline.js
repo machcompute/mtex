@@ -227,32 +227,54 @@ class BusytexPipeline
         const dirname = main_tex_path.slice(0, main_tex_path.length - source_name.length) || '.';
         const source_dir = PATH.join2(this.project_dir, dirname);
         FS.chdir(source_dir);
-       
+
+        const mem_header = Uint8Array.from(Module.HEAPU8.slice(0, this.mem_header_size));
+        const run = (cmd) => {
+            const code = NOCLEANUP_callMain(Module, cmd, this.print);
+            Module.HEAPU8.fill(0);
+            Module.HEAPU8.set(mem_header);
+            Module.setStatus(`EXIT CODE: ${code}`);
+            return code;
+        };
+
+        // First xetex pass always runs; it writes the .aux that tells us
+        // whether *this* document uses a bibtex-managed bibliography.
+        let exit_code = run(xetex);
+
         if(bibtex == null)
             bibtex = files.some(({path, contents}) => contents != null && path.endsWith('.bib'));
-        // PATCH 5: a second xetex pass also without bibtex, so \ref/\label
+        // PATCH 6: only run bibtex when the document actually declared a
+        // bibliography (\bibdata in the .aux). A project can hold a .bib —
+        // the default refs.bib, or one that came in with a folder upload —
+        // while the document being compiled never cites it; running bibtex
+        // then fatals ("no \bibdata") and kills a build that should succeed.
+        let bibtex_needed = false;
+        if(exit_code == 0 && bibtex)
+        {
+            const aux = FS.analyzePath(aux_path).exists
+                ? FS.readFile(aux_path, {encoding : 'utf8'})
+                : '';
+            bibtex_needed = /\\bibdata\b/.test(aux);
+        }
+        // PATCH 5: a second xetex pass (also without bibtex) so \ref/\label
         // (incl. \subref from subcaption) resolve from the first pass's .aux.
         // Upstream ran xetex only once in that case — every cross-reference
         // printed ?? and stayed that way.
-        const cmds = bibtex ? [xetex, bibtex8, xetex, xetex, xdvipdfmx] : [xetex, xetex, xdvipdfmx];
-        
-        let exit_code = 0;
-        const mem_header = Uint8Array.from(Module.HEAPU8.slice(0, this.mem_header_size));
-        for(const cmd of cmds)
+        const rest = bibtex_needed ? [bibtex8, xetex, xetex, xdvipdfmx] : [xetex, xetex, xdvipdfmx];
+        if(exit_code == 0)
         {
-            exit_code = NOCLEANUP_callMain(Module, cmd, this.print);
-            Module.HEAPU8.fill(0);
-            Module.HEAPU8.set(mem_header);
-
-            Module.setStatus(`EXIT CODE: ${exit_code}`);
-            // PATCH 3: bibtex8 exits 1 on warnings (missing fields etc.)
-            // while still writing a usable .bbl — only a real error (2)
-            // should abort the build. Upstream broke on any non-zero
-            // code, which turned every bibtex warning into a failed
-            // compile with no PDF.
-            const is_bibtex = cmd[0] === 'bibtex8';
-            if(exit_code != 0 && !(is_bibtex && exit_code == 1))
-                break;
+            for(const cmd of rest)
+            {
+                exit_code = run(cmd);
+                // PATCH 3: bibtex8 exits 1 on warnings (missing fields etc.)
+                // while still writing a usable .bbl — only a real error (2)
+                // should abort the build. Upstream broke on any non-zero
+                // code, which turned every bibtex warning into a failed
+                // compile with no PDF.
+                const is_bibtex = cmd[0] === 'bibtex8';
+                if(exit_code != 0 && !(is_bibtex && exit_code == 1))
+                    break;
+            }
         }
 
         const pdf = exit_code == 0 && FS.analyzePath(pdf_path).exists ? FS.readFile(pdf_path, {encoding: 'binary'}) : null;
@@ -284,3 +306,6 @@ class BusytexPipeline
 //      for PDF<->source navigation in the page.
 //   5. A second xetex pass runs even without bibtex, so cross-references
 //      resolve; see the cmds line in compile().
+//   6. bibtex8 runs only when the first xetex pass's .aux declares a
+//      bibliography (\bibdata), so a .bib in the project that the document
+//      never cites no longer fatals the build; see compile().

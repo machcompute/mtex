@@ -7,6 +7,7 @@ import {
   IconFileImage,
   IconFilePdf,
   IconFileTex,
+  IconFolder,
   IconPencil,
   IconPlus,
   IconTrash,
@@ -53,6 +54,7 @@ export default function FileBrowser({
   const [draft, setDraft] = useState("");
   const [dragging, setDragging] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dirInputRef = useRef<HTMLInputElement>(null);
 
   const add = () => {
     const name = newName.trim();
@@ -73,6 +75,7 @@ export default function FileBrowser({
   };
 
   const pickUpload = () => inputRef.current?.click();
+  const pickFolder = () => dirInputRef.current?.click();
 
   return (
     <aside
@@ -107,6 +110,21 @@ export default function FileBrowser({
           if (list.length) onUpload(list);
         }}
       />
+      {/* webkitdirectory makes the picker select a whole folder tree;
+          each File then carries a webkitRelativePath the page uses to
+          recreate the folder structure (top folder stripped). */}
+      <input
+        ref={dirInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        {...{ webkitdirectory: "" }}
+        onChange={(e) => {
+          const list = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (list.length) onUpload(list);
+        }}
+      />
 
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-ink/10 px-3">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
@@ -121,6 +139,13 @@ export default function FileBrowser({
             <IconUpload className="h-4 w-4" />
           </button>
           <button
+            onClick={pickFolder}
+            title="Upload a whole folder, recursively (kept in your browser)"
+            className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+          >
+            <IconFolder className="h-4 w-4" />
+          </button>
+          <button
             onClick={() => document.getElementById("new-file-input")?.focus()}
             title="New file"
             className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
@@ -132,7 +157,7 @@ export default function FileBrowser({
 
       {dragging > 0 && (
         <div className="border-b border-mint/50 bg-mint/20 px-3 py-1.5 text-xs font-medium text-ink">
-          Drop files to add them
+          Drop files or a folder to add them
         </div>
       )}
 
@@ -147,13 +172,16 @@ export default function FileBrowser({
           const isMain = path === mainPath;
           const isActive = path === activePath;
           const isRenaming = renaming === path;
+          const depth = path.split("/").length - 1;
           return (
             <li key={path} className="px-1.5 py-0.5">
               <div
                 className={
-                  "group flex cursor-pointer items-center gap-2 rounded px-2 py-1 " +
+                  "group flex cursor-pointer items-center gap-2 rounded py-1 pr-2 " +
                   (isActive ? "bg-mint/25" : "hover:bg-peach/25")
                 }
+                style={{ paddingLeft: 8 + depth * 10 }}
+                title={path.split("/").slice(0, -1).join("/")}
                 onClick={() => {
                   if (!isRenaming) onOpen(path);
                 }}
@@ -259,8 +287,9 @@ export default function FileBrowser({
           </button>
         </div>
         <p className="mt-1.5 text-[11px] leading-snug text-stone">
-          Upload or drag files in — they stay in your browser. Double-click a
-          name to rename. A .bib file triggers bibtex8 automatically.
+          Upload files or a whole folder (the folder icon), or drag them in —
+          they stay in your browser. Double-click a name to rename. A .bib
+          file triggers bibtex8 automatically.
         </p>
       </div>
     </aside>

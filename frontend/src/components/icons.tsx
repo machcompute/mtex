@@ -49,6 +49,14 @@ export function IconUpload({ className }: P) {
   );
 }
 
+export function IconFolder({ className }: P) {
+  return (
+    <Svg className={className}>
+      <path d="M2 4.6A1.6 1.6 0 0 1 3.6 3h2.6l1.5 1.6h4.7A1.6 1.6 0 0 1 14 6.2v4.8a1.6 1.6 0 0 1-1.6 1.6H3.6A1.6 1.6 0 0 1 2 11z" />
+    </Svg>
+  );
+}
+
 export function IconTrash({ className }: P) {
   return (
     <Svg className={className}>

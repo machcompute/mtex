@@ -54,23 +54,10 @@ function extraFiles(): Promise<ExtraEntry[]> {
           }),
         ),
       );
-      // Directory entries (contents: null) are written before files — the
-      // pipeline sorts by path, and a directory path is a string prefix of
-      // everything inside it, so each level exists when its children are
-      // written (FS.writeFile does not create parents).
-      const dirs = new Set<string>([EXTRA_TEXMF_DIR]);
-      for (const rel of EXTRA_STY_FILES) {
-        const parts = rel.split("/");
-        for (let i = 1; i < parts.length; i++)
-          dirs.add(EXTRA_TEXMF_DIR + "/" + parts.slice(0, i).join("/"));
-      }
-      return [
-        ...[...dirs].map((path) => ({ path, contents: null })),
-        ...EXTRA_STY_FILES.map((rel, i) => ({
-          path: EXTRA_TEXMF_DIR + "/" + rel,
-          contents: texts[i],
-        })),
-      ];
+      return EXTRA_STY_FILES.map((rel, i) => ({
+        path: EXTRA_TEXMF_DIR + "/" + rel,
+        contents: texts[i],
+      }));
     })();
     extraFilesPromise.catch(() => {
       // Don't cache a failure — the next compile retries.
@@ -83,7 +70,7 @@ function extraFiles(): Promise<ExtraEntry[]> {
 // Bump whenever public/busytex/busytex_worker.js changes: browsers cache
 // classic worker scripts aggressively and may not refetch them even on a
 // hard reload. Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 7;
+const WORKER_VERSION = 9;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -210,14 +197,29 @@ export class BusyTexCompiler {
     } catch (e) {
       console.error("[busytex] extra texmf files unavailable:", e);
     }
+
+    // The pipeline writes each entry with FS.mkdir (dir) or FS.writeFile
+    // (file), and FS.writeFile does not create parent directories — so a
+    // nested path (a folder upload, or the vendored tree) also needs its
+    // ancestor directories. A dir path is a string prefix of everything
+    // inside it, and the pipeline sorts by path, so dirs always land
+    // before their children.
+    const all = [
+      ...Object.entries(files).map(([path, contents]) => ({ path, contents })),
+      ...extra,
+    ];
+    const dirs = new Set<string>();
+    for (const { path } of all) {
+      const parts = path.split("/");
+      for (let i = 1; i < parts.length; i++)
+        dirs.add(parts.slice(0, i).join("/"));
+    }
+
     return new Promise<CompileResult>((resolve) => {
       this.worker!.postMessage({
         files: [
-          ...Object.entries(files).map(([path, contents]) => ({
-            path,
-            contents,
-          })),
-          ...extra,
+          ...[...dirs].map((path) => ({ path, contents: null as string | null })),
+          ...all,
         ],
         main_tex_path: mainTexPath,
         bibtex: null, // auto-run bibtex8 when a .bib is present

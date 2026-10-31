@@ -478,13 +478,26 @@ export default function EditorPage() {
   };
 
   // --- uploads (browser-only: File bytes are read locally, never posted) --
+  //
+  // Folder uploads (the folder button, or a dropped folder) arrive as one
+  // File per entry with a webkitRelativePath like "myproj/figs/a.png"; the
+  // top folder is stripped so the tree lands at the project root.
 
   const uploadFiles = (list: File[]) => {
     void (async () => {
-      let added = 0;
+      const added: Record<string, FileData> = {};
+      let firstOpen: string | null = null;
+      let skipped = 0;
       for (const f of list) {
-        const name = normalizeName(f.name);
-        if (!name) continue; // folder names etc.
+        const name =
+          f.webkitRelativePath
+            ? normalizePath(f.webkitRelativePath.split("/").slice(1).join("/"))
+            : normalizeName(f.name);
+        if (!name || name.startsWith(".")) continue; // junk paths, dotfiles
+        if (files[name] !== undefined) {
+          skipped++;
+          continue; // never overwrite existing work
+        }
         const dot = name.lastIndexOf(".");
         const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
         const isBinary = BINARY_EXT.has(ext);
@@ -496,14 +509,24 @@ export default function EditorPage() {
         } catch {
           continue; // unreadable file — skip it
         }
-        setFiles((prev) => ({ ...prev, [name]: data }));
-        setOpenPaths((o) => (o.includes(name) ? o : [...o, name]));
-        added++;
+        added[name] = data;
+        // Prefer a .tex file; otherwise the first text file.
+        if (!isBinary && (firstOpen === null || (name.endsWith(".tex") && !firstOpen.endsWith(".tex")))) {
+          firstOpen = name;
+        }
       }
-      if (added > 0) {
+      const count = Object.keys(added).length;
+      if (count > 0) {
+        setFiles((prev) => ({ ...prev, ...added }));
+        if (firstOpen) openPath(firstOpen);
         setNotice(
-          `Uploaded ${added} file${added === 1 ? "" : "s"} — kept in your browser`,
+          `Uploaded ${count} file${count === 1 ? "" : "s"} — kept in your browser` +
+            (skipped ? ` (${skipped} already existed, skipped)` : ""),
         );
+        window.clearTimeout(noticeTimerRef.current);
+        noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3000);
+      } else if (skipped > 0) {
+        setNotice(`Nothing uploaded — ${skipped} file${skipped === 1 ? " was" : "s were"} already in the project`);
         window.clearTimeout(noticeTimerRef.current);
         noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3000);
       }
@@ -948,12 +971,24 @@ function lastLine(line: string, prev: string) {
   return prev.length > trimmed.length ? prev : trimmed.slice(0, 80) + "…";
 }
 
-// Flat file names only: the busytex pipeline writes straight into the
-// working directory, and the file browser has no folder support.
+// Flat file names for manual entry (new file / rename).
 function normalizeName(name: string): string | null {
   const trimmed = name.trim();
   if (!trimmed) return null;
   if (trimmed.includes("/") || trimmed.includes("\\") || trimmed.includes(".."))
     return null;
   return trimmed;
+}
+
+// Nested paths from folder uploads (webkitRelativePath with the top folder
+// stripped): the pipeline writes them straight into the project tree, so
+// \includegraphics{figs/a.png} just works.
+function normalizePath(path: string): string | null {
+  const parts = path.split("/");
+  for (const p of parts) {
+    const trimmed = p.trim();
+    if (!trimmed || trimmed === "." || trimmed === "..") return null;
+    if (trimmed.includes("\\")) return null;
+  }
+  return parts.map((p) => p.trim()).join("/");
 }
