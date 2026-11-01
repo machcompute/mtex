@@ -10,7 +10,7 @@ download — we point at a system Chromium).
 npm run test:e2e            # all suites
 node e2e/folder.cjs         # one suite: recursive folder upload
 node e2e/rename.cjs         # one suite: nested-file rename / move
-node e2e/regression.cjs     # one suite: compile, citations, network audit, subcaption
+node e2e/regression.cjs     # one suite: compile, citations, network audit, vendored packages
 node e2e/firefox.cjs        # one suite: folder picker button flow in real Firefox
 ```
 
@@ -49,8 +49,9 @@ and a crashed run can't poison the next one. The first run downloads the
 - **regression.cjs** — default project compiles with bibtex citations
   resolved (no `??`), a network audit proves the app stays browser-only
   (no POST/PUT, only `/api/texlive/`, no foreign origins beyond the Monaco
-  CDN and `blob:`), and the vendored caption/subcaption package renders
-  subfigures and `\subref` correctly.
+  CDN and `blob:`), and the vendored packages work: caption/subcaption
+  renders subfigures and `\subref`, and algorithm2e compiles a numbered,
+  ruled algorithm with its `\ref` resolved.
 - **firefox.cjs** — the folder *button* in a real Firefox. Firefox honors
   `webkitdirectory` (MDN: supported; CanIUse: Firefox 50+), so the button
   opens a native folder picker; the suite drives the whole flow — click

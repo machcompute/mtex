@@ -22,16 +22,23 @@
 // backend, which downloads from the pinned release and caches locally.
 const TEXLIVE_BASE = "/api/texlive";
 
-// The pinned texlive-basic set (~320 packages) lacks `caption` /
-// `subcaption` (and friends), so documents using \subcaption fail with
-// "File `subcaption.sty' not found". The package is vendored in
-// public/texmf-extra/texmf-dist/ and injected into every compile as a local
+// The pinned texlive-basic set (~320 packages) lacks packages users
+// routinely \usepackage, so documents fail with "File `X.sty' not found".
+// Such packages are vendored in public/texmf-extra/texmf-dist/ (paths
+// mirroring a real TeX tree) and injected into every compile as a local
 // TeX tree: texmf_local: ["texmf-extra"] below makes the pipeline append
 // <project>/texmf-extra/texmf-dist to TEXMFDIST, so the in-worker paths
 // below mirror the on-disk layout one-for-one. Fetched once, then served
 // from the browser cache.
 const EXTRA_TEXMF_DIR = "texmf-extra";
 const EXTRA_STY_FILES = [
+  // algorithm2e and its default-loaded deps
+  // (ifthen/color ship in basic; endfloat/tocbibind are option-gated)
+  "texmf-dist/tex/latex/algorithm2e/algorithm2e.sty",
+  "texmf-dist/tex/latex/ifoddpage/ifoddpage.sty",
+  "texmf-dist/tex/latex/relsize/relsize.sty",
+  "texmf-dist/tex/latex/tools/xspace.sty",
+  // caption / subcaption (and friends)
   "texmf-dist/tex/latex/caption/bicaption.sty",
   "texmf-dist/tex/latex/caption/caption.sty",
   "texmf-dist/tex/latex/caption/caption3.sty",

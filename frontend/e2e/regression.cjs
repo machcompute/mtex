@@ -1,6 +1,6 @@
 // Regression: default project (bibtex citations), network audit
 // (browser-only, no data exfiltration), and the vendored
-// caption/subcaption package.
+// caption/subcaption and algorithm2e packages.
 const { Runner } = require("./helpers.cjs");
 
 const SUBDOC = [
@@ -22,6 +22,21 @@ const SUBDOC = [
   "\\end{subfigure}",
   "\\caption{Main caption}\\label{fig:main}",
   "\\end{figure}",
+  "\\end{document}",
+].join("\n");
+
+const ALGDOC = [
+  "\\documentclass{article}",
+  "\\usepackage[ruled,linesnumbered]{algorithm2e}",
+  "\\begin{document}",
+  "Body text before the algorithm.",
+  "\\begin{algorithm}[H]",
+  "\\KwIn{a value $x$}",
+  "\\KwOut{$x + 1$}",
+  "$x \\leftarrow x + 1$\\;",
+  "\\caption{Increment}\\label{alg:inc}",
+  "\\end{algorithm}",
+  "See Algorithm \\ref{alg:inc}.",
   "\\end{document}",
 ].join("\n");
 
@@ -113,6 +128,31 @@ const r = new Runner("reg");
     "subref resolved (no ?? in body)",
     !/\\?\?/.test(subText),
     subText.slice(0, 160),
+  );
+
+  // --- algorithm2e: the other vendored package --------------------------
+  await r.page.evaluate((doc) => {
+    const proj = {
+      v: 1,
+      projectName: "algo2e",
+      mainPath: "main.tex",
+      openPaths: ["main.tex"],
+      files: { "main.tex": doc },
+    };
+    localStorage.setItem("homehub-latex-project-v1", JSON.stringify(proj));
+  }, ALGDOC);
+  await r.page.reload({ waitUntil: "load" });
+  await r.waitReady();
+
+  const algStatus = await r.recompile();
+  r.ok("algorithm2e doc compiled", /Compiled in \d+ ms/.test(algStatus), algStatus);
+
+  const algText = await r.pdfText();
+  r.ok("algorithm caption in PDF", /Increment/.test(algText), algText.slice(0, 160));
+  r.ok(
+    "algorithm label resolved (no ??)",
+    !/\?\?/.test(algText),
+    algText.slice(0, 160),
   );
 
   console.log(
