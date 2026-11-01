@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Standalone CommonJS e2e scripts (see e2e/README.md).
+    "e2e/**",
   ]),
 ]);
 
