@@ -70,7 +70,7 @@ function extraFiles(): Promise<ExtraEntry[]> {
 // Bump whenever public/busytex/busytex_worker.js changes: browsers cache
 // classic worker scripts aggressively and may not refetch them even on a
 // hard reload. Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 9;
+const WORKER_VERSION = 10;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -94,18 +94,29 @@ export class BusyTexCompiler {
   private pending: ((msg: WorkerMessage) => void) | null = null;
   private onLog: ((line: string) => void) | null = null;
   private onReady: (() => void) | null = null;
+  private onError: ((msg: string) => void) | null = null;
   private disposed = false;
 
   constructor(private workerUrl = `/busytex/busytex_worker.js?v=${WORKER_VERSION}`) {}
 
-  /** Create the worker and send the init message. */
+  /**
+   * Create the worker and send the init message. Idempotent while a worker
+   * is alive. onError fires for failures outside a compile (an asset load
+   * failing during init, a worker crash) — the worker is disposed when it
+   * fires, and the next compile() recreates it.
+   */
   init(
     onLog?: (line: string) => void,
     onReady?: () => void,
+    onError?: (msg: string) => void,
   ): Promise<void> {
     this.onLog = onLog ?? this.onLog;
     this.onReady = onReady ?? this.onReady;
+    this.onError = onError ?? this.onError;
     if (!this.worker) {
+      // A previous worker may have been disposed after a failure — clear
+      // the latch so this worker can be terminated again.
+      this.disposed = false;
       const worker = new Worker(this.workerUrl);
       this.worker = worker;
 
@@ -129,8 +140,12 @@ export class BusyTexCompiler {
             this.pending = null;
             this.dispose();
             resolvePending({ pdf: null, log: msg.error });
-          } else if (this.onLog) {
-            this.onLog(msg.error);
+          } else {
+            // Outside a compile (an init-time asset load failed): the
+            // worker is dead — dispose it and report it, or the next
+            // compile would wait forever on a promise that never settles.
+            this.dispose();
+            this.onError?.(msg.error);
           }
           return;
         }
@@ -151,8 +166,11 @@ export class BusyTexCompiler {
           this.pending = null;
           this.dispose();
           resolvePending({ pdf: null, log: message });
-        } else if (this.onLog) {
-          this.onLog(message);
+        } else {
+          // The worker is dead with no compile to report to — dispose and
+          // surface the error instead of leaving the UI stuck.
+          this.dispose();
+          this.onError?.(message);
         }
       };
 
@@ -185,8 +203,11 @@ export class BusyTexCompiler {
     files: Record<string, string | Uint8Array>,
     mainTexPath: string,
   ): Promise<CompileResult> {
+    // A disposed worker (after a load failure or a crash) is recreated
+    // here — init() is a no-op while a worker is alive, and the asset
+    // fetches are cached by then.
     if (!this.worker) {
-      throw new Error("compiler not initialized");
+      await this.init();
     }
     // Add the vendored caption package to the project. A load failure
     // (should be impossible — same-origin static files) must not block
@@ -213,6 +234,13 @@ export class BusyTexCompiler {
       const parts = path.split("/");
       for (let i = 1; i < parts.length; i++)
         dirs.add(parts.slice(0, i).join("/"));
+    }
+
+    // The awaits above yielded: a worker that failed to load in that window
+    // is already disposed (init()'s onerror path). Recreate it, or the post
+    // below would land on a terminated worker and never settle.
+    if (!this.worker) {
+      await this.init();
     }
 
     return new Promise<CompileResult>((resolve) => {

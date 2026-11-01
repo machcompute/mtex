@@ -204,11 +204,18 @@ class BusytexPipeline
 
         const source_name = main_tex_path.slice(1 + main_tex_path.lastIndexOf('/'));
         const tex_path = source_name;
-        const [xdv_path, pdf_path, log_path, aux_path] = ['.xdv', '.pdf', '.log', '.aux'].map(ext => tex_path.replace('.tex', ext));
+        // PATCH 8: TeX's jobname strips only the file's FINAL extension
+        // (a.text.tex -> a.text, MAIN.TEX -> MAIN). The old
+        // .replace('.tex', ext) hit the FIRST occurrence anywhere in the
+        // name, so a.text.tex became a.pdf.t.tex — paths TeX never writes.
+        const base = source_name.toLowerCase().endsWith('.tex')
+            ? source_name.slice(0, -4)
+            : source_name;
+        const [xdv_path, pdf_path, log_path, aux_path] = ['.xdv', '.pdf', '.log', '.aux'].map(ext => base + ext);
         // PATCH 4: -synctex=1 makes xetex write <job>.synctex.gz, which
         // maps source lines to PDF positions (and back) for the page's
         // PDF<->editor navigation. Read back below.
-        const [synctex_gz_path, synctex_plain_path] = ['.synctex.gz', '.synctex'].map(ext => tex_path.replace('.tex', ext));
+        const [synctex_gz_path, synctex_plain_path] = ['.synctex.gz', '.synctex'].map(ext => base + ext);
 
         const xetex = ['xetex', '--interaction=nonstopmode', '--halt-on-error', '--no-pdf', '--synctex=1', '--fmt', this.fmt_latex, tex_path].concat((this.verbose_args[verbose] || this.verbose_args[BusytexPipeline.VerboseSilent]).xetex);
         const bibtex8 = ['bibtex8', '--8bit', aux_path].concat((this.verbose_args[verbose] || this.verbose_args[BusytexPipeline.VerboseSilent]).bibtex8);
@@ -244,41 +251,77 @@ class BusytexPipeline
         if(bibtex == null)
             bibtex = files.some(({path, contents}) => contents != null && path.endsWith('.bib'));
         // PATCH 6: only run bibtex when the document actually declared a
-        // bibliography (\bibdata in the .aux). A project can hold a .bib —
+        // bibliography (\bibdata in an .aux). A project can hold a .bib —
         // the default refs.bib, or one that came in with a folder upload —
         // while the document being compiled never cites it; running bibtex
         // then fatals ("no \bibdata") and kills a build that should succeed.
+        // \include writes the included file's \bibdata to <name>.aux (the
+        // main .aux only \@input's it), so every .aux under the source
+        // dir is scanned, not just the main one.
         let bibtex_needed = false;
         if(exit_code == 0 && bibtex)
         {
-            const aux = FS.analyzePath(aux_path).exists
-                ? FS.readFile(aux_path, {encoding : 'utf8'})
-                : '';
-            bibtex_needed = /\\bibdata\b/.test(aux);
+            const aux_files = [];
+            (function walk(dir)
+            {
+                let names = [];
+                try { names = FS.readdir(dir); } catch (e) { return; }
+                for(const n of names)
+                {
+                    if(n === '.' || n === '..') continue;
+                    const p = dir + (dir.endsWith('/') ? '' : '/') + n;
+                    const st = FS.lstat(p);
+                    // Emscripten stat structs carry the POSIX mode number
+                    // (no Stats.isDirectory()); 0o170000 is the file-type mask.
+                    if((st.mode & 0o170000) === 0o040000) walk(p);
+                    else if(n.endsWith('.aux')) aux_files.push(p);
+                }
+            })(FS.cwd());
+            bibtex_needed = aux_files.some(p => /\\bibdata\b/.test(FS.readFile(p, {encoding : 'utf8'})));
         }
         // PATCH 5: a second xetex pass (also without bibtex) so \ref/\label
         // (incl. \subref from subcaption) resolve from the first pass's .aux.
         // Upstream ran xetex only once in that case — every cross-reference
         // printed ?? and stayed that way.
+        // PATCH 7: bibtex8's own output — its error messages ("I couldn't
+        // open database file", "I didn't find a database") never reach
+        // xetex's .log, so a failed bibtex build used to report the
+        // (successful) first xetex pass as the log.
+        let bibtex_log = '';
+        let bibtex_failed = false;
         const rest = bibtex_needed ? [bibtex8, xetex, xetex, xdvipdfmx] : [xetex, xetex, xdvipdfmx];
         if(exit_code == 0)
         {
             for(const cmd of rest)
             {
-                exit_code = run(cmd);
-                // PATCH 3: bibtex8 exits 1 on warnings (missing fields etc.)
-                // while still writing a usable .bbl — only a real error (2)
-                // should abort the build. Upstream broke on any non-zero
-                // code, which turned every bibtex warning into a failed
-                // compile with no PDF.
                 const is_bibtex = cmd[0] === 'bibtex8';
+                let saved_print = null;
+                if(is_bibtex)
+                {
+                    bibtex_log = '';
+                    saved_print = this.print;
+                    this.print = (line) => { bibtex_log += line + '\n'; saved_print(line); };
+                }
+                exit_code = run(cmd);
+                if(is_bibtex)
+                {
+                    // PATCH 3: bibtex8 exits 1 on warnings (missing fields
+                    // etc.) while still writing a usable .bbl — only a real
+                    // error (2) should abort the build. Upstream broke on
+                    // any non-zero code, which turned every bibtex warning
+                    // into a failed compile with no PDF.
+                    bibtex_failed = exit_code != 0 && exit_code != 1;
+                    this.print = saved_print;
+                }
                 if(exit_code != 0 && !(is_bibtex && exit_code == 1))
                     break;
             }
         }
 
-        const pdf = exit_code == 0 && FS.analyzePath(pdf_path).exists ? FS.readFile(pdf_path, {encoding: 'binary'}) : null;
-        const log = FS.analyzePath(log_path).exists ? FS.readFile(log_path, {encoding : 'utf8'}) : null;
+        const pdf = exit_code == 0 && FS.analyzePath(pdf_path).exists ? FS.readFile(pdf_path, {encoding : 'binary'}) : null;
+        let log = FS.analyzePath(log_path).exists ? FS.readFile(log_path, {encoding : 'utf8'}) : null;
+        if(log != null && bibtex_failed)
+            log += '\n--- bibtex8 ---\n' + bibtex_log;
         // TeX writes the synctex file gzipped when built with zlib; the
         // plain fallback covers builds without it.
         const synctex = FS.analyzePath(synctex_gz_path).exists
@@ -306,6 +349,13 @@ class BusytexPipeline
 //      for PDF<->source navigation in the page.
 //   5. A second xetex pass runs even without bibtex, so cross-references
 //      resolve; see the cmds line in compile().
-//   6. bibtex8 runs only when the first xetex pass's .aux declares a
-//      bibliography (\bibdata), so a .bib in the project that the document
-//      never cites no longer fatals the build; see compile().
+//   6. bibtex8 runs only when an .aux under the source dir declares a
+//      bibliography (\bibdata — \include files write their own .aux),
+//      so a .bib in the project that the document never cites no longer
+//      fatals the build; see compile().
+//   7. bibtex8's own output is captured and appended to the returned log
+//      when bibtex8 fails (exit code 2) — its errors never reach xetex's
+//      .log, so a failed bibtex build used to report xetex's success text.
+//   8. Output paths derive from TeX's jobname (the file name minus its
+//      FINAL .tex extension, case-insensitive) instead of the first .tex
+//      occurrence, so a.text.tex and MAIN.TEX compile; see compile().

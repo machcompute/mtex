@@ -52,7 +52,11 @@ export type SyncEntry = {
   hasGlyph: boolean;
   /** 1-based source line number. */
   line: number;
-  /** Flat project file name (basename of the Input-table path). */
+  /**
+   * Flat project path for the source file (resolved against the project
+   * files), or the synctex Input-table path when it can't be resolved
+   * (the .aux read by later passes, engine-internal files, …).
+   */
   file: string;
 };
 
@@ -92,14 +96,71 @@ type Agg = {
   hasGlyph: boolean;
 };
 
-/** Decode synctex bytes (gzipped or plain) into lookup entries. */
-export async function decodeSynctex(bytes: Uint8Array): Promise<SyncEntry[]> {
+/**
+ * Decode synctex bytes (gzipped or plain) into lookup entries.
+ *
+ * The Input-table paths TeX writes are relative to the main file's
+ * directory (the pipeline chdirs there before running TeX), so they are
+ * resolved to flat project keys here: a nested \input{chapters/intro}
+ * must map to chapters/intro.tex, not to intro.tex or to the main file.
+ */
+export async function decodeSynctex(
+  bytes: Uint8Array,
+  projectFiles: string[],
+  mainPath: string,
+): Promise<SyncEntry[]> {
   const text =
     bytes[0] === 0x1f && bytes[1] === 0x8b
       ? await gunzip(bytes)
       : new TextDecoder().decode(bytes);
 
+  const mainDir = mainPath
+    ? mainPath.slice(0, mainPath.lastIndexOf("/") + 1)
+    : "";
+  const fileSet = new Set(projectFiles);
+  const byBase = new Map<string, string[]>();
+  for (const f of projectFiles) {
+    const b = basename(f);
+    const arr = byBase.get(b);
+    if (arr) arr.push(f);
+    else byBase.set(b, [f]);
+  }
+  const resolveInput = (p: string): string => {
+    // The Input table records paths as TeX saw them: relative to its cwd
+    // (the main file's directory) or ABSOLUTE (the wasm project dir, e.g.
+    // /home/web_user/project_dir/./a/inner.tex). Walk the path from its
+    // full form down to the basename and take the first shape the project
+    // actually has; the cwd-relative shape (mainDir + suffix) wins per
+    // suffix because that is how TeX resolved it.
+    const segments = p
+      .replace(/\\/g, "/")
+      .split("/")
+      .filter((s) => s.length > 0 && s !== ".");
+    const absolute = p.startsWith("/");
+    for (let i = 0; i < segments.length; i++) {
+      const suffix = segments.slice(i).join("/");
+      if (!absolute && mainDir && fileSet.has(mainDir + suffix))
+        return mainDir + suffix;
+      if (fileSet.has(suffix)) return suffix;
+    }
+    // No directory match: a unique basename is still unambiguous.
+    const uniq = byBase.get(basename(p));
+    if (uniq && uniq.length === 1) return uniq[0];
+    return p;
+  };
+
   const inputs = new Map<number, string>();
+  const resolvedInputs = new Map<number, string>();
+  const fileFor = (idx: number): string | undefined => {
+    const p = inputs.get(idx);
+    if (!p) return undefined;
+    let r = resolvedInputs.get(idx);
+    if (r === undefined) {
+      r = resolveInput(p);
+      resolvedInputs.set(idx, r);
+    }
+    return r;
+  };
   let xOffset = 0;
   let yOffset = 0;
   let page = 0;
@@ -109,7 +170,9 @@ export async function decodeSynctex(bytes: Uint8Array): Promise<SyncEntry[]> {
   for (const raw of text.split(/\r?\n/)) {
     if (raw.startsWith("Input:")) {
       const m = raw.match(/^Input:(\d+):(.*)$/);
-      if (m) inputs.set(Number.parseInt(m[1], 10), basename(m[2]));
+      // Keep the full relative path — resolveInput() needs the directory
+      // part to distinguish a/inner.tex from inner.tex.
+      if (m) inputs.set(Number.parseInt(m[1], 10), m[2]);
       continue;
     }
     if (raw.startsWith("X Offset:")) {
@@ -141,7 +204,7 @@ export async function decodeSynctex(bytes: Uint8Array): Promise<SyncEntry[]> {
     const m = raw.slice(1).match(/^(\d+),(\d+):(-?\d+),(-?\d+)(?::(.*))?$/);
     if (!m) continue;
     const idx = Number.parseInt(m[1], 10);
-    const file = inputs.get(idx);
+    const file = fileFor(idx);
     const line = Number.parseInt(m[2], 10);
     const x = Number.parseInt(m[3], 10);
     const y = Number.parseInt(m[4], 10);
