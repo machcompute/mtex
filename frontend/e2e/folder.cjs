@@ -138,6 +138,29 @@ const r = new Runner("folder");
       stored.files?.["doc.tex"] !== undefined,
   );
 
+  // A folder dragged from the OS (Chromium shape: one unreadable File with
+  // no relative path) must not create a junk row.
+  await r.page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array(0)], "junkfolder", { type: "" }));
+    document
+      .querySelector("aside")
+      .dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  await r.page.waitForTimeout(800);
+  r.ok(
+    "dropped OS folder creates no junk row",
+    (await r.page.locator("li", { hasText: "junkfolder" }).count()) === 0,
+  );
+  const folderNotice =
+    ((await r.page
+      .locator("p, div")
+      .filter({ hasText: /can't be read by the browser/ })
+      .first()
+      .textContent()
+      .catch(() => "")) || "");
+  r.ok("notice explains the dropped folder", folderNotice.length > 0, folderNotice);
+
   console.log(
     r.failures === 0 ? "ALL FOLDER CHECKS PASSED" : r.failures + " CHECK(S) FAILED",
   );

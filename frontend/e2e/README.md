@@ -11,6 +11,7 @@ npm run test:e2e            # all suites
 node e2e/folder.cjs         # one suite: recursive folder upload
 node e2e/rename.cjs         # one suite: nested-file rename / move
 node e2e/regression.cjs     # one suite: compile, citations, network audit, subcaption
+node e2e/firefox.cjs        # one suite: engine + folder drop in real Firefox
 ```
 
 Prerequisites:
@@ -22,6 +23,9 @@ Prerequisites:
 - A headless Chromium. The default is
   `/home/lukas/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome`;
   override with `CHROME_EXECUTABLE=/path/to/chrome node e2e/run.cjs`.
+- A headless Firefox for `firefox.cjs` (one-time:
+  `npx playwright-core install firefox`); override with
+  `FIREFOX_EXECUTABLE=/path/to/firefox`.
 - `APP_URL` env var if the frontend is not at `http://localhost:3000`.
 
 Each suite launches a fresh disposable Chromium profile under the OS temp
@@ -35,7 +39,8 @@ and a crashed run can't poison the next one. The first run downloads the
 - **folder.cjs** — drops a synthetic folder (`paper/doc.tex`,
   `paper/figs/logo.png`) onto the file panel: panel rows and indentation,
   first text file opened, main-file switch, compile with a nested
-  `\includegraphics` path, image binary preview, localStorage persistence.
+  `\includegraphics` path, image binary preview, localStorage persistence,
+  and that an OS folder dragged from the desktop creates no junk row.
 - **rename.cjs** — nested-file rename: in-place rename keeps folder depth,
   rename moves between folders/roots, invalid paths are rejected,
   localStorage keys follow.
@@ -44,6 +49,10 @@ and a crashed run can't poison the next one. The first run downloads the
   (no POST/PUT, only `/api/texlive/`, no foreign origins beyond the Monaco
   CDN and `blob:`), and the vendored caption/subcaption package renders
   subfigures and `\subref` correctly.
+- **firefox.cjs** — the engine in a real Firefox, and folder upload via
+  drag-and-drop (Firefox ignores `webkitdirectory`, so the app hides the
+  folder button there and points to drag-and-drop instead; this suite
+  checks the button is hidden and the drop path imports + compiles).
 
 Suites exit non-zero on any failed check, so `run.cjs` (and CI) can rely on
 the exit code.

@@ -1,20 +1,25 @@
 // Shared helpers for the e2e suites. Each suite gets a Runner, which
-// launches a fresh disposable Chromium profile under the OS temp dir,
-// waits for the engine, drives the editor page, and tears the profile down.
+// launches a fresh disposable browser profile (Chromium or Firefox) under
+// the OS temp dir, waits for the engine, drives the editor page, and tears
+// the profile down.
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
-const { chromium } = require("playwright-core");
 
 const APP_URL = process.env.APP_URL || "http://localhost:3000/editor";
 const CHROME =
   process.env.CHROME_EXECUTABLE ||
   "/home/lukas/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome";
+// `npx playwright-core install firefox` (matches the installed version).
+const FIREFOX =
+  process.env.FIREFOX_EXECUTABLE ||
+  "/home/lukas/.cache/ms-playwright/firefox-1532/firefox/firefox";
 const PNG_PATH = path.join(__dirname, "logo.png");
 
 class Runner {
-  constructor(name) {
+  constructor(name, browser = "chromium") {
     this.name = name;
+    this.browser = browser;
     this.failures = 0;
     // Unique temp profile — the repo and /tmp are never touched, and a
     // previous crashed run can't leave state behind.
@@ -31,10 +36,15 @@ class Runner {
   }
 
   async start() {
-    this.ctx = await chromium.launchPersistentContext(this.profile, {
-      executablePath: CHROME,
+    const impl = require("playwright-core")[this.browser];
+    this.ctx = await impl.launchPersistentContext(this.profile, {
+      executablePath: this.browser === "firefox" ? FIREFOX : CHROME,
       headless: true,
-      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      // Chrome-only flags; Firefox doesn't take them.
+      args:
+        this.browser === "firefox"
+          ? []
+          : ["--no-sandbox", "--disable-dev-shm-usage"],
     });
     this.page = await this.ctx.newPage();
     this.page.on("pageerror", (e) =>
@@ -74,16 +84,22 @@ class Runner {
   }
 
   // Visible text of the rendered PDF (pdf.js marks each line's spans with
-  // data-baseline).
+  // data-baseline). The text layer renders a beat after the canvas, so
+  // poll until it appears instead of reading a possibly empty page.
   async pdfText() {
-    return this.page.evaluate(() => {
-      const viewer = document.querySelector("[data-pdf-viewer]");
-      return viewer
-        ? Array.from(viewer.querySelectorAll("span[data-baseline]"))
-            .map((s) => s.textContent)
-            .join(" ")
-        : "";
-    });
+    for (let i = 0; i < 20; i++) {
+      const text = await this.page.evaluate(() => {
+        const viewer = document.querySelector("[data-pdf-viewer]");
+        return viewer
+          ? Array.from(viewer.querySelectorAll("span[data-baseline]"))
+              .map((s) => s.textContent)
+              .join(" ")
+          : "";
+      });
+      if (text.trim().length > 0) return text;
+      await this.page.waitForTimeout(500);
+    }
+    return "";
   }
 
   // Open the log drawer if it's closed, read the log, close it again.
@@ -108,4 +124,4 @@ class Runner {
   }
 }
 
-module.exports = { Runner, APP_URL, CHROME, PNG_PATH };
+module.exports = { Runner, APP_URL, CHROME, FIREFOX, PNG_PATH };

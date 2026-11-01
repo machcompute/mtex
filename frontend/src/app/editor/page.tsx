@@ -501,7 +501,20 @@ export default function EditorPage() {
       const added: Record<string, FileData> = {};
       let firstOpen: string | null = null;
       let skipped = 0;
+      let droppedFolders = 0;
       for (const f of list) {
+        // A folder dragged from the OS arrives in Chromium as a single
+        // unreadable File (no relative path, size 0, no type/extension).
+        // Skip it — importing it would create a junk row.
+        if (
+          !f.webkitRelativePath &&
+          f.size === 0 &&
+          f.type === "" &&
+          !f.name.includes(".")
+        ) {
+          droppedFolders++;
+          continue;
+        }
         const name =
           f.webkitRelativePath
             ? normalizePath(f.webkitRelativePath.split("/").slice(1).join("/"))
@@ -530,17 +543,31 @@ export default function EditorPage() {
         }
       }
       const count = Object.keys(added).length;
+      const folderNote =
+        droppedFolders > 0
+          ? ` (${droppedFolders} dropped folder${droppedFolders === 1 ? "" : "s"} can't be read by the browser — use the folder button)`
+          : "";
       if (count > 0) {
         setFiles((prev) => ({ ...prev, ...added }));
         if (firstOpen) openPath(firstOpen);
         setNotice(
           `Uploaded ${count} file${count === 1 ? "" : "s"} — kept in your browser` +
-            (skipped ? ` (${skipped} already existed, skipped)` : ""),
+            (skipped ? ` (${skipped} already existed, skipped)` : "") +
+            folderNote,
         );
         window.clearTimeout(noticeTimerRef.current);
         noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3000);
       } else if (skipped > 0) {
-        setNotice(`Nothing uploaded — ${skipped} file${skipped === 1 ? " was" : "s were"} already in the project`);
+        setNotice(
+          `Nothing uploaded — ${skipped} file${skipped === 1 ? " was" : "s were"} already in the project` +
+            folderNote,
+        );
+        window.clearTimeout(noticeTimerRef.current);
+        noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3000);
+      } else if (droppedFolders > 0) {
+        setNotice(
+          `Dropped folder${droppedFolders === 1 ? "" : "s"} can't be read by the browser — use the folder button to import it`,
+        );
         window.clearTimeout(noticeTimerRef.current);
         noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3000);
       }
