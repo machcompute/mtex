@@ -11,7 +11,7 @@ npm run test:e2e            # all suites
 node e2e/folder.cjs         # one suite: recursive folder upload
 node e2e/rename.cjs         # one suite: nested-file rename / move
 node e2e/regression.cjs     # one suite: compile, citations, network audit, subcaption
-node e2e/firefox.cjs        # one suite: engine + folder drop in real Firefox
+node e2e/firefox.cjs        # one suite: folder picker button flow in real Firefox
 ```
 
 Prerequisites:
@@ -49,10 +49,11 @@ and a crashed run can't poison the next one. The first run downloads the
   (no POST/PUT, only `/api/texlive/`, no foreign origins beyond the Monaco
   CDN and `blob:`), and the vendored caption/subcaption package renders
   subfigures and `\subref` correctly.
-- **firefox.cjs** — the engine in a real Firefox, and folder upload via
-  drag-and-drop (Firefox ignores `webkitdirectory`, so the app hides the
-  folder button there and points to drag-and-drop instead; this suite
-  checks the button is hidden and the drop path imports + compiles).
+- **firefox.cjs** — the folder *button* in a real Firefox. Firefox honors
+  `webkitdirectory` (MDN: supported; CanIUse: Firefox 50+), so the button
+  opens a native folder picker; the suite drives the whole flow — click
+  button → picker on the `webkitdirectory` input → select an on-disk
+  directory → import with structure → compile.
 
 Suites exit non-zero on any failed check, so `run.cjs` (and CI) can rely on
 the exit code.

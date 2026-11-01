@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   IconFile,
   IconFileBib,
@@ -53,14 +53,6 @@ export default function FileBrowser({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [dragging, setDragging] = useState(0);
-  // Firefox ignores the webkitdirectory attribute, so its folder button
-  // opens a plain file dialog and can never select a folder — there,
-  // drag-and-drop is the only folder path. Detected after mount to avoid
-  // a hydration mismatch.
-  const [canPickFolder, setCanPickFolder] = useState(true);
-  useEffect(() => {
-    if (/firefox/i.test(navigator.userAgent)) setCanPickFolder(false);
-  }, []);
   const inputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
 
@@ -146,25 +138,13 @@ export default function FileBrowser({
           >
             <IconUpload className="h-4 w-4" />
           </button>
-          {canPickFolder ? (
-            <button
-              onClick={pickFolder}
-              title="Upload a whole folder, recursively (kept in your browser)"
-              className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
-            >
-              <IconFolder className="h-4 w-4" />
-            </button>
-          ) : (
-            // Firefox can't open a folder picker (no webkitdirectory
-            // support) — a disabled icon explains why instead of doing
-            // nothing useful.
-            <span
-              title="Firefox has no folder picker — drag the folder onto the file list instead"
-              className="cursor-not-allowed rounded p-1 text-stone/40"
-            >
-              <IconFolder className="h-4 w-4" />
-            </span>
-          )}
+          <button
+            onClick={pickFolder}
+            title="Upload a whole folder, recursively (kept in your browser)"
+            className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+          >
+            <IconFolder className="h-4 w-4" />
+          </button>
           <button
             onClick={() => document.getElementById("new-file-input")?.focus()}
             title="New file"
@@ -307,20 +287,9 @@ export default function FileBrowser({
           </button>
         </div>
         <p className="mt-1.5 text-[11px] leading-snug text-stone">
-          {canPickFolder ? (
-            <>
-              Upload files or a whole folder (the folder icon), or drag them
-              in — they stay in your browser. Double-click a name to rename. A
-              .bib file triggers bibtex8 automatically.
-            </>
-          ) : (
-            <>
-              Upload files, or drag a whole folder in from the file manager —
-              they stay in your browser. (Firefox has no folder picker.)
-              Double-click a name to rename. A .bib file triggers bibtex8
-              automatically.
-            </>
-          )}
+          Upload files or a whole folder (the folder icon), or drag them in —
+          they stay in your browser. Double-click a name to rename. A .bib
+          file triggers bibtex8 automatically.
         </p>
       </div>
     </aside>

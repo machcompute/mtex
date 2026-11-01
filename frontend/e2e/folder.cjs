@@ -104,10 +104,19 @@ const r = new Runner("folder");
   const status = await r.recompile();
   r.ok("compile with folder files succeeded", /Compiled in \d+ ms/.test(status), status);
 
-  r.ok(
-    "PDF rendered",
-    (await r.page.locator('div:has(> [data-pdf-viewer])').last().locator("canvas").count()) > 0,
-  );
+  // pdf.js paints the canvas a beat after the status flips — poll instead
+  // of taking a single snapshot.
+  let canvasCount = 0;
+  for (let i = 0; i < 12; i++) {
+    canvasCount = await r.page
+      .locator('div:has(> [data-pdf-viewer])')
+      .last()
+      .locator("canvas")
+      .count();
+    if (canvasCount > 0) break;
+    await r.page.waitForTimeout(500);
+  }
+  r.ok("PDF rendered", canvasCount > 0, `${canvasCount} canvas(es)`);
   const pdfText = await r.pdfText();
   r.ok("folder doc text in PDF", /Folder doc with nested image/.test(pdfText));
 

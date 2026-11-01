@@ -1,7 +1,11 @@
-// Firefox suite: the engine in a real Firefox, and folder upload via
-// drag-and-drop — Firefox's only folder path (it ignores webkitdirectory,
-// so the app hides the folder button there).
+// Firefox suite: the folder UPLOAD BUTTON in a real Firefox. Firefox honors
+// the webkitdirectory attribute (MDN: supported; CanIUse: Firefox 50+), so
+// the button opens a native folder picker exactly like in Chromium. This
+// suite drives that whole flow: click button -> folder picker -> select a
+// directory on disk -> import with structure -> compile.
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const { Runner, PNG_PATH } = require("./helpers.cjs");
 
 const PNG = fs.readFileSync(PNG_PATH);
@@ -15,6 +19,11 @@ const DOC = [
 ].join("\n");
 
 const r = new Runner("firefox", "firefox");
+// A real folder on disk for the native picker to "select".
+const pickDir = fs.mkdtempSync(path.join(os.tmpdir(), "homehub-ffpick-"));
+fs.mkdirSync(path.join(pickDir, "ffpaper", "figs"), { recursive: true });
+fs.writeFileSync(path.join(pickDir, "ffpaper", "doc.tex"), DOC);
+fs.copyFileSync(PNG_PATH, path.join(pickDir, "ffpaper", "figs", "logo.png"));
 
 (async () => {
   await r.start();
@@ -26,45 +35,27 @@ const r = new Runner("firefox", "firefox");
     ((await r.status.textContent().catch(() => "")) || "").trim(),
   );
 
-  // The folder button must be disabled in Firefox (no webkitdirectory).
-  const folderBtn = await r.page
-    .locator('button[title="Upload a whole folder, recursively (kept in your browser)"]')
-    .count();
-  r.ok("folder button hidden in Firefox", folderBtn === 0);
-  const ffHint =
-    ((await r.page
-      .locator("p")
-      .filter({ hasText: /Firefox has no folder picker/ })
-      .first()
-      .textContent()
-      .catch(() => "")) || "");
-  r.ok("hint points to drag-and-drop", ffHint.length > 0, ffHint.slice(0, 80));
-
-  // Drop a synthetic folder — the shape of a real Firefox OS-folder drop
-  // (files carrying webkitRelativePath).
-  await r.page.evaluate(
-    ({ doc, png }) => {
-      const mk = (rel, content, type, isBin) => {
-        const f = new File(
-          isBin ? [new Uint8Array(content)] : [content],
-          rel.split("/").pop(),
-          { type },
-        );
-        Object.defineProperty(f, "webkitRelativePath", { value: rel });
-        return f;
-      };
-      const dt = new DataTransfer();
-      dt.items.add(mk("paper/doc.tex", doc, "text/x-tex", false));
-      dt.items.add(mk("paper/figs/logo.png", png, "image/png", true));
-      const ev = new DragEvent("drop", {
-        dataTransfer: dt,
-        bubbles: true,
-        cancelable: true,
-      });
-      document.querySelector("aside").dispatchEvent(ev);
-    },
-    { doc: DOC, png: Array.from(PNG) },
+  // The folder button must be present (Firefox DOES support webkitdirectory).
+  const folderBtn = r.page.locator(
+    'button[title="Upload a whole folder, recursively (kept in your browser)"]',
   );
+  r.ok("folder button present in Firefox", (await folderBtn.count()) === 1);
+
+  // Click it: the filechooser fires on the webkitdirectory input. Selecting
+  // the on-disk directory is what the user does in the native dialog.
+  const [chooser] = await Promise.all([
+    r.page.waitForEvent("filechooser", { timeout: 15000 }),
+    folderBtn.first().click(),
+  ]);
+  const inputAttrs = await chooser.element().evaluate((n) =>
+    Array.from(n.attributes).map((a) => a.name),
+  );
+  r.ok(
+    "picker is the webkitdirectory input",
+    inputAttrs.includes("webkitdirectory"),
+    inputAttrs.join(","),
+  );
+  await chooser.setFiles([path.join(pickDir, "ffpaper")]);
 
   await r.page.waitForTimeout(800);
   const notice =
@@ -74,8 +65,11 @@ const r = new Runner("firefox", "firefox");
       .first()
       .textContent()
       .catch(() => "")) || "");
-  r.ok("folder drop imported in Firefox", /Uploaded 2 files/.test(notice), notice);
-  r.ok("nested row present", (await r.page.locator("li", { hasText: "logo.png" }).count()) > 0);
+  r.ok("folder import notice", /Uploaded 2 files/.test(notice), notice);
+  r.ok(
+    "nested row present",
+    (await r.page.locator("li", { hasText: "logo.png" }).count()) > 0,
+  );
 
   // Set doc.tex as main and compile.
   await r.page
@@ -88,14 +82,20 @@ const r = new Runner("firefox", "firefox");
   r.ok("compile works in Firefox", /Compiled in \d+ ms/.test(status), status);
 
   const pdfText = await r.pdfText();
-  r.ok("folder doc text in PDF", /Firefox folder doc/.test(pdfText), pdfText.slice(0, 120));
+  r.ok(
+    "folder doc text in PDF",
+    /Firefox folder doc/.test(pdfText),
+    pdfText.slice(0, 120),
+  );
 
   console.log(
     r.failures === 0 ? "ALL FIREFOX CHECKS PASSED" : r.failures + " CHECK(S) FAILED",
   );
   await r.finish();
+  fs.rmSync(pickDir, { recursive: true, force: true });
   process.exit(r.failures === 0 ? 0 : 1);
 })().catch((e) => {
   console.error("FATAL", e);
+  fs.rmSync(pickDir, { recursive: true, force: true });
   process.exit(1);
 });
