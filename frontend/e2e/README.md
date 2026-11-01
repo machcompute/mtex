@@ -39,8 +39,10 @@ and a crashed run can't poison the next one. The first run downloads the
 - **folder.cjs** — drops a synthetic folder (`paper/doc.tex`,
   `paper/figs/logo.png`) onto the file panel: panel rows and indentation,
   first text file opened, main-file switch, compile with a nested
-  `\includegraphics` path, image binary preview, localStorage persistence,
-  and that an OS folder dragged from the desktop creates no junk row.
+  `\includegraphics` path, image binary preview, localStorage persistence.
+  Then real directory drags over CDP: recursive import past Chromium's
+  100-entry `readEntries` batch, top folder stripped, two folders dropped
+  together keeping their names, and an empty folder explaining itself.
 - **rename.cjs** — nested-file rename: in-place rename keeps folder depth,
   rename moves between folders/roots, invalid paths are rejected,
   localStorage keys follow.

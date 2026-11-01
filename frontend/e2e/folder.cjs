@@ -3,6 +3,8 @@
 // doc.tex as main, recompiles, and verifies the nested \includegraphics
 // path resolves.
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const { Runner, PNG_PATH } = require("./helpers.cjs");
 
 // 1x1 transparent PNG — a real, valid file (hand-typed bytes once produced
@@ -17,6 +19,8 @@ const DOC = [
   "\\includegraphics[width=2cm]{figs/logo.png}",
   "\\end{document}",
 ].join("\n");
+
+const KEY = "homehub-latex-project-v1";
 
 const r = new Runner("folder");
 
@@ -147,30 +151,79 @@ const r = new Runner("folder");
       stored.files?.["doc.tex"] !== undefined,
   );
 
-  // A folder dragged from the OS must not create a junk row. Two shapes:
-  //  1. a REAL directory drag (CDP, Chromium) — the browser delivers one
-  //     unreadable File whose name matches a directory entry;
-  //  2. a synthetic 0-byte, typeless file WITH a dot in its name — the
-  //     no-entries heuristic must still import it (a folder only looks
-  //     like a nameless empty file, never like "empty.txt").
-  const DRAG_DIR = "/tmp/opencode/dragfix/thesis";
-  if (fs.existsSync(DRAG_DIR)) {
-    const asideBox = await r.page.locator("aside").boundingBox();
-    await r.osDrag(DRAG_DIR, asideBox.x + 60, asideBox.y + 200);
-    await r.page.waitForTimeout(1500);
-    r.ok(
-      "dropped OS folder creates no junk row",
-      (await r.page.locator("li", { hasText: "thesis" }).count()) === 0,
-    );
-    const folderNotice =
-      ((await r.page
-        .locator("p, div")
-        .filter({ hasText: /can't be read by the browser/ })
-        .first()
-        .textContent()
-        .catch(() => "")) || "");
-    r.ok("notice explains the dropped folder", folderNotice.length > 0, folderNotice);
+  // A REAL directory drag (CDP, Chromium) is walked recursively. The tree is
+  // bigger than Chromium's 100-entry readEntries batch, so a walker that
+  // stops after the first batch loses files.
+  const dragRoot = fs.mkdtempSync(path.join(os.tmpdir(), "homehub-folder-"));
+  const THESIS = path.join(dragRoot, "thesis");
+  fs.mkdirSync(path.join(THESIS, "ch", "deep"), { recursive: true });
+  fs.mkdirSync(path.join(THESIS, "many"));
+  fs.mkdirSync(path.join(THESIS, ".git"));
+  fs.mkdirSync(path.join(dragRoot, "empty"));
+  fs.mkdirSync(path.join(dragRoot, "other"));
+  fs.mkdirSync(path.join(dragRoot, "second"));
+  fs.writeFileSync(path.join(THESIS, "thesis.tex"), DOC);
+  fs.writeFileSync(path.join(THESIS, "ch", "deep", "one.tex"), "Deep.\n");
+  fs.writeFileSync(path.join(THESIS, ".git", "HEAD"), "ref\n");
+  fs.writeFileSync(path.join(THESIS, "LICENSE"), "");
+  fs.writeFileSync(path.join(THESIS, "fig.png"), PNG);
+  for (let i = 0; i < 150; i++) {
+    fs.writeFileSync(path.join(THESIS, "many", `f${i}.tex`), `${i}\n`);
   }
+  fs.writeFileSync(path.join(dragRoot, "other", "same.tex"), "Other.\n");
+  fs.writeFileSync(path.join(dragRoot, "second", "same.tex"), "Second.\n");
+
+  const paths = () =>
+    r.page.evaluate(
+      (key) => Object.keys(JSON.parse(localStorage.getItem(key)).files),
+      KEY,
+    );
+  const asideBox = await r.page.locator("aside").boundingBox();
+  const dropAt = [asideBox.x + 60, asideBox.y + 200];
+
+  await r.osDrag(THESIS, ...dropAt);
+  await r.page.waitForTimeout(2000);
+  const tree = await paths();
+  r.ok("dropped folder: top file at the root", tree.includes("thesis.tex"));
+  r.ok("dropped folder: no top folder kept", !tree.some((p) => p.startsWith("thesis/")));
+  r.ok("dropped folder: nested path kept", tree.includes("ch/deep/one.tex"));
+  r.ok(
+    "dropped folder: past the 100-entry batch",
+    tree.filter((p) => p.startsWith("many/")).length === 150,
+  );
+  r.ok("dropped folder: empty extensionless file kept", tree.includes("LICENSE"));
+  r.ok("dropped folder: dot directory skipped", !tree.some((p) => p.startsWith(".git")));
+  const fig = (await r.page.evaluate(
+    (key) => JSON.parse(localStorage.getItem(key)).files["fig.png"],
+    KEY,
+  ));
+  r.ok("dropped folder: binary kept", fig !== undefined, JSON.stringify(fig)?.slice(0, 60));
+  r.ok(
+    "drop highlight cleared",
+    (await r.page.getByText("Drop files or a folder to add them").count()) === 0,
+  );
+
+  // Dropped together, folders keep their names so their files can't collide.
+  await r.osDrag(
+    [path.join(dragRoot, "other"), path.join(dragRoot, "second")],
+    ...dropAt,
+  );
+  await r.page.waitForTimeout(1500);
+  const both = await paths();
+  r.ok("two folders keep their names (1)", both.includes("other/same.tex"));
+  r.ok("two folders keep their names (2)", both.includes("second/same.tex"));
+
+  await r.osDrag(path.join(dragRoot, "empty"), ...dropAt);
+  await r.page.waitForTimeout(1000);
+  r.ok(
+    "empty folder explains itself",
+    (await r.page.getByText("the folder is empty").count()) === 1,
+  );
+  r.ok(
+    "empty folder creates no row",
+    (await r.page.locator("li", { hasText: "empty" }).count()) === 0,
+  );
+  fs.rmSync(dragRoot, { recursive: true, force: true });
 
   await r.page.evaluate(() => {
     const dt = new DataTransfer();

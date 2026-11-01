@@ -456,14 +456,14 @@ async function seed(r, proj) {
     r4.page.url().startsWith("http://localhost:3000/editor"),
     r4.page.url(),
   );
-  // #10 a real OS folder dropped on the editor pane gives the folder
-  // notice and creates no junk row.
+  // #10 a real OS folder dropped on the editor pane is imported (top folder
+  // stripped) and creates no junk row.
   await r4.osDrag(path.join(dragDir, "thesis"), center.x, center.y);
   await sleep(1500);
   r4.ok(
-    "#10 real folder drop gives the folder notice",
-    /folder/.test(await notice(r4)),
-    await notice(r4),
+    "#10 real folder drop imports its contents",
+    (await rows(r4)).includes("a.tex"),
+    JSON.stringify(await rows(r4)),
   );
   r4.ok(
     "#10 no junk folder row",

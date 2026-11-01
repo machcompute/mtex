@@ -119,14 +119,14 @@ class Runner {
   }
 
   // Real OS file/directory drag, synthesized through CDP (Chromium only).
-  // `absPath` is a host path; the browser builds the drag exactly as for a
-  // genuine user drag — a directory arrives as one unreadable File with no
-  // relative path, which is the shape the drop handler must handle.
+  // `absPath` is a host path, or an array of them; the browser builds the
+  // drag exactly as for a genuine user drag — a directory arrives as one
+  // unreadable File with no relative path, plus a walkable directory entry.
   async osDrag(absPath, x, y) {
     if (this.browser !== "chromium")
       throw new Error("osDrag is Chromium-only");
     const cdp = await this.ctx.newCDPSession(this.page);
-    const data = { items: [], files: [absPath], dragOperationsMask: 1 };
+    const data = { items: [], files: [absPath].flat(), dragOperationsMask: 1 };
     for (const type of ["dragEnter", "dragOver", "drop"]) {
       await cdp.send("Input.dispatchDragEvent", { type, x, y, data });
     }

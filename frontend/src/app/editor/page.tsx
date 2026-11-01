@@ -263,7 +263,7 @@ export default function EditorPage() {
   const skipNextSaveRef = useRef(false);
   // uploadFiles is redefined every render; the window-level drop handler
   // (attached once) calls it through this ref.
-  const uploadFilesRef = useRef<(list: File[], dirNames?: Set<string>) => void>(
+  const uploadFilesRef = useRef<(list: File[], dropped?: DroppedTree) => void>(
     () => {},
   );
   // Refs mirroring state so handlers attached once (Monaco onMount, the
@@ -662,9 +662,10 @@ export default function EditorPage() {
 
   // --- uploads (browser-only: File bytes are read locally, never posted) --
   //
-  // Folder uploads (the folder button, or a dropped folder) arrive as one
-  // File per entry with a webkitRelativePath like "myproj/figs/a.png"; the
-  // top folder is stripped so the tree lands at the project root.
+  // Folder uploads from the folder button arrive as one File per entry with
+  // a webkitRelativePath like "myproj/figs/a.png"; the top folder is stripped
+  // so the tree lands at the project root. Dropped folders have no such path:
+  // the drop handler walks them and passes the project paths in `dropped`.
 
   /** A pill at the bottom of the page, auto-clearing after `ms`. */
   const showNotice = (msg: string, ms = 3000) => {
@@ -673,31 +674,33 @@ export default function EditorPage() {
     noticeTimerRef.current = window.setTimeout(() => setNotice(null), ms);
   };
 
-  const uploadFiles = (list: File[], dirNames?: Set<string>) => {
+  const uploadFiles = (list: File[], dropped?: DroppedTree) => {
     void (async () => {
       const added: Record<string, FileData> = {};
       let firstOpen: string | null = null;
       let skippedJunk = 0;
-      let droppedFolders = 0;
+      let droppedFolders = dropped?.unreadable ?? 0;
       for (const f of list) {
-        // A folder dragged from the OS arrives as one unreadable File (no
-        // relative path) whose name matches a top-level directory entry.
-        // When the drop's entries were inspected (dirNames), that check is
-        // exact; otherwise (no entry API) fall back to a heuristic — a
-        // 0-byte, typeless file with no extension.
+        const droppedPath = dropped?.paths.get(f);
+        // Without the entry API a folder dragged from the OS arrives as one
+        // unreadable File (no relative path), so fall back to a heuristic —
+        // a 0-byte, typeless file with no extension.
         if (
+          droppedPath === undefined &&
           !f.webkitRelativePath &&
-          (dirNames
-            ? dirNames.has(f.name)
-            : f.size === 0 && f.type === "" && !f.name.includes("."))
+          f.size === 0 &&
+          f.type === "" &&
+          !f.name.includes(".")
         ) {
           droppedFolders++;
           continue;
         }
         const name =
-          f.webkitRelativePath
-            ? normalizePath(f.webkitRelativePath.split("/").slice(1).join("/"))
-            : normalizeName(f.name);
+          droppedPath !== undefined
+            ? normalizePath(droppedPath)
+            : f.webkitRelativePath
+              ? normalizePath(f.webkitRelativePath.split("/").slice(1).join("/"))
+              : normalizeName(f.name);
         // Skip junk paths and dotfiles at any depth (.DS_Store, .git, …).
         if (
           !name ||
@@ -746,8 +749,10 @@ export default function EditorPage() {
       }
       if (firstOpen && !Object.hasOwn(merged, firstOpen)) firstOpen = null;
       const count = Object.keys(merged).length;
-      if (count === 0 && skippedExisting === 0 && skippedJunk === 0 && droppedFolders === 0)
+      if (count === 0 && skippedExisting === 0 && skippedJunk === 0 && droppedFolders === 0) {
+        showNotice("Nothing uploaded — the folder is empty");
         return;
+      }
       const folderNote =
         droppedFolders > 0
           ? ` — ${droppedFolders} dropped folder${droppedFolders === 1 ? "" : "s"} can't be read by the browser, use the folder button`
@@ -812,23 +817,25 @@ export default function EditorPage() {
       e.stopPropagation();
       const dt = e.dataTransfer;
       if (!dt) return;
-      // Top-level directory entries, when the entries API can see them
-      // (real OS drags). A synthetic drop has no entries → undefined →
-      // the heuristic in uploadFiles applies.
-      const dirNames = new Set<string>();
-      let anyEntry = false;
+      // Entries must be taken now: the DataTransfer is emptied once this
+      // handler returns. A synthetic drop has no entries → uploadFiles gets
+      // the plain file list and its heuristic applies.
+      const entries: FileSystemEntry[] = [];
       for (const item of Array.from(dt.items)) {
         try {
           const entry = item.webkitGetAsEntry?.();
-          if (entry) {
-            anyEntry = true;
-            if (entry.isDirectory) dirNames.add(entry.name);
-          }
+          if (entry) entries.push(entry);
         } catch {
           // entry unreadable — fall back to the heuristic
         }
       }
-      uploadFilesRef.current(Array.from(dt.files), anyEntry ? dirNames : undefined);
+      if (entries.length === 0) {
+        uploadFilesRef.current(Array.from(dt.files));
+        return;
+      }
+      void readDroppedEntries(entries).then((dropped) =>
+        uploadFilesRef.current([...dropped.paths.keys()], dropped),
+      );
     };
     window.addEventListener("dragover", onDragOver, true);
     window.addEventListener("drop", onDrop, true);
@@ -1337,4 +1344,56 @@ function normalizePath(path: string): string | null {
     if (trimmed.includes("\\")) return null;
   }
   return parts.map((p) => p.trim()).join("/");
+}
+
+/** A dropped selection: each file with its project path, plus how many
+ * entries could not be read. */
+type DroppedTree = { paths: Map<File, string>; unreadable: number };
+
+// A single dropped folder lands at the project root, like the folder button.
+// Dropped alongside anything else it keeps its name, so same-named files in
+// different folders can't collide.
+async function readDroppedEntries(
+  entries: FileSystemEntry[],
+): Promise<DroppedTree> {
+  const tree: DroppedTree = { paths: new Map(), unreadable: 0 };
+  const stripTop = entries.length === 1 && entries[0].isDirectory;
+  await Promise.all(
+    entries.map((e) => readEntry(e, stripTop ? "" : e.name, tree)),
+  );
+  return tree;
+}
+
+async function readEntry(
+  entry: FileSystemEntry,
+  path: string,
+  tree: DroppedTree,
+): Promise<void> {
+  try {
+    if (entry.isFile) {
+      const file = await new Promise<File>((resolve, reject) =>
+        (entry as FileSystemFileEntry).file(resolve, reject),
+      );
+      tree.paths.set(file, path);
+      return;
+    }
+    // readEntries returns one batch per call (100 in Chromium); an empty
+    // batch marks the end.
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    const children: FileSystemEntry[] = [];
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve, reject) =>
+        reader.readEntries(resolve, reject),
+      );
+      if (batch.length === 0) break;
+      children.push(...batch);
+    }
+    await Promise.all(
+      children.map((c) =>
+        readEntry(c, path ? `${path}/${c.name}` : c.name, tree),
+      ),
+    );
+  } catch {
+    tree.unreadable++;
+  }
 }

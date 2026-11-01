@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   IconFile,
   IconFileBib,
@@ -55,6 +55,14 @@ export default function FileBrowser({
   const [dragging, setDragging] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
+
+  // The page's window-level drop guard stops propagation, so the panel's
+  // onDrop does not see file drops; clear the highlight from window too.
+  useEffect(() => {
+    const clear = () => setDragging(0);
+    window.addEventListener("drop", clear, true);
+    return () => window.removeEventListener("drop", clear, true);
+  }, []);
 
   const add = () => {
     const name = newName.trim();
