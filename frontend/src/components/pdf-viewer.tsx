@@ -48,7 +48,15 @@ export type PdfViewerHandle = {
     page: number,
     yFromTopPts: number,
     opts?: { select?: boolean; instant?: boolean },
-  ) => void;
+  ) => boolean;
+  /**
+   * The page and y (points from that page's top) currently at the
+   * viewport's top edge, or null when nothing is rendered. The page saves
+   * this before a recompile so it can restore the scroll position after
+   * the new PDF arrives (pdf.js renders async — poll scrollToPosition
+   * until it returns true).
+   */
+  getViewportTop: () => { page: number; yTop: number } | null;
 };
 
 type Props = {
@@ -324,16 +332,16 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
         const select = opts?.select !== false;
         const instant = opts?.instant === true;
         const el = containerRef.current;
-        if (!el) return;
+        if (!el) return false;
         const wrapper = el.querySelector(
           `[data-page="${pageNum}"]`,
         ) as HTMLElement | null;
         const canvas = wrapper?.querySelector("canvas");
         const layer = wrapper?.querySelector("[data-text-layer]");
-        if (!wrapper || !canvas || !layer) return;
+        if (!wrapper || !canvas || !layer) return false;
         const s = Number.parseFloat(wrapper.dataset.scale || "1") || 1;
         const heightPts = Number.parseFloat(wrapper.dataset.heightPts || "");
-        if (!Number.isFinite(heightPts) || heightPts <= 0) return;
+        if (!Number.isFinite(heightPts) || heightPts <= 0) return false;
 
         // Center the position slightly above the middle of the viewport.
         const yTopCss = yFromTopPts * s;
@@ -343,13 +351,13 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
           top: Math.max(0, target),
           behavior: instant ? "auto" : "smooth",
         });
-
-        if (!select) return;
+        // The scroll happened — selection below is cosmetic.
+        if (!select) return true;
         // Select the rendered line at that position so it stands out.
         const spans = Array.from(
           layer.querySelectorAll<HTMLSpanElement>("span"),
         );
-        if (spans.length === 0) return;
+        if (spans.length === 0) return true;
         let best = spans[0];
         let bestDist = Infinity;
         for (const sp of spans) {
@@ -366,13 +374,37 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
             0.9 * lineH,
         );
         const selection = window.getSelection();
-        if (!selection) return;
+        if (!selection) return true;
         const range = document.createRange();
         range.setStart(matched[0], 0);
         const last = matched[matched.length - 1];
         range.setEnd(last, last.childNodes.length);
         selection.removeAllRanges();
         selection.addRange(range);
+        return true;
+      },
+      getViewportTop() {
+        // Same math as track()'s viewport-top report: the topmost page
+        // wrapper whose bottom is still below the scroll position.
+        const el = containerRef.current;
+        if (!el) return null;
+        const wrappers = Array.from(
+          el.querySelectorAll<HTMLElement>("[data-page]"),
+        );
+        if (wrappers.length === 0) return null;
+        const S = el.scrollTop;
+        let vis: HTMLElement | null = null;
+        for (const w of wrappers) {
+          if (w.offsetTop + w.offsetHeight > S) {
+            vis = w;
+            break;
+          }
+        }
+        if (!vis) vis = wrappers[0];
+        const sVis = Number.parseFloat(vis.dataset.scale || "1") || 1;
+        const hPts = Number.parseFloat(vis.dataset.heightPts || "0") || 0;
+        const yTop = Math.min(Math.max((S - vis.offsetTop) / sVis, 0), hPts);
+        return { page: Number(vis.dataset.page) || 1, yTop };
       },
     }),
     [],

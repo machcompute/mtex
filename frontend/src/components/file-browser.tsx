@@ -223,7 +223,7 @@ export default function FileBrowser({
                   >
                     main
                   </span>
-                ) : path.endsWith(".tex") && !isRenaming ? (
+                ) : path.toLowerCase().endsWith(".tex") && !isRenaming ? (
                   <button
                     title="Set as main file"
                     onClick={(e) => {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Editor, { type BeforeMount } from "@monaco-editor/react";
+import Editor, { type BeforeMount, type Monaco } from "@monaco-editor/react";
 import type * as monaco from "monaco-editor";
 import PdfViewer, {
   toArrayBuffer,
@@ -111,6 +111,8 @@ type StoredProject = {
   projectName: string;
   mainPath: string;
   openPaths: string[];
+  /** Active tab on load (restored when the file is still open). */
+  activePath?: string;
   files: Record<string, string | { b64: string }>;
 };
 
@@ -209,6 +211,8 @@ export default function EditorPage() {
   // saved project before the load effect runs.
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Set when a save failed (quota): the header must not claim “Saved”.
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [pdf, setPdf] = useState<Uint8Array | null>(null);
   const [log, setLog] = useState("");
   const [liveLog, setLiveLog] = useState("");
@@ -243,6 +247,25 @@ export default function EditorPage() {
   const lockRef = useRef({ until: 0 });
   const autoTimerRef = useRef<number | undefined>(undefined);
   const noticeTimerRef = useRef<number | undefined>(undefined);
+  // The Monaco namespace (from the editor's onMount), for disposing models
+  // on rename/delete — Monaco models are keyed by path and never disposed
+  // otherwise, so a rename-back would resurrect pre-rename content.
+  const monacoRef = useRef<Monaco | null>(null);
+  // An edit (or manual Recompile) arrived while a compile was running; the
+  // finishing compile retries once, because the debounce that fired it
+  // can't retry itself.
+  const recompileQueuedRef = useRef(false);
+  // The PDF's scroll position before the latest compile; restored once the
+  // new PDF renders (pdf.js renders async — the effect below polls).
+  const pendingScrollRef = useRef<{ page: number; yTop: number } | null>(null);
+  // Set when the stored project was unreadable: the first persistence run
+  // (which would write the defaults over it) is skipped.
+  const skipNextSaveRef = useRef(false);
+  // uploadFiles is redefined every render; the window-level drop handler
+  // (attached once) calls it through this ref.
+  const uploadFilesRef = useRef<(list: File[], dirNames?: Set<string>) => void>(
+    () => {},
+  );
   // Refs mirroring state so handlers attached once (Monaco onMount, the
   // PDF viewer's scroll callback) never see stale values.
   const syncEntriesRef = useRef<SyncEntry[] | null>(null);
@@ -258,33 +281,70 @@ export default function EditorPage() {
   // --- load saved project (client-only; defaults render first, as SSR
   //     did, so hydration never mismatches) ------------------------------
   useEffect(() => {
+    let corrupt = false;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const proj = JSON.parse(raw) as StoredProject;
-        if (proj && proj.v === 1 && proj.files) {
+        if (
+          proj &&
+          proj.v === 1 &&
+          proj.files &&
+          typeof proj.files === "object"
+        ) {
           const restored: Record<string, FileData> = {};
           for (const [k, v] of Object.entries(proj.files)) {
-            restored[k] = typeof v === "string" ? v : fromB64(v.b64);
+            if (typeof v === "string") {
+              restored[k] = v;
+            } else {
+              try {
+                restored[k] = fromB64(v.b64);
+              } catch {
+                corrupt = true; // a base64 entry that doesn't decode
+                break;
+              }
+            }
           }
-          if (Object.keys(restored).length > 0) {
-            const main =
-              restored[proj.mainPath] !== undefined
-                ? proj.mainPath
-                : Object.keys(restored)[0];
-            const open = (proj.openPaths ?? []).filter(
-              (p) => restored[p] !== undefined,
+          if (!corrupt && Object.keys(restored).length === 0) {
+            corrupt = true; // a saved project always has at least one file
+          }
+          if (!corrupt) {
+            const main = Object.hasOwn(restored, proj.mainPath)
+              ? proj.mainPath
+              : Object.keys(restored)[0];
+            const open = (proj.openPaths ?? []).filter((p) =>
+              Object.hasOwn(restored, p),
             );
+            // Prefer the tab that was active when the session ended.
+            const active =
+              proj.activePath &&
+              Object.hasOwn(restored, proj.activePath) &&
+              open.includes(proj.activePath)
+                ? proj.activePath
+                : open.length
+                  ? open[open.length - 1]
+                  : main;
             setFiles(restored);
             setMainPath(main);
             setOpenPaths(open.length ? open : [main]);
-            setActivePath(open.length ? open[open.length - 1] : main);
+            setActivePath(active);
             setProjectName(proj.projectName || DEFAULT_PROJECT_NAME);
           }
+        } else {
+          corrupt = true;
         }
       }
     } catch {
-      // Corrupt storage — start from the defaults.
+      corrupt = true; // unparseable storage
+    }
+    if (corrupt) {
+      // Start from the defaults, but don't let the first persistence run
+      // write them over the unreadable project. (showNotice is created per
+      // render, so the notice is set inline here.)
+      skipNextSaveRef.current = true;
+      setNotice("Couldn't read the saved project — starting fresh");
+      window.clearTimeout(noticeTimerRef.current);
+      noticeTimerRef.current = window.setTimeout(() => setNotice(null), 8000);
     }
     setLoaded(true);
   }, []);
@@ -292,13 +352,20 @@ export default function EditorPage() {
   // --- persist to localStorage (debounced; binary as base64) ------------
   useEffect(() => {
     if (!loaded) return;
+    if (skipNextSaveRef.current) {
+      // The stored project was unreadable; the first run would overwrite
+      // it with the defaults. Skip it — the next real edit saves normally.
+      skipNextSaveRef.current = false;
+      return;
+    }
     setSaving(true);
     const t = window.setTimeout(() => {
       const proj: StoredProject = {
         v: 1,
         projectName,
         mainPath,
-        openPaths: openPaths.filter((p) => files[p] !== undefined),
+        openPaths: openPaths.filter((p) => Object.hasOwn(files, p)),
+        activePath,
         files: Object.fromEntries(
           Object.entries(files).map(([k, v]) =>
             [k, typeof v === "string" ? v : { b64: toB64(v) }] as const,
@@ -307,13 +374,16 @@ export default function EditorPage() {
       };
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(proj));
+        setSaveError(null);
       } catch {
-        // Storage full or unavailable — the session just isn't saved.
+        // Quota exceeded or storage unavailable: the session isn't saved —
+        // the header says so instead of claiming “Saved”.
+        setSaveError("Storage is full — changes are not being saved");
       }
       setSaving(false);
     }, 600);
     return () => window.clearTimeout(t);
-  }, [files, mainPath, openPaths, projectName, loaded]);
+  }, [files, mainPath, openPaths, activePath, projectName, loaded]);
 
   // --- engine ------------------------------------------------------------
   useEffect(() => {
@@ -347,6 +417,22 @@ export default function EditorPage() {
         // "Loading engine…" (unless a compile already started).
         setStatus((s) => (s.kind === "loading" ? { kind: "idle" } : s));
       },
+      (msg) => {
+        // A failure outside a compile (an init-time asset load failing, a
+        // worker crash). The worker is already disposed and the next
+        // compile recreates it — but the header must not sit on
+        // "Loading engine…" forever, and the error must be visible.
+        setLiveLog((prev) => {
+          const next = prev ? prev + "\n" + msg : msg;
+          const lines = next.split("\n");
+          return lines.length > 400 ? lines.slice(-400).join("\n") : next;
+        });
+        setStatus((s) =>
+          s.kind === "compiling"
+            ? s
+            : { kind: "error", message: "Engine failed to load — see log" },
+        );
+      },
     );
     return () => compiler.dispose();
   }, []);
@@ -366,8 +452,14 @@ export default function EditorPage() {
 
   const compile = useCallback(async () => {
     const compiler = compilerRef.current;
-    if (!compiler || busyRef.current) return;
-    if (!mainPath || files[mainPath] === undefined) {
+    if (!compiler) return;
+    if (busyRef.current) {
+      // An edit (or a manual Recompile) arrived mid-compile. The debounce
+      // that fired it can't retry itself, so the finishing compile does.
+      recompileQueuedRef.current = true;
+      return;
+    }
+    if (!mainPath || !Object.hasOwn(files, mainPath)) {
       setStatus({
         kind: "error",
         message: "No main .tex file — add one and mark it “main”",
@@ -375,6 +467,9 @@ export default function EditorPage() {
       return;
     }
     busyRef.current = true;
+    // Remember the PDF's scroll position so the new PDF can restore it —
+    // a recompile must not yank the reader back to the top of page 1.
+    pendingScrollRef.current = pdfRef.current?.getViewportTop() ?? null;
     setPdf(null);
     setLiveLog("");
     setStatus({ kind: "compiling", line: "preparing…" });
@@ -395,8 +490,14 @@ export default function EditorPage() {
       setLog(result.log);
       // Decode synctex for PDF<->source navigation; a failed build has no
       // usable map, and decoding is best-effort (bad bytes = no navigation).
+      // Input-table paths are resolved against the project files so a
+      // nested \input maps to its real path, not its basename.
       if (result.pdf && result.synctex) {
-        setSyncEntries(await decodeSynctex(result.synctex).catch(() => null));
+        setSyncEntries(
+          await decodeSynctex(result.synctex, Object.keys(files), mainPath).catch(
+            () => null,
+          ),
+        );
       } else {
         setSyncEntries(null);
       }
@@ -404,6 +505,12 @@ export default function EditorPage() {
       setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     } finally {
       busyRef.current = false;
+      if (recompileQueuedRef.current) {
+        recompileQueuedRef.current = false;
+        // Let the state above settle, then recompile through the
+        // always-current ref so the latest files are picked up.
+        window.setTimeout(() => compileRef.current(), 0);
+      }
     }
   }, [files, mainPath]);
   compileRef.current = compile;
@@ -413,15 +520,62 @@ export default function EditorPage() {
     if (status.kind === "error") setShowLog(true);
   }, [status]);
 
+  // Restore the PDF scroll position after a recompile. The new PDF is a
+  // fresh document that pdf.js renders asynchronously, so poll until the
+  // page exists (up to ~6 s).
+  useEffect(() => {
+    const target = pendingScrollRef.current;
+    // The viewer is cleared (setPdf(null)) before the new PDF arrives and
+    // this effect runs on that intermediate state — don't consume the
+    // target then, or the run with the new pdf would find it gone.
+    if (!pdf || !target) return;
+    pendingScrollRef.current = null;
+    let tries = 0;
+    let timer: number | undefined;
+    const tick = () => {
+      if (
+        pdfRef.current?.scrollToPosition(target.page, target.yTop, {
+          select: false,
+          instant: true,
+        })
+      ) {
+        lockRef.current.until = Date.now() + 500;
+        return;
+      }
+      if (++tries >= 60) return;
+      timer = window.setTimeout(tick, 100);
+    };
+    tick();
+    return () => window.clearTimeout(timer);
+  }, [pdf]);
+
   // --- file operations -------------------------------------------------
+
+  /** Dispose Monaco's model for a path so the next open of that path starts
+   * from the current value. Models are keyed by path and never disposed
+   * otherwise — a rename-back would resurrect the pre-rename model. */
+  const disposeModel = (path: string) => {
+    const m = monacoRef.current;
+    if (!m) return;
+    for (const model of m.editor.getModels()) {
+      if (model.uri.path === path) model.dispose();
+    }
+  };
 
   const addFile = (name: string) => {
     const path = normalizeName(name);
-    if (!path || files[path] !== undefined) {
-      setStatus({
-        kind: "error",
-        message: `Cannot create “${name}” — use a flat name (no folders), not already taken`,
-      });
+    if (!path) {
+      showNotice(
+        `Cannot create “${name}” — use a flat name (no folders or reserved names)`,
+      );
+      return;
+    }
+    if (Object.hasOwn(files, path)) {
+      showNotice(`“${path}” already exists`);
+      return;
+    }
+    if (pathIsFolder(Object.keys(files), path)) {
+      showNotice(`“${path}” is a folder in this project`);
       return;
     }
     setFiles((f) => ({ ...f, [path]: "" }));
@@ -434,18 +588,23 @@ export default function EditorPage() {
     // in place (or moved between folders) — validate as a path, not a name.
     const path = normalizePath(newName);
     if (!path) {
-      setStatus({
-        kind: "error",
-        message: `Cannot rename to “${newName}” — use a valid path (no empty, “.” or “..” segments)`,
-      });
+      showNotice(
+        `Cannot rename to “${newName}” — use a valid path (no empty, “.” or “..” segments)`,
+      );
       return;
     }
     if (path === oldPath) return;
-    if (files[path] !== undefined) {
-      setStatus({
-        kind: "error",
-        message: `Cannot rename to “${newName}” — name already taken`,
-      });
+    if (Object.hasOwn(files, path)) {
+      showNotice(`Cannot rename to “${newName}” — name already taken`);
+      return;
+    }
+    if (
+      pathUnderFile(Object.keys(files), path) ||
+      pathIsFolder(Object.keys(files), path)
+    ) {
+      showNotice(
+        `Cannot rename to “${newName}” — it would collide with an existing file or folder`,
+      );
       return;
     }
     setFiles((f) => {
@@ -456,17 +615,28 @@ export default function EditorPage() {
     setOpenPaths((o) => o.map((p) => (p === oldPath ? path : p)));
     setActivePath((p) => (p === oldPath ? path : p));
     setMainPath((m) => (m === oldPath ? path : m));
+    // Drop the models for BOTH paths: the old one holds pre-rename content
+    // (a rename-back would resurrect it), and a stale model at the new path
+    // could do the same in the other direction.
+    disposeModel(oldPath);
+    disposeModel(path);
   };
 
   const deleteFile = (path: string) => {
     const rest = Object.keys(files).filter((p) => p !== path);
+    // Only a .tex file can be the main file — if none remains, the project
+    // has no build target (the header says so on the next compile) instead
+    // of silently picking refs.bib.
     const nextMain =
-      path === mainPath ? (rest.find((p) => p.endsWith(".tex")) ?? rest[0] ?? "") : mainPath;
+      path === mainPath
+        ? (rest.find((p) => p.toLowerCase().endsWith(".tex")) ?? "")
+        : mainPath;
     setFiles((f) => {
       const next = { ...f };
       delete next[path];
       return next;
     });
+    disposeModel(path);
     const without = openPaths.filter((p) => p !== path);
     const idx = openPaths.indexOf(path);
     setOpenPaths(without.length ? without : nextMain ? [nextMain] : []);
@@ -496,21 +666,30 @@ export default function EditorPage() {
   // File per entry with a webkitRelativePath like "myproj/figs/a.png"; the
   // top folder is stripped so the tree lands at the project root.
 
-  const uploadFiles = (list: File[]) => {
+  /** A pill at the bottom of the page, auto-clearing after `ms`. */
+  const showNotice = (msg: string, ms = 3000) => {
+    setNotice(msg);
+    window.clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = window.setTimeout(() => setNotice(null), ms);
+  };
+
+  const uploadFiles = (list: File[], dirNames?: Set<string>) => {
     void (async () => {
       const added: Record<string, FileData> = {};
       let firstOpen: string | null = null;
-      let skipped = 0;
+      let skippedJunk = 0;
       let droppedFolders = 0;
       for (const f of list) {
-        // A folder dragged from the OS arrives in Chromium as a single
-        // unreadable File (no relative path, size 0, no type/extension).
-        // Skip it — importing it would create a junk row.
+        // A folder dragged from the OS arrives as one unreadable File (no
+        // relative path) whose name matches a top-level directory entry.
+        // When the drop's entries were inspected (dirNames), that check is
+        // exact; otherwise (no entry API) fall back to a heuristic — a
+        // 0-byte, typeless file with no extension.
         if (
           !f.webkitRelativePath &&
-          f.size === 0 &&
-          f.type === "" &&
-          !f.name.includes(".")
+          (dirNames
+            ? dirNames.has(f.name)
+            : f.size === 0 && f.type === "" && !f.name.includes("."))
         ) {
           droppedFolders++;
           continue;
@@ -520,59 +699,144 @@ export default function EditorPage() {
             ? normalizePath(f.webkitRelativePath.split("/").slice(1).join("/"))
             : normalizeName(f.name);
         // Skip junk paths and dotfiles at any depth (.DS_Store, .git, …).
-        if (!name || name.split("/").some((p) => p.startsWith("."))) continue;
-        if (filesRef.current[name] !== undefined) {
-          skipped++;
-          continue; // never overwrite existing work
+        if (
+          !name ||
+          name
+            .split("/")
+            .some((p) => p.startsWith(".") || RESERVED_NAMES.has(p.toLowerCase()))
+        ) {
+          skippedJunk++;
+          continue;
         }
         const dot = name.lastIndexOf(".");
         const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
         const isBinary = BINARY_EXT.has(ext);
         let data: FileData;
         try {
-          data = isBinary
-            ? new Uint8Array(await f.arrayBuffer())
-            : await f.text();
+          const buf = new Uint8Array(await f.arrayBuffer());
+          // Text is decoded as STRICT UTF-8; bytes that are not valid
+          // UTF-8 are kept raw instead of being mangled with U+FFFD.
+          data = isBinary ? buf : (decodeText(buf) ?? buf);
         } catch {
+          droppedFolders++;
           continue; // unreadable file — skip it
         }
         added[name] = data;
         // Prefer a .tex file; otherwise the first text file.
-        if (!isBinary && (firstOpen === null || (name.endsWith(".tex") && !firstOpen.endsWith(".tex")))) {
+        if (
+          typeof data === "string" &&
+          (firstOpen === null ||
+            (name.toLowerCase().endsWith(".tex") &&
+              !firstOpen.toLowerCase().endsWith(".tex")))
+        ) {
           firstOpen = name;
         }
       }
-      const count = Object.keys(added).length;
+      // A slow import can race a second drop or user edits, so re-check
+      // against the current files and count the notice from what actually
+      // lands.
+      const merged: Record<string, FileData> = {};
+      let skippedExisting = 0;
+      for (const [k, v] of Object.entries(added)) {
+        if (Object.hasOwn(filesRef.current, k)) {
+          skippedExisting++;
+          continue; // never overwrite existing work
+        }
+        merged[k] = v;
+      }
+      if (firstOpen && !Object.hasOwn(merged, firstOpen)) firstOpen = null;
+      const count = Object.keys(merged).length;
+      if (count === 0 && skippedExisting === 0 && skippedJunk === 0 && droppedFolders === 0)
+        return;
       const folderNote =
         droppedFolders > 0
-          ? ` (${droppedFolders} dropped folder${droppedFolders === 1 ? "" : "s"} can't be read by the browser — use the folder button)`
+          ? ` — ${droppedFolders} dropped folder${droppedFolders === 1 ? "" : "s"} can't be read by the browser, use the folder button`
           : "";
       if (count > 0) {
-        setFiles((prev) => ({ ...prev, ...added }));
+        setFiles((prev) => {
+          const next = { ...prev };
+          for (const [k, v] of Object.entries(merged)) {
+            if (!Object.hasOwn(prev, k)) next[k] = v;
+          }
+          return next;
+        });
         if (firstOpen) openPath(firstOpen);
-        setNotice(
+        showNotice(
           `Uploaded ${count} file${count === 1 ? "" : "s"} — kept in your browser` +
-            (skipped ? ` (${skipped} already existed, skipped)` : "") +
+            (skippedExisting
+              ? ` (${skippedExisting} already existed, skipped)`
+              : "") +
+            (skippedJunk
+              ? ` (${skippedJunk} skipped: dotfiles or reserved names)`
+              : "") +
             folderNote,
+          droppedFolders > 0 ? 8000 : 3000,
         );
-        window.clearTimeout(noticeTimerRef.current);
-        noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3000);
-      } else if (skipped > 0) {
-        setNotice(
-          `Nothing uploaded — ${skipped} file${skipped === 1 ? " was" : "s were"} already in the project` +
-            folderNote,
+      } else {
+        showNotice(
+          `Nothing uploaded — ` +
+            [
+              skippedExisting > 0
+                ? `${skippedExisting} file${skippedExisting === 1 ? " was" : "s were"} already in the project`
+                : "",
+              skippedJunk > 0
+                ? `${skippedJunk} skipped (dotfiles or reserved names)`
+                : "",
+              droppedFolders > 0
+                ? `the ${droppedFolders} dropped folder${droppedFolders === 1 ? " can" : "s can"}'t be read by the browser — use the folder button to import it`
+                : "",
+            ]
+              .filter(Boolean)
+              .join("; "),
+          droppedFolders > 0 ? 8000 : 3000,
         );
-        window.clearTimeout(noticeTimerRef.current);
-        noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3000);
-      } else if (droppedFolders > 0) {
-        setNotice(
-          `Dropped folder${droppedFolders === 1 ? "" : "s"} can't be read by the browser — use the folder button to import it`,
-        );
-        window.clearTimeout(noticeTimerRef.current);
-        noticeTimerRef.current = window.setTimeout(() => setNotice(null), 3000);
       }
     })();
   };
+  uploadFilesRef.current = uploadFiles;
+
+  // Window-level drop guard (capture phase): files dropped ANYWHERE must
+  // not navigate the page away (a file:// Security Error) — and real drops
+  // are imported through the same path as the Files panel. The panel's own
+  // drop handler stays as a fallback; this one stops propagation only when
+  // it handles the drop.
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => {
+      const types = Array.from(e.dataTransfer?.types ?? []);
+      if (types.includes("Files")) e.preventDefault();
+    };
+    const onDrop = (e: DragEvent) => {
+      const types = Array.from(e.dataTransfer?.types ?? []);
+      if (!types.includes("Files")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const dt = e.dataTransfer;
+      if (!dt) return;
+      // Top-level directory entries, when the entries API can see them
+      // (real OS drags). A synthetic drop has no entries → undefined →
+      // the heuristic in uploadFiles applies.
+      const dirNames = new Set<string>();
+      let anyEntry = false;
+      for (const item of Array.from(dt.items)) {
+        try {
+          const entry = item.webkitGetAsEntry?.();
+          if (entry) {
+            anyEntry = true;
+            if (entry.isDirectory) dirNames.add(entry.name);
+          }
+        } catch {
+          // entry unreadable — fall back to the heuristic
+        }
+      }
+      uploadFilesRef.current(Array.from(dt.files), anyEntry ? dirNames : undefined);
+    };
+    window.addEventListener("dragover", onDragOver, true);
+    window.addEventListener("drop", onDrop, true);
+    return () => {
+      window.removeEventListener("dragover", onDragOver, true);
+      window.removeEventListener("drop", onDrop, true);
+    };
+  }, []);
 
   // --- PDF <-> source navigation (synctex) ------------------------------
 
@@ -635,8 +899,10 @@ export default function EditorPage() {
     if (file === activePath) {
       revealLine(line, { flash: !quiet, select: !quiet });
     } else {
+      // Open the file as a tab if it isn't open yet — switching the active
+      // path alone would leave the editor pane empty for an unopened file.
       pendingJumpRef.current = { file, line, quiet };
-      setActivePath(file);
+      openPath(file);
     }
   };
 
@@ -750,8 +1016,13 @@ export default function EditorPage() {
           title="Project name (saved in your browser)"
           className="w-44 shrink rounded border border-transparent bg-transparent px-1.5 py-0.5 text-sm font-medium text-ink transition-colors hover:border-ink/15 focus:border-mint focus:outline-none"
         />
-        <span className="shrink-0 text-xs text-stone">
-          {saving ? "Saving…" : "Saved"}
+        <span
+          title={saveError ?? undefined}
+          className={
+            "shrink-0 text-xs " + (saveError ? "text-red-600" : "text-stone")
+          }
+        >
+          {saving ? "Saving…" : saveError ? "Not saved" : "Saved"}
         </span>
 
         <div className="flex min-w-0 flex-1 justify-center">
@@ -802,7 +1073,12 @@ export default function EditorPage() {
                 ? "Auto recompile: on (after you stop typing)"
                 : "Auto recompile: off (press Recompile or Ctrl/Cmd+Enter)"
             }
-            onClick={() => setAutoRecompile((v) => !v)}
+            onClick={() => {
+              // Turning auto recompile off must cancel a pending one —
+              // otherwise it still fires 1.2 s after the last keystroke.
+              if (autoRecompile) window.clearTimeout(autoTimerRef.current);
+              setAutoRecompile(!autoRecompile);
+            }}
             className={
               "rounded p-1 transition-colors " +
               (autoRecompile
@@ -893,6 +1169,7 @@ export default function EditorPage() {
                 }}
                 onMount={(editor, m) => {
                   editorRef.current = editor;
+                  monacoRef.current = m;
                   // Overleaf's recompile binding.
                   editor.addCommand(
                     m.KeyMod.CtrlCmd | m.KeyCode.Enter,
@@ -932,7 +1209,7 @@ export default function EditorPage() {
             data={pdf}
             onPageClick={handlePageClick}
             downloadName={
-              mainPath.endsWith(".tex")
+              mainPath.toLowerCase().endsWith(".tex")
                 ? mainPath.slice(0, -4) + ".pdf"
                 : "output.pdf"
             }
@@ -1012,12 +1289,40 @@ function lastLine(line: string, prev: string) {
   return prev.length > trimmed.length ? prev : trimmed.slice(0, 80) + "…";
 }
 
-// Flat file names for manual entry (new file / rename).
+// File names that collide with Object.prototype. Storing them as keys of
+// the plain `files` object would shadow the inherited members (and a
+// `files[name] !== undefined` lookup would hit them), so they are refused
+// outright and every lookup uses Object.hasOwn.
+const RESERVED_NAMES = new Set(["constructor", "__proto__", "prototype"]);
+
+/** Strict UTF-8 decode; null when the bytes are not valid UTF-8. */
+function decodeText(buf: Uint8Array): string | null {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch {
+    return null;
+  }
+}
+
+/** True when `path` would live under an existing file (a file can't be a
+ * directory). */
+function pathUnderFile(all: string[], path: string): boolean {
+  return all.some((p) => p !== path && path.startsWith(p + "/"));
+}
+
+/** True when files already exist under `path` (it is used as a folder). */
+function pathIsFolder(all: string[], path: string): boolean {
+  return all.some((p) => p.startsWith(path + "/"));
+}
+
+// Flat file names for manual entry (new file / rename). “v1..2.tex” is a
+// legal name — only the literal paths “.” and “..” are rejected.
 function normalizeName(name: string): string | null {
   const trimmed = name.trim();
   if (!trimmed) return null;
-  if (trimmed.includes("/") || trimmed.includes("\\") || trimmed.includes(".."))
-    return null;
+  if (trimmed === "." || trimmed === "..") return null;
+  if (trimmed.includes("/") || trimmed.includes("\\")) return null;
+  if (RESERVED_NAMES.has(trimmed.toLowerCase())) return null;
   return trimmed;
 }
 
