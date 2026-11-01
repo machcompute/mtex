@@ -196,6 +196,10 @@ function mimeOf(name: string): string {
 
 export default function EditorPage() {
   const [files, setFiles] = useState<Record<string, FileData>>(DEFAULT_FILES);
+  // Always-current view of `files` for async handlers (uploads read it while
+  // awaiting file bytes, where the render-time closure would be stale).
+  const filesRef = useRef(files);
+  filesRef.current = files;
   const [activePath, setActivePath] = useState(DEFAULT_MAIN);
   const [openPaths, setOpenPaths] = useState<string[]>([DEFAULT_MAIN]);
   const [mainPath, setMainPath] = useState(DEFAULT_MAIN);
@@ -426,8 +430,17 @@ export default function EditorPage() {
   };
 
   const renameFile = (oldPath: string, newName: string) => {
-    const path = normalizeName(newName);
-    if (!path || path === oldPath) return;
+    // The rename field shows the full path, so nested files can be renamed
+    // in place (or moved between folders) — validate as a path, not a name.
+    const path = normalizePath(newName);
+    if (!path) {
+      setStatus({
+        kind: "error",
+        message: `Cannot rename to “${newName}” — use a valid path (no empty, “.” or “..” segments)`,
+      });
+      return;
+    }
+    if (path === oldPath) return;
     if (files[path] !== undefined) {
       setStatus({
         kind: "error",
@@ -493,8 +506,9 @@ export default function EditorPage() {
           f.webkitRelativePath
             ? normalizePath(f.webkitRelativePath.split("/").slice(1).join("/"))
             : normalizeName(f.name);
-        if (!name || name.startsWith(".")) continue; // junk paths, dotfiles
-        if (files[name] !== undefined) {
+        // Skip junk paths and dotfiles at any depth (.DS_Store, .git, …).
+        if (!name || name.split("/").some((p) => p.startsWith("."))) continue;
+        if (filesRef.current[name] !== undefined) {
           skipped++;
           continue; // never overwrite existing work
         }
