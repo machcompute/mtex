@@ -3,7 +3,13 @@
 const { spawnSync } = require("child_process");
 const path = require("path");
 
-const suites = ["folder.cjs", "rename.cjs", "regression.cjs", "firefox.cjs"];
+const suites = [
+  "folder.cjs",
+  "rename.cjs",
+  "regression.cjs",
+  "fixes.cjs",
+  "firefox.cjs",
+];
 let failed = 0;
 for (const suite of suites) {
   console.log(`\n=== ${suite} ===`);

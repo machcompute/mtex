@@ -89,8 +89,14 @@ const r = new Runner("rename");
   await renameInput().fill("a//b.png");
   await renameInput().press("Enter");
   await r.page.waitForTimeout(300);
-  const err = (await r.status.textContent().catch(() => "")) || "";
-  r.ok("invalid rename shows error", /Cannot rename/.test(err), err);
+  // The error is a notice pill (not a status error — that would open the
+  // log drawer and imply a failed compile).
+  const bodyText = await r.page.evaluate(() => document.body.innerText);
+  r.ok("invalid rename shows notice", /Cannot rename/.test(bodyText));
+  r.ok(
+    "invalid rename leaves the log drawer closed",
+    (await r.page.locator("button", { hasText: "View log" }).count()) > 0,
+  );
   r.ok(
     "invalid rename leaves file unchanged",
     (await r.page.locator("li", { hasText: "rootlogo.png" }).count()) > 0 &&

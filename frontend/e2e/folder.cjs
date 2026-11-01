@@ -147,28 +147,43 @@ const r = new Runner("folder");
       stored.files?.["doc.tex"] !== undefined,
   );
 
-  // A folder dragged from the OS (Chromium shape: one unreadable File with
-  // no relative path) must not create a junk row.
+  // A folder dragged from the OS must not create a junk row. Two shapes:
+  //  1. a REAL directory drag (CDP, Chromium) — the browser delivers one
+  //     unreadable File whose name matches a directory entry;
+  //  2. a synthetic 0-byte, typeless file WITH a dot in its name — the
+  //     no-entries heuristic must still import it (a folder only looks
+  //     like a nameless empty file, never like "empty.txt").
+  const DRAG_DIR = "/tmp/opencode/dragfix/thesis";
+  if (fs.existsSync(DRAG_DIR)) {
+    const asideBox = await r.page.locator("aside").boundingBox();
+    await r.osDrag(DRAG_DIR, asideBox.x + 60, asideBox.y + 200);
+    await r.page.waitForTimeout(1500);
+    r.ok(
+      "dropped OS folder creates no junk row",
+      (await r.page.locator("li", { hasText: "thesis" }).count()) === 0,
+    );
+    const folderNotice =
+      ((await r.page
+        .locator("p, div")
+        .filter({ hasText: /can't be read by the browser/ })
+        .first()
+        .textContent()
+        .catch(() => "")) || "");
+    r.ok("notice explains the dropped folder", folderNotice.length > 0, folderNotice);
+  }
+
   await r.page.evaluate(() => {
     const dt = new DataTransfer();
-    dt.items.add(new File([new Uint8Array(0)], "junkfolder", { type: "" }));
+    dt.items.add(new File([new Uint8Array(0)], "empty.txt", { type: "" }));
     document
       .querySelector("aside")
       .dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
   });
   await r.page.waitForTimeout(800);
   r.ok(
-    "dropped OS folder creates no junk row",
-    (await r.page.locator("li", { hasText: "junkfolder" }).count()) === 0,
+    "0-byte file with a dot still imports",
+    (await r.page.locator("li", { hasText: "empty.txt" }).count()) > 0,
   );
-  const folderNotice =
-    ((await r.page
-      .locator("p, div")
-      .filter({ hasText: /can't be read by the browser/ })
-      .first()
-      .textContent()
-      .catch(() => "")) || "");
-  r.ok("notice explains the dropped folder", folderNotice.length > 0, folderNotice);
 
   console.log(
     r.failures === 0 ? "ALL FOLDER CHECKS PASSED" : r.failures + " CHECK(S) FAILED",
