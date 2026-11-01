@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // texliveAssets are served to the browser from the pinned busytex WASM release
@@ -20,7 +21,39 @@ var texliveAssets = map[string]string{
 	"texlive-basic.data": "https://github.com/busytex/busytex/releases/download/build_b16fdf28019d93ccfd8f09776e4191835acea5dc/texlive-basic.data",
 }
 
-const texliveAssetType = "application/octet-stream"
+// texliveAssetType maps an asset to the Content-Type the browser needs.
+// The types matter: the worker loads the .js files with importScripts(),
+// which refuses non-JavaScript types, and the .wasm must be
+// application/wasm for streaming compilation.
+func texliveAssetType(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".js"):
+		return "text/javascript"
+	case strings.HasSuffix(name, ".wasm"):
+		return "application/wasm"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// One lock per asset: the first request downloads while everyone else waits
+// for that download to finish, then serves the cache. Without this,
+// concurrent first downloads would race on the same temp file.
+var (
+	texliveDownloadLocks   = map[string]*sync.Mutex{}
+	texliveDownloadLocksMu sync.Mutex
+)
+
+func texliveDownloadLock(name string) *sync.Mutex {
+	texliveDownloadLocksMu.Lock()
+	defer texliveDownloadLocksMu.Unlock()
+	mu, ok := texliveDownloadLocks[name]
+	if !ok {
+		mu = &sync.Mutex{}
+		texliveDownloadLocks[name] = mu
+	}
+	return mu
+}
 
 func texliveCacheDir() string {
 	if dir := os.Getenv("TEXLIVE_CACHE_DIR"); dir != "" {
@@ -62,6 +95,17 @@ func handleTexlive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mu := texliveDownloadLock(name)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// A concurrent request may have finished the download while we waited.
+	if info, err := os.Stat(cachePath); err == nil {
+		log.Printf("texlive: serving %s (%d bytes, cached)", name, info.Size())
+		http.ServeFile(w, r, cachePath)
+		return
+	}
+
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		http.Error(w, "internal error: cannot create cache dir", http.StatusInternalServerError)
 		return
@@ -79,31 +123,36 @@ func handleTexlive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", texliveAssetType)
+	w.Header().Set("Content-Type", texliveAssetType(name))
 	if resp.ContentLength > 0 {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
 	}
 	log.Printf("texlive: downloading %s (%d bytes) to %s", name, resp.ContentLength, cachePath)
 
-	f, err := os.Create(cachePath + ".part")
+	// A unique temp file per downloader: a shared ".part" name would be
+	// truncated by a concurrent os.Create and could corrupt the cache
+	// permanently.
+	f, err := os.CreateTemp(cacheDir, name+".part-*")
 	if err != nil {
 		http.Error(w, "internal error: cannot create cache file", http.StatusInternalServerError)
 		return
 	}
+	partPath := f.Name()
 
 	_, err = io.Copy(io.MultiWriter(w, f), resp.Body)
 	cerr := f.Close()
 	if err != nil {
-		os.Remove(cachePath + ".part")
+		os.Remove(partPath)
 		log.Printf("texlive: download of %s failed: %v", name, err)
 		return
 	}
 	if cerr != nil {
-		os.Remove(cachePath + ".part")
+		os.Remove(partPath)
 		log.Printf("texlive: write of %s failed: %v", name, cerr)
 		return
 	}
-	if err := os.Rename(cachePath+".part", cachePath); err != nil {
+	if err := os.Rename(partPath, cachePath); err != nil {
+		os.Remove(partPath)
 		log.Printf("texlive: rename of %s failed: %v", name, err)
 		return
 	}
