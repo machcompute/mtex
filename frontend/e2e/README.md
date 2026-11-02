@@ -17,9 +17,10 @@ node e2e/firefox.cjs        # one suite: folder picker button flow in real Firef
 Prerequisites:
 
 - `npm install` in `frontend/` (brings in `playwright-core`).
-- Both servers up: the Next.js frontend (`npm run dev`, :3000) **and** the
-  Go backend (`go run .` in `backend/`, :8080) — the frontend proxies
-  `/api/texlive/` to it, and the engine cannot load without it.
+- The Next.js frontend up (`npm run dev`, :3000). It serves the engine
+  assets itself through `/api/texlive/` (downloading them from the pinned
+  busytex release on first request and caching them in `.texlive-cache/`),
+  and the engine cannot load without that route.
 - A headless Chromium. The default is
   `/home/lukas/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome`;
   override with `CHROME_EXECUTABLE=/path/to/chrome node e2e/run.cjs`.
@@ -31,8 +32,8 @@ Prerequisites:
 Each suite launches a fresh disposable Chromium profile under the OS temp
 dir (`mkdtemp`) and removes it on exit, so nothing is written into the repo
 and a crashed run can't poison the next one. The first run downloads the
-~72 MB texlive package through the backend, which then serves it from
-`backend/texlive-cache/`.
+~96 MB of engine assets (including the ~72 MB texlive package) from the
+web into `.texlive-cache/`, which the route then serves from disk.
 
 ## What the suites cover
 

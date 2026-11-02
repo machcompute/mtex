@@ -4,9 +4,9 @@ node_modules/
 out/
 npm-debug.log*
 
-# Go
-backend/bin/
-*.exe
+# busytex engine assets: downloaded from the pinned release on first
+# request by the Next.js /api/texlive route and cached here (~96 MB).
+.texlive-cache/
 
 # Env & secrets
 .env

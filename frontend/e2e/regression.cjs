@@ -1,6 +1,6 @@
 // Regression: default project (bibtex citations), network audit
 // (browser-only, no data exfiltration), and the vendored
-// caption/subcaption and algorithm2e packages.
+// caption/subcaption, algorithm2e and pgfplots(+pslatex) packages.
 const { Runner } = require("./helpers.cjs");
 
 const SUBDOC = [
@@ -69,6 +69,50 @@ const ESSDOC = [
   "\\begin{itemize}[leftmargin=2em]",
   "\\item enumitem bullet",
   "\\end{itemize}",
+  "\\end{document}",
+].join("\n");
+
+// pslatex (Times) + pgfplots, the user's document shape. The axis MUST be
+// wrapped in a tikzpicture — that is how pgfplots installs the environment
+// (the manual: "we have to write each \PGFPlots{} graph into a \TikZ{}
+// picture"); a standalone \begin{axis} fails with "Environment axis
+// undefined" in EVERY TeX Live. The zapfchan TFM/PFB fonts are pulled in
+// because the zptmcm* virtual math fonts xdv references (e.g. zpzccmry)
+// compose from pzcmi8r, and xdvipdfmx aborts the whole PDF without it.
+const PLPDOC = [
+  "\\documentclass{article}",
+  "\\usepackage{pslatex}",
+  "\\usepackage{caption}",
+  "\\usepackage{subcaption}",
+  "\\usepackage[ruled,linesnumbered]{algorithm2e}",
+  "\\usepackage{booktabs}",
+  "\\usepackage{tikz}",
+  "\\usepackage{pgfplots}",
+  "\\pgfplotsset{compat=1.18}",
+  "\\begin{document}",
+  "Typeset in Times: $a+b=c$ and text.",
+  "\\begin{figure}[h]",
+  "\\centering",
+  "\\begin{tikzpicture}\\draw (0,0) -- (1,1);\\end{tikzpicture}",
+  "\\caption{A figure}\\label{fig:a}",
+  "\\end{figure}",
+  "\\begin{figure}[h]",
+  "\\centering",
+  "\\begin{tikzpicture}",
+  "\\begin{axis}[width=5cm,height=3cm]",
+  "\\addplot coordinates {(0,0) (1,1) (2,4)};",
+  "\\end{axis}",
+  "\\end{tikzpicture}",
+  "\\caption{A plot}\\label{fig:plot}",
+  "\\end{figure}",
+  "\\begin{algorithm}[H]",
+  "$x \\leftarrow x + 1$\\;",
+  "\\caption{Increment}\\label{alg:inc}",
+  "\\end{algorithm}",
+  "\\begin{table}[h]",
+  "\\begin{tabular}{ll}\\toprule A & 1 \\\\ \\bottomrule\\end{tabular}",
+  "\\end{table}",
+  "See Figure \\ref{fig:a} and Algorithm \\ref{alg:inc}.",
   "\\end{document}",
 ].join("\n");
 
@@ -265,6 +309,42 @@ const r = new Runner("reg");
     "no re-install on second compile",
     installs2.length === 1,
     installs2.join(" | ").slice(0, 160) || "no install line",
+  );
+
+  // --- pslatex + pgfplots (wrapped axis): the user's document shape ------
+  await r.page.evaluate((doc) => {
+    const proj = {
+      v: 1,
+      projectName: "plp",
+      mainPath: "main.tex",
+      openPaths: ["main.tex"],
+      files: { "main.tex": doc },
+    };
+    localStorage.setItem("homehub-latex-project-v1", JSON.stringify(proj));
+  }, PLPDOC);
+  await r.page.reload({ waitUntil: "load" });
+  await r.waitReady();
+
+  const plpStatus = await r.recompile();
+  r.ok(
+    "pslatex+pgfplots doc compiled",
+    /Compiled in \d+ ms/.test(plpStatus),
+    plpStatus,
+  );
+
+  const plpText = await r.pdfText();
+  const plpFlat = plpText.replace(/\s+/g, " ");
+  r.ok("figure caption in PDF", /A figure/.test(plpText), plpText.slice(0, 160));
+  r.ok("axis plot caption in PDF", /A plot/.test(plpText), plpText.slice(0, 160));
+  r.ok(
+    "axis tick labels rendered (0 2 4)",
+    /0 2 4/.test(plpFlat),
+    plpFlat.slice(0, 200),
+  );
+  r.ok(
+    "pslatex refs resolved (no ??)",
+    !/\?\?/.test(plpText),
+    plpText.slice(0, 160),
   );
 
   console.log(

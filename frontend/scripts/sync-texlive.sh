@@ -21,12 +21,32 @@
 # Math fonts: the wasm engine ships only the core Computer Modern metric
 # (TFM) and Type1 (PFB) fonts, so \mathscr (rsfs), wasysym's extra
 # symbols, stmaryrd and \mathbb double-stroke letters (dsfont) die with
-# "Metric (TFM) file or installed font not found". FONT_DIRS names LOCAL
-# font directories (fonts/tfm/public/<d> and fonts/type1/public/<d>)
-# whose *.tfm and *.pfb files are pulled into the tree. Font directory
-# names do NOT match package names (mathrsfs -> rsfs, wasysym -> wasy +
-# wasy-type1, dsfont -> doublestroke), so they are listed separately.
-# Pass a font directory name (e.g. rsfs) as an argument to add it.
+# "Metric (TFM) file or installed font not found". FONT_SPECS names LOCAL
+# font directories (as "<relpath> <ext>" relative to fonts/) whose
+# *.<ext> files are pulled into the tree. Font directory names do NOT
+# match package names (mathrsfs -> rsfs, wasysym -> wasy + wasy-type1,
+# dsfont -> doublestroke), so they are listed separately. Pass a font
+# directory name (e.g. rsfs) as an argument to add it.
+#
+# pslatex / Times: pslatex (in the engine's base image) retypesets the
+# math operator font as OT1/ptmcm = zptmcm*, a set of VIRTUAL fonts
+# (fonts/tfm|vf/adobe/times) that compose glyphs from ptmr8r (URW Nimbus
+# Times), psyr (symbol) and cmr10. XeTeX expands the VF and its default
+# font map resolves ptmr8r -> utmr8a.pfb, so the Nimbus Type1 PFBs
+# (fonts/type1/urw/times) must also be vendored, or every pslatex doc dies
+# at the first math expression with "Metric (TFM) file or installed font
+# not found". The base TeX Live font map that names these PFBs is already
+# in the engine, so only the metrics + VF + PFBs are pulled here.
+#
+# zapfchan: the z-virtual math fonts ALSO compose from pzcmi8r (Zapf
+# Chancery, fonts/tfm/adobe/zapfchan) — zpzccmry, the OMS/pzccm symbol
+# font, lists it as a subfont. XeTeX writes the z-vf references into the
+# xdv even when no glyph is used, and xdvipdfmx requires every subfont's
+# TFM ("xdvipdfmx:fatal: Unable to find TFM file \"pzcmi8r\""), so every
+# pslatex doc with math died at the xdv->pdf stage. The base font map
+# resolves pzcmi8r to the URW Zapf Chancery PFB (fonts/type1/urw/zapfchan,
+# uzcmi8a.pfb), which xdvipdfmx then needs as the physical font (it cannot
+# run mktexpk in the worker, so the PFB itself must be vendored too).
 #
 # Usage:
 #   sh scripts/sync-texlive.sh                 # pull the default set
@@ -100,7 +120,9 @@ multirow
 physics
 placeins
 pgf
+pgfplots
 polyglossia
+psnfss
 relsize
 setspace
 siunitx
@@ -145,17 +167,29 @@ echo "using TeX Live: $TEXMFDIST"
 
 SRC_DIRS="$TEXMFDIST/tex/latex $TEXMFDIST/tex/generic"
 
-# --- default math fonts (see the header comment) -------------------------
-DEFAULT_FONTS="
-doublestroke
-rsfs
-stmaryrd
-wasy
-wasy-type1
+# --- default fonts (see the header comment) ------------------------------
+# Each entry is "<relpath> <ext>": the directory relative to fonts/ and the
+# extension to pull from it.
+FONT_SPECS="
+ tfm/public/doublestroke tfm
+ type1/public/doublestroke pfb
+ tfm/public/rsfs tfm
+ type1/public/rsfs pfb
+ tfm/public/stmaryrd tfm
+ type1/public/stmaryrd pfb
+ tfm/public/wasy tfm
+ type1/public/wasy pfb
+ tfm/public/wasy-type1 tfm
+ type1/public/wasy-type1 pfb
+ tfm/adobe/times tfm
+ tfm/adobe/symbol tfm
+ vf/adobe/times vf
+ type1/urw/times pfb
+ tfm/adobe/zapfchan tfm
+ type1/urw/zapfchan pfb
 "
 
 PKGS="$DEFAULT_PKGS"
-FONTS="$DEFAULT_FONTS"
 ALL=0
 LIST=0
 for arg in "$@"; do
@@ -167,8 +201,9 @@ for arg in "$@"; do
         # A name matching a local font dir is a font, not a package
         # (font dir names like "rsfs" have no .sty).
         if [ -d "$TEXMFDIST/fonts/tfm/public/$arg" ] || [ -d "$TEXMFDIST/fonts/type1/public/$arg" ]; then
-            FONTS="$FONTS
-$arg"
+            FONT_SPECS="$FONT_SPECS
+ tfm/public/$arg tfm
+ type1/public/$arg pfb"
         else
             PKGS="$PKGS
 $arg"
@@ -267,27 +302,25 @@ if [ -d "$OVERRIDES_DIR" ]; then
     done
 fi
 
-# --- pull math fonts (see the header comment) -----------------------------
-# Font dir names are NOT package names (mathrsfs -> rsfs, wasysym ->
-# wasy/wasy-type1, dsfont -> doublestroke), so they are pulled by their TDS
-# paths: metrics from fonts/tfm/public/<d>, outlines from
-# fonts/type1/public/<d> (PFB only — XeTeX feeds its PDF output straight
-# from the PFB and needs no .pfm).
+# --- pull fonts (see the header comment) ----------------------------------
+# FONT_SPECS entries are "<relpath> <ext>" (relative to fonts/). PFB only
+# for outlines — XeTeX feeds its PDF output straight from the PFB and needs
+# no .pfm; the .vf (virtual font) files pslatex's zptmcm* fonts need are
+# pulled the same way.
 n_fonts=0
-for d in $FONTS; do
-    for spec in "tfm:tfm" "type1:pfb"; do
-        kind="${spec%%:*}"
-        ext="${spec#*:}"
-        src="$TEXMFDIST/fonts/$kind/public/$d"
-        [ -d "$src" ] || continue
-        mkdir -p "$DST/fonts/$kind/public/$d"
-        if cp -a "$src"/*."$ext" "$DST/fonts/$kind/public/$d/" 2>/dev/null; then
-            n_fonts=$((n_fonts+1))
-        else
-            echo "warning: no .${ext} files in $src (skipped)" >&2
-        fi
-    done
-done
+while read -r rel ext; do
+    [ -n "$rel" ] || continue
+    src="$TEXMFDIST/fonts/$rel"
+    [ -d "$src" ] || continue
+    mkdir -p "$DST/fonts/$rel"
+    if cp -a "$src"/*."$ext" "$DST/fonts/$rel/" 2>/dev/null; then
+        n_fonts=$((n_fonts+1))
+    else
+        echo "warning: no .${ext} files in $src (skipped)" >&2
+    fi
+done <<FONT_EOF
+$FONT_SPECS
+FONT_EOF
 echo "pulled $n_fonts font directory(ies) ..."
 
 # --- generate the single-file bundle --------------------------------------
@@ -304,7 +337,7 @@ const [root, out] = process.argv.slice(2);
 // Binary font files (metrics TFM, outlines PFB) are base64-encoded as
 // {"b64": "..."} — the worker decodes them to raw bytes, since a UTF-8
 // string read would corrupt the font data.
-const BINARY = new Set([".tfm", ".pfb", ".otf", ".ttf"]);
+const BINARY = new Set([".tfm", ".pfb", ".otf", ".ttf", ".vf"]);
 const files = {};
 (function walk(dir) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {

@@ -14,6 +14,9 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Standalone CommonJS e2e scripts (see e2e/README.md).
     "e2e/**",
+    // Engine assets downloaded and cached by the /api/texlive route on
+    // first request (minified vendor JS — never lint).
+    ".texlive-cache/**",
   ]),
 ]);
 

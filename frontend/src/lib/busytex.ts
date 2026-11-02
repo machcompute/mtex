@@ -2,9 +2,9 @@
 
 // Wraps the busytex WebAssembly worker (full TeX Live compiled to WASM).
 // The heavy assets (busytex.js/.wasm, texlive-basic.js/.data) are served
-// by the Go backend and proxied same-origin through /api/texlive — the
-// worker loads two of them with importScripts(), which browsers only allow
-// for same-origin URLs, so the browser can't fetch :8080 directly.
+// same-origin through /api/texlive — the worker loads two of them with
+// importScripts(), which browsers only allow for same-origin URLs, so the
+// browser can't fetch github.com directly.
 //
 // The worker + pipeline files in /busytex/ are from the same busytex commit
 // as the pinned release (build_b16fdf28) — that build runs xelatex via
@@ -18,8 +18,9 @@
 // on the init message and the first compile awaits asset loading, reporting
 // progress through print messages.
 
-// Same origin: src/app/api/texlive/[name]/route.ts proxies to the Go
-// backend, which downloads from the pinned release and caches locally.
+// Same origin: src/app/api/texlive/[name]/route.ts downloads the pinned
+// busytex release assets on first request and serves them from a local
+// disk cache.
 const TEXLIVE_BASE = "/api/texlive";
 
 // The pinned texlive-basic set (~320 packages) lacks packages users
