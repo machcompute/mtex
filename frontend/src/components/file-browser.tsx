@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  IconChevronRight,
   IconFile,
   IconFileBib,
   IconFileImage,
@@ -35,8 +36,10 @@ type Props = {
 /**
  * Overleaf-style file panel: "Files" header with upload / new-file
  * actions, per-type file icons, hover rename/delete, a "main" badge for
- * the build target, and drag-and-drop upload. New files are created in
- * the row at the bottom. All file bytes stay in the browser.
+ * the build target, and drag-and-drop upload. Folders are derived from
+ * file paths and rendered as collapsible rows; files show their base
+ * name indented by depth. New files are created in the row at the
+ * bottom. All file bytes stay in the browser.
  */
 export default function FileBrowser({
   files,
@@ -55,6 +58,30 @@ export default function FileBrowser({
   const [dragging, setDragging] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
+
+  // Folders have no entries of their own — they are implied by file
+  // paths — so the ordered row list (folders before files, alphabetically
+  // within each level) is computed. Collapse is view state only, expanded
+  // by default.
+  const rows = useMemo(() => buildRows(files), [files]);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+
+  const toggleFolder = (path: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const hiddenBy = (path: string) => {
+    const parts = path.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      if (collapsed.has(parts.slice(0, i).join("/"))) return true;
+    }
+    return false;
+  };
 
   // The page's window-level drop guard stops propagation, so the panel's
   // onDrop does not see file drops; clear the highlight from window too.
@@ -175,20 +202,53 @@ export default function FileBrowser({
             No files yet — add one below.
           </li>
         )}
-        {files.map((f) => {
-          const { path, isBinary } = f;
+        {rows.map((row) => {
+          // Rows are flat siblings (no nested <li>): a file's ancestors
+          // are separate rows, and a collapsed ancestor hides its subtree.
+          if (hiddenBy(row.path)) return null;
+          if (row.kind === "folder") {
+            const open = !collapsed.has(row.path);
+            return (
+              <li key={"d:" + row.path} className="px-1.5 py-0.5">
+                <div
+                  className="group flex cursor-pointer select-none items-center gap-2 rounded py-1 pr-2 hover:bg-peach/25"
+                  style={{ paddingLeft: 8 + row.depth * 10 }}
+                  title={row.path}
+                  onClick={() => toggleFolder(row.path)}
+                >
+                  <span className="flex w-4 shrink-0 justify-center text-stone">
+                    <IconChevronRight
+                      className={
+                        "h-3 w-3 transition-transform " +
+                        (open ? "rotate-90" : "")
+                      }
+                    />
+                  </span>
+                  <span
+                    className="flex w-4 shrink-0 justify-center text-stone"
+                    data-kind="folder"
+                  >
+                    <IconFolder className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-ink">
+                    {row.path.split("/").pop()}
+                  </span>
+                </div>
+              </li>
+            );
+          }
+          const { path, isBinary } = row;
           const isMain = path === mainPath;
           const isActive = path === activePath;
           const isRenaming = renaming === path;
-          const depth = path.split("/").length - 1;
           return (
-            <li key={path} className="px-1.5 py-0.5">
+            <li key={"f:" + path} className="px-1.5 py-0.5">
               <div
                 className={
                   "group flex cursor-pointer items-center gap-2 rounded py-1 pr-2 " +
                   (isActive ? "bg-mint/25" : "hover:bg-peach/25")
                 }
-                style={{ paddingLeft: 8 + depth * 10 }}
+                style={{ paddingLeft: 8 + row.depth * 10 }}
                 title={path.split("/").slice(0, -1).join("/")}
                 onClick={() => {
                   if (!isRenaming) onOpen(path);
@@ -220,7 +280,7 @@ export default function FileBrowser({
                     onDoubleClick={() => startRename(path)}
                     className="min-w-0 flex-1 truncate text-sm text-ink"
                   >
-                    {path}
+                    {path.split("/").pop()}
                   </span>
                 )}
 
@@ -294,14 +354,53 @@ export default function FileBrowser({
             +
           </button>
         </div>
-        <p className="mt-1.5 text-[11px] leading-snug text-stone">
-          Upload files or a whole folder (the folder icon), or drag them in —
-          they stay in your browser. Double-click a name to rename. A .bib
-          file triggers bibtex8 automatically.
-        </p>
       </div>
     </aside>
   );
+}
+
+type RowNode =
+  | { kind: "folder"; path: string; depth: number }
+  | { kind: "file"; path: string; depth: number; isBinary: boolean };
+
+/**
+ * Flatten the implicit folder tree into ordered sibling rows: at every
+ * level folders first, then files, alphabetical within each group, and a
+ * folder's children directly under it. Folders exist only as prefixes of
+ * file paths, so the rows are computed, never stored.
+ */
+function buildRows(entries: FileEntry[]): RowNode[] {
+  type Branch = { dirs: Map<string, Branch>; files: FileEntry[] };
+  const root: Branch = { dirs: new Map(), files: [] };
+  for (const f of entries) {
+    const parts = f.path.split("/");
+    let branch = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const key = parts[i];
+      let next = branch.dirs.get(key);
+      if (!next) {
+        next = { dirs: new Map(), files: [] };
+        branch.dirs.set(key, next);
+      }
+      branch = next;
+    }
+    branch.files.push(f);
+  }
+  const rows: RowNode[] = [];
+  const walk = (branch: Branch, dir: string, depth: number) => {
+    for (const name of [...branch.dirs.keys()].sort()) {
+      const p = dir ? `${dir}/${name}` : name;
+      rows.push({ kind: "folder", path: p, depth });
+      walk(branch.dirs.get(name)!, p, depth + 1);
+    }
+    for (const f of [...branch.files].sort((a, b) =>
+      a.path.localeCompare(b.path),
+    )) {
+      rows.push({ kind: "file", path: f.path, depth, isBinary: f.isBinary });
+    }
+  };
+  walk(root, "", 0);
+  return rows;
 }
 
 const IMAGE_EXT = new Set([
