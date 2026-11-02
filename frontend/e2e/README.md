@@ -49,9 +49,14 @@ and a crashed run can't poison the next one. The first run downloads the
 - **regression.cjs** — default project compiles with bibtex citations
   resolved (no `??`), a network audit proves the app stays browser-only
   (no POST/PUT, only `/api/texlive/`, no foreign origins beyond the Monaco
-  CDN and `blob:`), and the vendored packages work: caption/subcaption
-  renders subfigures and `\subref`, and algorithm2e compiles a numbered,
-  ruled algorithm with its `\ref` resolved.
+  CDN and `blob:`), and the vendored packages (pulled by
+  `scripts/sync-texlive.sh` into `public/texmf-extra/`) work:
+  caption/subcaption renders subfigures and `\subref`, algorithm2e compiles
+  a numbered, ruled algorithm with its `\ref` resolved, and the essentials
+  set (booktabs, xcolor, mathtools, siunitx, enumitem, fontspec) compiles —
+  including the one-time install of the extra TeX tree into the worker's
+  FS root and its persistence across compiles (no re-install on the second
+  compile).
 - **firefox.cjs** — the folder *button* in a real Firefox. Firefox honors
   `webkitdirectory` (MDN: supported; CanIUse: Firefox 50+), so the button
   opens a native folder picker; the suite drives the whole flow — click

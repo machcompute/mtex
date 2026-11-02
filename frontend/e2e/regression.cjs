@@ -40,10 +40,66 @@ const ALGDOC = [
   "\\end{document}",
 ].join("\n");
 
+// The sync-texlive.sh default set: every \usepackage here was "File not
+// found" before the vendored tree existed.
+const ESSDOC = [
+  "\\documentclass{article}",
+  "\\usepackage{booktabs}",
+  "\\usepackage[table]{xcolor}",
+  "\\usepackage{mathtools}",
+  "\\usepackage{siunitx}",
+  "\\usepackage{enumitem}",
+  "\\usepackage{fontspec}",
+  "\\DeclareMathOperator{\\argmax}{arg\\,max}",
+  "\\begin{document}",
+  "\\begin{table}[h]",
+  "\\rowcolors{2}{red!10}{blue!5}",
+  "\\begin{tabular}{ll}",
+  "\\toprule",
+  "Item & Value \\\\",
+  "\\midrule",
+  "A & \\SI{3}{\\meter} \\\\",
+  "B & 2 \\\\",
+  "\\bottomrule",
+  "\\end{tabular}",
+  "\\end{table}",
+  "\\begin{equation}",
+  "\\argmax_x f(x)",
+  "\\end{equation}",
+  "\\begin{itemize}[leftmargin=2em]",
+  "\\item enumitem bullet",
+  "\\end{itemize}",
+  "\\end{document}",
+].join("\n");
+
 const r = new Runner("reg");
 
 (async () => {
   await r.start();
+
+  // Record the worker's print stream (engine diagnostics — including the
+  // PATCH 9 "extra texmf tree installed" line) for later checks. The
+  // drawer shows the TeX log after a compile, not the print stream, so it
+  // can't be read from the DOM.
+  await r.page.addInitScript(() => {
+    window.__workerPrints = [];
+    const desc = Object.getOwnPropertyDescriptor(Worker.prototype, "onmessage");
+    Object.defineProperty(Worker.prototype, "onmessage", {
+      configurable: true,
+      get() {
+        return desc.get.call(this);
+      },
+      set(fn) {
+        desc.set.call(this, (e) => {
+          try {
+            if (e && e.data && e.data.print !== undefined)
+              window.__workerPrints.push(e.data.print);
+          } catch (_) {}
+          fn(e);
+        });
+      },
+    });
+  });
 
   // Network audit: record every request.
   const requests = [];
@@ -153,6 +209,62 @@ const r = new Runner("reg");
     "algorithm label resolved (no ??)",
     !/\?\?/.test(algText),
     algText.slice(0, 160),
+  );
+
+  // --- vendored essentials (scripts/sync-texlive.sh default set) ---------
+  // First compile in this session: the worker installs the extra tree into
+  // the FS root (PATCH 9). The second compile proves the tree persists
+  // across compiles: it must NOT be re-installed, and the packages must
+  // still resolve.
+  await r.page.evaluate((doc) => {
+    const proj = {
+      v: 1,
+      projectName: "essentials",
+      mainPath: "main.tex",
+      openPaths: ["main.tex"],
+      files: { "main.tex": doc },
+    };
+    localStorage.setItem("homehub-latex-project-v1", JSON.stringify(proj));
+  }, ESSDOC);
+  await r.page.reload({ waitUntil: "load" });
+  await r.waitReady();
+
+  const essStatus = await r.recompile();
+  r.ok("essentials doc compiled", /Compiled in \d+ ms/.test(essStatus), essStatus);
+
+  // Fresh JS context after the reload: the print stream so far belongs to
+  // THIS worker, so exactly one install line is expected after the first
+  // compile.
+  const installs1 = await r.page.evaluate(() =>
+    window.__workerPrints.filter((l) => /extra texmf tree installed/.test(l)),
+  );
+  r.ok(
+    "extra tree installed on first compile",
+    installs1.length === 1,
+    installs1.join(" | ").slice(0, 160) || "no install line",
+  );
+
+  const essText = await r.pdfText();
+  r.ok("siunitx rendered (3 m)", /3 m/.test(essText), essText.slice(0, 160));
+  r.ok(
+    "enumitem item rendered",
+    /enumitem bullet/.test(essText),
+    essText.slice(0, 160),
+  );
+
+  const essStatus2 = await r.recompile();
+  r.ok(
+    "second compile reuses the installed tree",
+    /Compiled in \d+ ms/.test(essStatus2),
+    essStatus2,
+  );
+  const installs2 = await r.page.evaluate(() =>
+    window.__workerPrints.filter((l) => /extra texmf tree installed/.test(l)),
+  );
+  r.ok(
+    "no re-install on second compile",
+    installs2.length === 1,
+    installs2.join(" | ").slice(0, 160) || "no install line",
   );
 
   console.log(

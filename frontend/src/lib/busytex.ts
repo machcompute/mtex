@@ -24,60 +24,20 @@ const TEXLIVE_BASE = "/api/texlive";
 
 // The pinned texlive-basic set (~320 packages) lacks packages users
 // routinely \usepackage, so documents fail with "File `X.sty' not found".
-// Such packages are vendored in public/texmf-extra/texmf-dist/ (paths
-// mirroring a real TeX tree) and injected into every compile as a local
-// TeX tree: texmf_local: ["texmf-extra"] below makes the pipeline append
-// <project>/texmf-extra/texmf-dist to TEXMFDIST, so the in-worker paths
-// below mirror the on-disk layout one-for-one. Fetched once, then served
-// from the browser cache.
-const EXTRA_TEXMF_DIR = "texmf-extra";
-const EXTRA_STY_FILES = [
-  // algorithm2e and its default-loaded deps
-  // (ifthen/color ship in basic; endfloat/tocbibind are option-gated)
-  "texmf-dist/tex/latex/algorithm2e/algorithm2e.sty",
-  "texmf-dist/tex/latex/ifoddpage/ifoddpage.sty",
-  "texmf-dist/tex/latex/relsize/relsize.sty",
-  "texmf-dist/tex/latex/tools/xspace.sty",
-  // caption / subcaption (and friends)
-  "texmf-dist/tex/latex/caption/bicaption.sty",
-  "texmf-dist/tex/latex/caption/caption.sty",
-  "texmf-dist/tex/latex/caption/caption3.sty",
-  "texmf-dist/tex/latex/caption/ltcaption.sty",
-  "texmf-dist/tex/latex/caption/subcaption.sty",
-];
-
-type ExtraEntry = { path: string; contents: string | null };
-
-let extraFilesPromise: Promise<ExtraEntry[]> | null = null;
-
-function extraFiles(): Promise<ExtraEntry[]> {
-  if (!extraFilesPromise) {
-    extraFilesPromise = (async () => {
-      const texts = await Promise.all(
-        EXTRA_STY_FILES.map((rel) =>
-          fetch(`${EXTRA_TEXMF_DIR}/${rel}`).then((r) => {
-            if (!r.ok) throw new Error(`cannot load ${rel}: ${r.status}`);
-            return r.text();
-          }),
-        ),
-      );
-      return EXTRA_STY_FILES.map((rel, i) => ({
-        path: EXTRA_TEXMF_DIR + "/" + rel,
-        contents: texts[i],
-      }));
-    })();
-    extraFilesPromise.catch(() => {
-      // Don't cache a failure — the next compile retries.
-      extraFilesPromise = null;
-    });
-  }
-  return extraFilesPromise;
-}
+// Such packages are vendored in public/texmf-extra/ (scripts/sync-texlive.sh
+// pulls them from the local TeX Live and generates extra-bundle.json). The
+// WORKER fetches that bundle once per engine start and the pipeline
+// installs the tree into the in-memory FS root at /texmf-extra (PATCH 9 in
+// busytex_pipeline.js) — it survives the per-compile project remount, so it
+// never rides in the compile payload. texmf_local: ["/texmf-extra"] below
+// makes the pipeline add /texmf-extra/texmf-dist to TEXMFDIST (absolute
+// entries map to the FS root).
+const EXTRA_TEXMF_DIR = "/texmf-extra";
 
 // Bump whenever public/busytex/busytex_worker.js changes: browsers cache
 // classic worker scripts aggressively and may not refetch them even on a
 // hard reload. Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 10;
+const WORKER_VERSION = 12;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -187,9 +147,9 @@ export class BusyTexCompiler {
         busytex_js: `${TEXLIVE_BASE}/busytex.js`,
         busytex_wasm: `${TEXLIVE_BASE}/busytex.wasm`,
         texlive_js: [`${TEXLIVE_BASE}/texlive-basic.js`],
-        // Extra local TeX tree: the vendored caption/subcaption package
-        // (see EXTRA_STY_FILES), written into <project>/texmf-extra by
-        // compile() and added to TEXMFDIST by the pipeline.
+        // Extra local TeX tree: the vendored packages (see the comment at
+        // the top of this file). Absolute path — the worker installs it at
+        // the FS root, outside the per-compile project remount.
         texmf_local: [EXTRA_TEXMF_DIR] as string[],
         preload: true,
         verbose: "silent",
@@ -216,26 +176,17 @@ export class BusyTexCompiler {
     if (!this.worker) {
       await this.init();
     }
-    // Add the vendored caption package to the project. A load failure
-    // (should be impossible — same-origin static files) must not block
-    // compiling documents that don't need the package.
-    let extra: ExtraEntry[] = [];
-    try {
-      extra = await extraFiles();
-    } catch (e) {
-      console.error("[busytex] extra texmf files unavailable:", e);
-    }
-
     // The pipeline writes each entry with FS.mkdir (dir) or FS.writeFile
     // (file), and FS.writeFile does not create parent directories — so a
-    // nested path (a folder upload, or the vendored tree) also needs its
-    // ancestor directories. A dir path is a string prefix of everything
-    // inside it, and the pipeline sorts by path, so dirs always land
-    // before their children.
-    const all = [
-      ...Object.entries(files).map(([path, contents]) => ({ path, contents })),
-      ...extra,
-    ];
+    // nested path (a folder upload) also needs its ancestor directories.
+    // A dir path is a string prefix of everything inside it, and the
+    // pipeline sorts by path, so dirs always land before their children.
+    // The vendored texmf-extra tree is not part of this payload — the
+    // worker installs it once into the FS root (see the top of this file).
+    const all = Object.entries(files).map(([path, contents]) => ({
+      path,
+      contents,
+    }));
     const dirs = new Set<string>();
     for (const { path } of all) {
       const parts = path.split("/");

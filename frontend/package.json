@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "sync:texlive": "sh scripts/sync-texlive.sh",
     "test:e2e": "node e2e/run.cjs"
   },
   "dependencies": {
