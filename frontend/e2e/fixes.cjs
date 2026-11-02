@@ -13,8 +13,9 @@ const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 const notice = (r) =>
   r.page.evaluate(
     () =>
-      document.querySelector(".pointer-events-none.absolute")?.textContent ||
-      "",
+      // data-notice, not the position classes: the header tooltip pills
+      // share pointer-events-none/absolute and come first in DOM order.
+      document.querySelector("[data-notice]")?.textContent || "",
   );
 const activeTab = (r) =>
   r.page.evaluate(
@@ -62,7 +63,7 @@ async function seed(r, proj) {
     files: { "main.tex": "AAA\n", "b.tex": "BBB\n" },
   });
   await r1.goto();
-  await r1.page.waitForSelector("#new-file-input", { timeout: 30000 });
+  await r1.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
   await r1.page.waitForSelector(".monaco-editor .view-lines", { timeout: 30000 });
 
   // #21 active tab restored on load.
@@ -80,7 +81,7 @@ async function seed(r, proj) {
   await r1.page.keyboard.press("Control+End");
   await r1.page.keyboard.type("ED");
   const renamed = r1.page.locator(
-    "aside input:not([type=file]):not(#new-file-input)",
+    "aside input:not([type=file])",
   );
   await r1.page
     .locator("li", { hasText: "main.tex" })
@@ -109,11 +110,16 @@ async function seed(r, proj) {
     JSON.stringify(v.slice(0, 40)),
   );
 
-  // #22/#18/#13 name validation notices.
-  const nf = r1.page.locator("#new-file-input");
-  await nf.fill("b.tex");
-  await nf.press("Enter");
-  await sleep(300);
+  // #22/#18/#13 name validation notices (new-file modal).
+  const newFile = async (name) => {
+    await r1.page.locator('button[data-action="new-file"]').click();
+    await r1.page.waitForSelector('[data-modal="new-file"]', { timeout: 5000 });
+    const input = r1.page.locator('input[placeholder="chapter.tex"]');
+    await input.fill(name);
+    await input.press("Enter");
+    await sleep(300);
+  };
+  await newFile("b.tex");
   r1.ok(
     "#22 duplicate new file shows a notice",
     /already exists/.test(await notice(r1)),
@@ -125,22 +131,21 @@ async function seed(r, proj) {
     "#22 log drawer stays closed for a validation error",
     (await r1.page.locator("button", { hasText: "Hide log" }).count()) === 0,
   );
-  await nf.fill("v1..2.tex");
-  await nf.press("Enter");
-  await sleep(300);
+  // A rejected create keeps the modal open — Escape, then a legal name.
+  await r1.page.keyboard.press("Escape");
+  await newFile("v1..2.tex");
   r1.ok(
     "#18 v1..2.tex is accepted",
     (await rows(r1)).includes("v1..2.tex"),
     JSON.stringify(await rows(r1)),
   );
-  await nf.fill("constructor");
-  await nf.press("Enter");
-  await sleep(300);
+  await newFile("constructor");
   r1.ok(
     "#22 reserved name refused with a notice",
     /Cannot create/.test(await notice(r1)),
     await notice(r1),
   );
+  await r1.page.keyboard.press("Escape");
   await r1.page
     .locator("li", { hasText: "v1..2.tex" })
     .locator('button[title="Rename file"]')
@@ -169,7 +174,7 @@ async function seed(r, proj) {
     },
   });
   await r1.goto();
-  await r1.page.waitForSelector("#new-file-input", { timeout: 30000 });
+  await r1.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
   await r1.page
     .locator("li", { hasText: "main.tex" })
     .locator('button[title="Delete file"]')
@@ -433,7 +438,7 @@ async function seed(r, proj) {
   fs.mkdirSync(path.join(dragDir, "thesis", "ch"), { recursive: true });
   fs.writeFileSync(path.join(dragDir, "thesis", "a.tex"), "A\n");
   await r4.goto();
-  await r4.page.waitForSelector("#new-file-input", { timeout: 30000 });
+  await r4.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
   await r4.page.waitForSelector(".monaco-editor .view-lines", { timeout: 30000 });
 
   const center = await r4.page.evaluate(() => {
@@ -532,7 +537,7 @@ async function seed(r, proj) {
   });
   await seed(r5, JSON.parse(bad));
   await r5.goto();
-  await r5.page.waitForSelector("#new-file-input", { timeout: 30000 });
+  await r5.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
   r5.ok(
     "#19 corrupt storage shows a notice",
     /Couldn't read the saved project/.test(await notice(r5)),
@@ -545,7 +550,8 @@ async function seed(r, proj) {
   );
   await r5.finish();
 
-  // #11 a quota failure must not show "Saved".
+  // #11 a quota failure is reported: the session isn't saved, and the
+  // user must be told (notice pill at the bottom of the page).
   const r5b = new Runner("fixes-quota");
   await r5b.start();
   await r5b.page.addInitScript(() => {
@@ -557,22 +563,20 @@ async function seed(r, proj) {
     };
   });
   await r5b.goto();
-  await r5b.page.waitForSelector("#new-file-input", { timeout: 30000 });
-  let hdr = "";
+  await r5b.page.waitForSelector('button[data-action="new-file"]', {
+    timeout: 30000,
+  });
+  // NOTE: the local is `seen`, not `notice` — the IIFE must not shadow the
+  // notice() helper (TDZ crash for every earlier section).
+  let seen = "";
   for (let i = 0; i < 20; i++) {
     await sleep(500);
-    hdr = await r5b.page.evaluate(() =>
-      [...document.querySelectorAll("header span")]
-        .map((e) => e.textContent)
-        .find((t) => /Saving…|Not saved|Saved$/.test(t)) || "",
+    seen = await r5b.page.evaluate(
+      () => (/Storage is full/.test(document.body.innerText) ? "shown" : ""),
     );
-    if (/Not saved/.test(hdr)) break;
+    if (seen) break;
   }
-  r5b.ok(
-    "#11 header says Not saved when storage fails",
-    /Not saved/.test(hdr),
-    hdr,
-  );
+  r5b.ok("#11 storage failure shows a notice", seen === "shown", seen);
   await r5b.finish();
 
   // --- 6. Engine failure + recovery (#2/#3) --------------------------------
@@ -589,7 +593,7 @@ async function seed(r, proj) {
     (route) => route.abort(),
   );
   await r6.goto();
-  await r6.page.waitForSelector("#new-file-input", { timeout: 30000 });
+  await r6.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
   // Nothing compiles on load — trigger the first build manually.
   await r6.page.locator("button", { hasText: "Recompile" }).first().click();
   let eng = "";

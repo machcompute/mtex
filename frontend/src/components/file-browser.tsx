@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   IconChevronRight,
   IconFile,
@@ -25,7 +31,9 @@ type Props = {
   activePath: string;
   mainPath: string;
   onOpen: (path: string) => void;
-  onAdd: (name: string) => void;
+  /** Create a file at `location/name`; returns false (with a notice) when
+   * the name or location is invalid, so the modal can stay open. */
+  onAdd: (name: string, location: string) => boolean;
   onRename: (oldPath: string, newName: string) => void;
   onDelete: (path: string) => void;
   onSetMain: (path: string) => void;
@@ -38,8 +46,8 @@ type Props = {
  * actions, per-type file icons, hover rename/delete, a "main" badge for
  * the build target, and drag-and-drop upload. Folders are derived from
  * file paths and rendered as collapsible rows; files show their base
- * name indented by depth. New files are created in the row at the
- * bottom. All file bytes stay in the browser.
+ * name indented by depth. The header "+" opens a modal for the file
+ * name and its folder. All file bytes stay in the browser.
  */
 export default function FileBrowser({
   files,
@@ -52,7 +60,9 @@ export default function FileBrowser({
   onSetMain,
   onUpload,
 }: Props) {
-  const [newName, setNewName] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalName, setModalName] = useState("");
+  const [modalLoc, setModalLoc] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [dragging, setDragging] = useState(0);
@@ -91,11 +101,18 @@ export default function FileBrowser({
     return () => window.removeEventListener("drop", clear, true);
   }, []);
 
-  const add = () => {
-    const name = newName.trim();
+  const closeModal = () => {
+    setModalOpen(false);
+    setModalName("");
+    setModalLoc("");
+  };
+
+  // A failed create leaves the modal open — the page's notice pill
+  // explains why — so the user can fix the name or location in place.
+  const createFile = () => {
+    const name = modalName.trim();
     if (!name) return;
-    onAdd(name);
-    setNewName("");
+    if (onAdd(name, modalLoc.trim().replace(/\/+$/, ""))) closeModal();
   };
 
   const startRename = (path: string) => {
@@ -166,27 +183,27 @@ export default function FileBrowser({
           Files
         </h2>
         <div className="flex items-center gap-0.5">
-          <button
+          <HeaderBtn
+            action="upload"
+            tip="Upload files (kept in your browser)"
             onClick={pickUpload}
-            title="Upload files (kept in your browser)"
-            className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
           >
             <IconUpload className="h-4 w-4" />
-          </button>
-          <button
+          </HeaderBtn>
+          <HeaderBtn
+            action="upload-folder"
+            tip="Upload a whole folder (kept in your browser)"
             onClick={pickFolder}
-            title="Upload a whole folder, recursively (kept in your browser)"
-            className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
           >
             <IconFolder className="h-4 w-4" />
-          </button>
-          <button
-            onClick={() => document.getElementById("new-file-input")?.focus()}
-            title="New file"
-            className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+          </HeaderBtn>
+          <HeaderBtn
+            action="new-file"
+            tip="New file"
+            onClick={() => setModalOpen(true)}
           >
             <IconPlus className="h-4 w-4" />
-          </button>
+          </HeaderBtn>
         </div>
       </div>
 
@@ -254,6 +271,9 @@ export default function FileBrowser({
                   if (!isRenaming) onOpen(path);
                 }}
               >
+                {/* Empty chevron gutter so the file icon sits in the same
+                    column as folder icons (chevron rows shift it right). */}
+                <span className="w-4 shrink-0" aria-hidden />
                 <span
                   className="flex w-4 shrink-0 justify-center text-stone"
                   data-kind={kindOf(path, isBinary)}
@@ -334,28 +354,89 @@ export default function FileBrowser({
         })}
       </ul>
 
-      <div className="shrink-0 border-t border-ink/10 p-2">
-        <div className="flex items-center gap-1.5">
-          <input
-            id="new-file-input"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") add();
-            }}
-            placeholder="new-file.tex"
-            className="min-w-0 flex-1 rounded border border-ink/15 bg-cream px-2 py-1 text-xs text-ink placeholder:text-stone/60 focus:border-mint focus:outline-none"
-          />
-          <button
-            onClick={add}
-            title="Add file"
-            className="rounded bg-mint px-2.5 py-1 text-sm font-semibold text-ink transition-colors hover:bg-ink hover:text-mint"
+      {modalOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-ink/30"
+          onClick={closeModal}
+        >
+          <div
+            data-modal="new-file"
+            className="w-80 rounded-lg border border-ink/10 bg-white p-4 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
           >
-            +
-          </button>
+            <h3 className="text-sm font-semibold text-ink">New file</h3>
+            <label className="mt-3 block text-xs font-medium text-stone">
+              Name
+              <input
+                autoFocus
+                value={modalName}
+                onChange={(e) => setModalName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") createFile();
+                  if (e.key === "Escape") closeModal();
+                }}
+                placeholder="chapter.tex"
+                className="mt-1 w-full rounded border border-ink/15 bg-cream px-2 py-1 text-sm text-ink placeholder:text-stone/60 focus:border-mint focus:outline-none"
+              />
+            </label>
+            <label className="mt-2 block text-xs font-medium text-stone">
+              Location
+              <input
+                value={modalLoc}
+                onChange={(e) => setModalLoc(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") createFile();
+                  if (e.key === "Escape") closeModal();
+                }}
+                placeholder="empty for the project root, e.g. ch/"
+                className="mt-1 w-full rounded border border-ink/15 bg-cream px-2 py-1 text-sm text-ink placeholder:text-stone/60 focus:border-mint focus:outline-none"
+              />
+            </label>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={closeModal}
+                className="rounded border border-stone/40 px-3 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={createFile}
+                className="rounded bg-mint px-3 py-1 text-xs font-semibold text-ink transition-colors hover:bg-ink hover:text-mint"
+              >
+                Create
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </aside>
+  );
+}
+
+/** Header action button with a CSS hover tooltip (the native `title`
+ *  only appears after a long hover delay). */
+function HeaderBtn({
+  action,
+  tip,
+  onClick,
+  children,
+}: {
+  action: string;
+  tip: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      data-action={action}
+      onClick={onClick}
+      className="group relative rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+    >
+      {children}
+      <span className="pointer-events-none absolute left-1/2 top-full z-30 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded bg-ink px-2 py-0.5 text-[10px] font-medium text-white opacity-0 transition-opacity group-hover:opacity-100">
+        {tip}
+      </span>
+    </button>
   );
 }
 

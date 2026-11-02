@@ -36,9 +36,7 @@ fs.copyFileSync(PNG_PATH, path.join(pickDir, "ffpaper", "figs", "logo.png"));
   );
 
   // The folder button must be present (Firefox DOES support webkitdirectory).
-  const folderBtn = r.page.locator(
-    'button[title="Upload a whole folder, recursively (kept in your browser)"]',
-  );
+  const folderBtn = r.page.locator('button[data-action="upload-folder"]');
   r.ok("folder button present in Firefox", (await folderBtn.count()) === 1);
 
   // Click it: the filechooser fires on the webkitdirectory input. Selecting

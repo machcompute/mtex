@@ -11,7 +11,7 @@ const r = new Runner("rename");
 (async () => {
   await r.start();
   const renameInput = () =>
-    r.page.locator('aside input:not([type="file"]):not(#new-file-input)');
+    r.page.locator('aside input:not([type="file"])');
 
   await r.goto();
   await r.waitReady();

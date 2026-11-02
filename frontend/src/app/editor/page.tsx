@@ -210,9 +210,6 @@ export default function EditorPage() {
   // localStorage; persistence is gated on it so defaults can't clobber a
   // saved project before the load effect runs.
   const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState(false);
-  // Set when a save failed (quota): the header must not claim “Saved”.
-  const [saveError, setSaveError] = useState<string | null>(null);
   const [pdf, setPdf] = useState<Uint8Array | null>(null);
   const [log, setLog] = useState("");
   const [liveLog, setLiveLog] = useState("");
@@ -247,6 +244,9 @@ export default function EditorPage() {
   const lockRef = useRef({ until: 0 });
   const autoTimerRef = useRef<number | undefined>(undefined);
   const noticeTimerRef = useRef<number | undefined>(undefined);
+  // True while consecutive saves are failing (quota): the failure notice is
+  // raised once per failure run, not on every debounced save.
+  const saveFailedRef = useRef(false);
   // The Monaco namespace (from the editor's onMount), for disposing models
   // on rename/delete — Monaco models are keyed by path and never disposed
   // otherwise, so a rename-back would resurrect pre-rename content.
@@ -358,7 +358,6 @@ export default function EditorPage() {
       skipNextSaveRef.current = false;
       return;
     }
-    setSaving(true);
     const t = window.setTimeout(() => {
       const proj: StoredProject = {
         v: 1,
@@ -374,13 +373,21 @@ export default function EditorPage() {
       };
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(proj));
-        setSaveError(null);
+        saveFailedRef.current = false;
       } catch {
-        // Quota exceeded or storage unavailable: the session isn't saved —
-        // the header says so instead of claiming “Saved”.
-        setSaveError("Storage is full — changes are not being saved");
+        // Quota exceeded or storage unavailable: the session isn't saved.
+        // Notice once per failure run — the debounced save would re-raise
+        // it on every edit otherwise.
+        if (!saveFailedRef.current) {
+          saveFailedRef.current = true;
+          setNotice("Storage is full — changes are not being saved");
+          window.clearTimeout(noticeTimerRef.current);
+          noticeTimerRef.current = window.setTimeout(
+            () => setNotice(null),
+            8000,
+          );
+        }
       }
-      setSaving(false);
     }, 600);
     return () => window.clearTimeout(t);
   }, [files, mainPath, openPaths, activePath, projectName, loaded]);
@@ -562,25 +569,44 @@ export default function EditorPage() {
     }
   };
 
-  const addFile = (name: string) => {
-    const path = normalizeName(name);
-    if (!path) {
+  // From the new-file modal: `name` is the base name, `location` the
+  // folder path ("" = project root). Returns whether the file was
+  // created, so the modal can stay open on a rejected name.
+  const addFile = (name: string, location: string): boolean => {
+    const loc = location.replace(/\/+$/, "");
+    const dir = loc ? normalizePath(loc) : null;
+    if (loc && !dir) {
+      showNotice(
+        `Cannot create “${name}” — “${loc}” is not a valid folder path`,
+      );
+      return false;
+    }
+    const base = normalizeName(name);
+    if (!base) {
       showNotice(
         `Cannot create “${name}” — use a flat name (no folders or reserved names)`,
       );
-      return;
+      return false;
     }
+    const path = dir ? `${dir}/${base}` : base;
     if (Object.hasOwn(files, path)) {
       showNotice(`“${path}” already exists`);
-      return;
+      return false;
+    }
+    if (pathUnderFile(Object.keys(files), path)) {
+      showNotice(
+        `Cannot create “${name}” — it would collide with an existing file`,
+      );
+      return false;
     }
     if (pathIsFolder(Object.keys(files), path)) {
       showNotice(`“${path}” is a folder in this project`);
-      return;
+      return false;
     }
     setFiles((f) => ({ ...f, [path]: "" }));
     setOpenPaths((o) => (o.includes(path) ? o : [...o, path]));
     setActivePath(path);
+    return true;
   };
 
   const renameFile = (oldPath: string, newName: string) => {
@@ -1023,15 +1049,6 @@ export default function EditorPage() {
           title="Project name (saved in your browser)"
           className="w-44 shrink rounded border border-transparent bg-transparent px-1.5 py-0.5 text-sm font-medium text-ink transition-colors hover:border-ink/15 focus:border-mint focus:outline-none"
         />
-        <span
-          title={saveError ?? undefined}
-          className={
-            "shrink-0 text-xs " + (saveError ? "text-red-600" : "text-stone")
-          }
-        >
-          {saving ? "Saving…" : saveError ? "Not saved" : "Saved"}
-        </span>
-
         <div className="flex min-w-0 flex-1 justify-center">
           <div className="flex items-center gap-2">
             <button
@@ -1059,16 +1076,22 @@ export default function EditorPage() {
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {status.kind === "compiling" || status.kind === "loading" ? (
-            <IconSpinner className="h-3.5 w-3.5 shrink-0 animate-spin text-mint" />
-          ) : status.kind === "error" ? (
-            <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" />
-          ) : status.kind === "done" ? (
-            <IconCheck className="h-3.5 w-3.5 shrink-0 text-mint" />
-          ) : null}
+          {/* Fixed-width slots: the icon and the status text swap content
+              (spinner/check/dot/none, streaming compile lines) — variable
+              widths would push the centered buttons left and right on
+              every update. */}
+          <span className="flex w-3.5 shrink-0 items-center justify-center">
+            {status.kind === "compiling" || status.kind === "loading" ? (
+              <IconSpinner className="h-3.5 w-3.5 animate-spin text-mint" />
+            ) : status.kind === "error" ? (
+              <span className="h-2 w-2 rounded-full bg-red-500" />
+            ) : status.kind === "done" ? (
+              <IconCheck className="h-3.5 w-3.5 text-mint" />
+            ) : null}
+          </span>
           <span
             className={
-              "min-w-0 max-w-64 truncate text-xs " +
+              "w-64 shrink-0 truncate text-xs " +
               (status.kind === "error" ? "text-red-600" : "text-stone")
             }
           >
@@ -1238,7 +1261,10 @@ export default function EditorPage() {
       )}
 
       {notice && (
-        <div className="pointer-events-none absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-ink/10 bg-white px-4 py-1.5 text-xs font-medium text-ink shadow-sm">
+        <div
+          data-notice
+          className="pointer-events-none absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-ink/10 bg-white px-4 py-1.5 text-xs font-medium text-ink shadow-sm"
+        >
           {notice}
         </div>
       )}
