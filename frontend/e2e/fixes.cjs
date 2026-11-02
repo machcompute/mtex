@@ -550,6 +550,32 @@ async function seed(r, proj) {
   );
   await r5.finish();
 
+  // #24 a saved project with no .tex file keeps main EMPTY on load —
+  // compiling must explain it, not treat the first file (.bib) as main.
+  const r5c = new Runner("fixes-no-main");
+  await r5c.start();
+  await seed(r5c, {
+    v: 1,
+    projectName: "nomain",
+    mainPath: "",
+    openPaths: ["refs.bib"],
+    activePath: "refs.bib",
+    files: { "refs.bib": "@article{a}" },
+  });
+  await r5c.goto();
+  await r5c.waitReady();
+  r5c.ok(
+    "#24 no main badge when the project has no .tex",
+    (await r5c.page.locator('aside span:text-is("main")').count()) === 0,
+  );
+  const st24 = await r5c.recompile();
+  r5c.ok(
+    "#24 compile says there is no main file",
+    /No main .tex file/.test(st24),
+    st24,
+  );
+  await r5c.finish();
+
   // #11 a quota failure is reported: the session isn't saved, and the
   // user must be told (notice pill at the bottom of the page).
   const r5b = new Runner("fixes-quota");
@@ -616,7 +642,9 @@ async function seed(r, proj) {
   );
   await r6.finish();
 
-  const failures = [r1, r2, r3, r4, r5, r5b, r6].reduce(
+  // Every Runner's failures count — a check can FAIL yet the suite exit
+  // 0 if its runner is missing from this list.
+  const failures = [r1, r2, r3, r4, r5, r5b, r5c, r6].reduce(
     (n, x) => n + (x.failures || 0),
     0,
   );

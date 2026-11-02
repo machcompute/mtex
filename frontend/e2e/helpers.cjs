@@ -70,15 +70,21 @@ class Runner {
 
   // Click "Recompile" and wait for a terminal status. Returns the final
   // status text ("Compiled in N ms" or a failure message, "" on timeout).
+  // Terminal = the button is enabled again (it is disabled only while
+  // compiling) AND the run actually started: either the button was seen
+  // busy, or the status text changed synchronously (e.g. the "No main
+  // .tex file" error returns before a compile starts). Matching message
+  // text here would miss error messages that don't say "failed".
   async recompile() {
-    await this.page
-      .locator("button", { hasText: "Recompile" })
-      .first()
-      .click();
+    const btn = this.page.locator('button[title^="Recompile"]').first();
+    const before = ((await this.status.textContent().catch(() => "")) || "").trim();
+    await btn.click();
+    let sawBusy = false;
     for (let i = 0; i < 90; i++) {
       await this.page.waitForTimeout(1000);
-      const t = (await this.status.textContent().catch(() => "")) || "";
-      if (/Compiled in \d+ ms|failed/i.test(t)) return t;
+      if (await btn.isDisabled()) sawBusy = true;
+      const t = ((await this.status.textContent().catch(() => "")) || "").trim();
+      if ((sawBusy || t !== before) && !(await btn.isDisabled())) return t;
     }
     return "";
   }

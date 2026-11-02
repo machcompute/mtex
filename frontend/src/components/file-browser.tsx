@@ -93,6 +93,30 @@ export default function FileBrowser({
     return false;
   };
 
+  // A file that just landed (new-file modal, upload, drop) must not
+  // disappear into a collapsed folder: expand its ancestors so the user
+  // can see where it went.
+  const prevPathsRef = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const current = new Set(files.map((f) => f.path));
+    const prev = prevPathsRef.current;
+    prevPathsRef.current = current;
+    if (!prev) return; // first render: nothing is new yet
+    const added = [...current].filter((p) => !prev.has(p));
+    if (added.length === 0) return;
+    setCollapsed((prevCollapsed) => {
+      let changed = false;
+      const next = new Set(prevCollapsed);
+      for (const p of added) {
+        const parts = p.split("/");
+        for (let i = 1; i < parts.length; i++) {
+          if (next.delete(parts.slice(0, i).join("/"))) changed = true;
+        }
+      }
+      return changed ? next : prevCollapsed;
+    });
+  }, [files]);
+
   // The page's window-level drop guard stops propagation, so the panel's
   // onDrop does not see file drops; clear the highlight from window too.
   useEffect(() => {

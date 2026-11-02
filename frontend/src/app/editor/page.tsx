@@ -309,9 +309,14 @@ export default function EditorPage() {
             corrupt = true; // a saved project always has at least one file
           }
           if (!corrupt) {
+            // The stored main wins; otherwise the first .tex, mirroring
+            // deleteFile — a project without any .tex has NO main ("")
+            // rather than a .bib picked up as first key.
             const main = Object.hasOwn(restored, proj.mainPath)
               ? proj.mainPath
-              : Object.keys(restored)[0];
+              : (Object.keys(restored).find((p) =>
+                  p.toLowerCase().endsWith(".tex"),
+                ) ?? "");
             const open = (proj.openPaths ?? []).filter((p) =>
               Object.hasOwn(restored, p),
             );
@@ -326,7 +331,7 @@ export default function EditorPage() {
                   : main;
             setFiles(restored);
             setMainPath(main);
-            setOpenPaths(open.length ? open : [main]);
+            setOpenPaths(open.length ? open : main ? [main] : []);
             setActivePath(active);
             setProjectName(proj.projectName || DEFAULT_PROJECT_NAME);
           }

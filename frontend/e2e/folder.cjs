@@ -238,6 +238,34 @@ const r = new Runner("folder");
     (await r.page.locator("li", { hasText: "empty.txt" }).count()) > 0,
   );
 
+  // A file created in a COLLAPSED folder must not vanish: its ancestors
+  // auto-expand so the user can see where it landed.
+  // "other" (a file row inside it has title="other"; the folder row is
+  // told apart by its icon).
+  const otherFolderRow = r.page.locator(
+    'aside li div.group[title="other"]:has(span[data-kind="folder"])',
+  );
+  const otherFileRows = r.page.locator(
+    'aside li div.group[title="other"]:not(:has(span[data-kind="folder"]))',
+  );
+  await otherFolderRow.click();
+  await r.page.waitForTimeout(200);
+  r.ok(
+    "collapse hides the folder's files",
+    (await otherFolderRow.count()) === 1 &&
+      (await otherFileRows.count()) === 0,
+  );
+  await r.page.locator('button[data-action="new-file"]').click();
+  await r.page.waitForSelector('[data-modal="new-file"]', { timeout: 5000 });
+  await r.page.locator('input[placeholder="chapter.tex"]').fill("newone.tex");
+  await r.page.locator('input[placeholder*="project root"]').fill("other");
+  await r.page.keyboard.press("Enter");
+  await r.page.waitForTimeout(400);
+  r.ok(
+    "new file in a collapsed folder auto-expands it",
+    (await r.page.locator('li:has-text("newone.tex")').count()) === 1,
+  );
+
   console.log(
     r.failures === 0 ? "ALL FOLDER CHECKS PASSED" : r.failures + " CHECK(S) FAILED",
   );
