@@ -98,6 +98,14 @@ export function IconChevronRight({ className }: P) {
   );
 }
 
+export function IconChevronDown({ className }: P) {
+  return (
+    <Svg className={className}>
+      <path d="M3.5 6 8 10.5 12.5 6" />
+    </Svg>
+  );
+}
+
 export function IconZoomIn({ className }: P) {
   return (
     <Svg className={className}>

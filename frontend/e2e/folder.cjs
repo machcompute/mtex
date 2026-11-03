@@ -5,7 +5,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { Runner, PNG_PATH } = require("./helpers.cjs");
+const { Runner, PNG_PATH, readProject } = require("./helpers.cjs");
 
 // 1x1 transparent PNG — a real, valid file (hand-typed bytes once produced
 // a truncated IEND CRC that libpng rejects).
@@ -19,8 +19,6 @@ const DOC = [
   "\\includegraphics[width=2cm]{figs/logo.png}",
   "\\end{document}",
 ].join("\n");
-
-const KEY = "homehub-latex-project-v1";
 
 const r = new Runner("folder");
 
@@ -141,14 +139,14 @@ const r = new Runner("folder");
   );
   r.ok("image tab opens a binary preview", hasCanvasPreview);
 
-  // Persisted with nested keys.
-  const stored = await r.page.evaluate(
-    () => JSON.parse(localStorage.getItem("homehub-latex-project-v1") || "{}"),
-  );
+  // Persisted with nested keys (the debounced save has long fired — the
+  // recompile above took seconds).
+  const storedF = await readProject(r);
   r.ok(
-    "nested path persisted in localStorage",
-    stored.files?.["figs/logo.png"] !== undefined &&
-      stored.files?.["doc.tex"] !== undefined,
+    "nested paths persisted in OPFS",
+    storedF !== null &&
+      storedF.files?.["figs/logo.png"] !== undefined &&
+      storedF.files?.["doc.tex"] !== undefined,
   );
 
   // A REAL directory drag (CDP, Chromium) is walked recursively. The tree is
@@ -173,11 +171,10 @@ const r = new Runner("folder");
   fs.writeFileSync(path.join(dragRoot, "other", "same.tex"), "Other.\n");
   fs.writeFileSync(path.join(dragRoot, "second", "same.tex"), "Second.\n");
 
-  const paths = () =>
-    r.page.evaluate(
-      (key) => Object.keys(JSON.parse(localStorage.getItem(key)).files),
-      KEY,
-    );
+  const paths = async () => {
+    const p = await readProject(r);
+    return p ? Object.keys(p.files) : [];
+  };
   const asideBox = await r.page.locator("aside").boundingBox();
   const dropAt = [asideBox.x + 60, asideBox.y + 200];
 
@@ -193,11 +190,15 @@ const r = new Runner("folder");
   );
   r.ok("dropped folder: empty extensionless file kept", tree.includes("LICENSE"));
   r.ok("dropped folder: dot directory skipped", !tree.some((p) => p.startsWith(".git")));
-  const fig = (await r.page.evaluate(
-    (key) => JSON.parse(localStorage.getItem(key)).files["fig.png"],
-    KEY,
-  ));
-  r.ok("dropped folder: binary kept", fig !== undefined, JSON.stringify(fig)?.slice(0, 60));
+  const savedF = await readProject(r);
+  const fig = savedF ? savedF.files["fig.png"] : undefined;
+  r.ok(
+    "dropped folder: binary kept byte-for-byte",
+    !!fig &&
+      Array.isArray(fig.bytes) &&
+      fig.bytes.join(",") === Array.from(PNG).join(","),
+    JSON.stringify(fig)?.slice(0, 60),
+  );
   r.ok(
     "drop highlight cleared",
     (await r.page.getByText("Drop files or a folder to add them").count()) === 0,

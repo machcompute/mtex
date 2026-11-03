@@ -1,7 +1,7 @@
 // Regression: default project (bibtex citations), network audit
 // (browser-only, no data exfiltration), and the vendored
 // caption/subcaption, algorithm2e and pgfplots(+pslatex) packages.
-const { Runner } = require("./helpers.cjs");
+const { Runner, seedProject } = require("./helpers.cjs");
 
 const SUBDOC = [
   "\\documentclass{article}",
@@ -199,17 +199,14 @@ const r = new Runner("reg");
     foreign.map((req) => req.url).join(", ").slice(0, 200),
   );
 
-  // --- subcaption: seed a document via localStorage, reload, compile ---
-  await r.page.evaluate((doc) => {
-    const proj = {
-      v: 1,
-      projectName: "subcap",
-      mainPath: "main.tex",
-      openPaths: ["main.tex"],
-      files: { "main.tex": doc },
-    };
-    localStorage.setItem("homehub-latex-project-v1", JSON.stringify(proj));
-  }, SUBDOC);
+  // --- subcaption: seed a document in OPFS, reload, compile --------------
+  await seedProject(r, {
+    name: "subcap",
+    mainPath: "main.tex",
+    openPaths: ["main.tex"],
+    activePath: "main.tex",
+    files: { "main.tex": SUBDOC },
+  });
   await r.page.reload({ waitUntil: "load" });
   await r.waitReady();
   r.ok(
@@ -231,16 +228,13 @@ const r = new Runner("reg");
   );
 
   // --- algorithm2e: the other vendored package --------------------------
-  await r.page.evaluate((doc) => {
-    const proj = {
-      v: 1,
-      projectName: "algo2e",
-      mainPath: "main.tex",
-      openPaths: ["main.tex"],
-      files: { "main.tex": doc },
-    };
-    localStorage.setItem("homehub-latex-project-v1", JSON.stringify(proj));
-  }, ALGDOC);
+  await seedProject(r, {
+    name: "algo2e",
+    mainPath: "main.tex",
+    openPaths: ["main.tex"],
+    activePath: "main.tex",
+    files: { "main.tex": ALGDOC },
+  });
   await r.page.reload({ waitUntil: "load" });
   await r.waitReady();
 
@@ -260,16 +254,13 @@ const r = new Runner("reg");
   // the FS root (PATCH 9). The second compile proves the tree persists
   // across compiles: it must NOT be re-installed, and the packages must
   // still resolve.
-  await r.page.evaluate((doc) => {
-    const proj = {
-      v: 1,
-      projectName: "essentials",
-      mainPath: "main.tex",
-      openPaths: ["main.tex"],
-      files: { "main.tex": doc },
-    };
-    localStorage.setItem("homehub-latex-project-v1", JSON.stringify(proj));
-  }, ESSDOC);
+  await seedProject(r, {
+    name: "essentials",
+    mainPath: "main.tex",
+    openPaths: ["main.tex"],
+    activePath: "main.tex",
+    files: { "main.tex": ESSDOC },
+  });
   await r.page.reload({ waitUntil: "load" });
   await r.waitReady();
 
@@ -312,16 +303,13 @@ const r = new Runner("reg");
   );
 
   // --- pslatex + pgfplots (wrapped axis): the user's document shape ------
-  await r.page.evaluate((doc) => {
-    const proj = {
-      v: 1,
-      projectName: "plp",
-      mainPath: "main.tex",
-      openPaths: ["main.tex"],
-      files: { "main.tex": doc },
-    };
-    localStorage.setItem("homehub-latex-project-v1", JSON.stringify(proj));
-  }, PLPDOC);
+  await seedProject(r, {
+    name: "plp",
+    mainPath: "main.tex",
+    openPaths: ["main.tex"],
+    activePath: "main.tex",
+    files: { "main.tex": PLPDOC },
+  });
   await r.page.reload({ waitUntil: "load" });
   await r.waitReady();
 

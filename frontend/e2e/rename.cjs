@@ -1,7 +1,7 @@
 // Verifies the nested-file rename fix: in-place rename, move between
 // folders/roots, and invalid-name handling.
 const fs = require("fs");
-const { Runner, PNG_PATH } = require("./helpers.cjs");
+const { Runner, PNG_PATH, readProject } = require("./helpers.cjs");
 
 const PNG = fs.readFileSync(PNG_PATH);
 const DOC = ["\\documentclass{article}", "\\begin{document}", "x", "\\end{document}"].join("\n");
@@ -103,12 +103,11 @@ const r = new Runner("rename");
       (await r.page.locator("li", { hasText: "b.png" }).count()) === 0,
   );
 
-  // localStorage reflects the final keys.
-  const stored = await r.page.evaluate(
-    () => JSON.parse(localStorage.getItem("homehub-latex-project-v1") || "{}"),
-  );
-  r.ok("localStorage: figs/logo.png gone", stored.files?.["figs/logo.png"] === undefined);
-  r.ok("localStorage: rootlogo.png present", stored.files?.["rootlogo.png"] !== undefined);
+  // OPFS reflects the final keys (wait out the 600 ms save debounce).
+  await r.page.waitForTimeout(1000);
+  const stored = await readProject(r);
+  r.ok("OPFS: figs/logo.png gone", stored?.files?.["figs/logo.png"] === undefined);
+  r.ok("OPFS: rootlogo.png present", stored?.files?.["rootlogo.png"] !== undefined);
 
   console.log(
     r.failures === 0 ? "ALL RENAME CHECKS PASSED" : r.failures + " CHECK(S) FAILED",

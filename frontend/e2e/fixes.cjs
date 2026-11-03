@@ -4,9 +4,8 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { Runner } = require("./helpers.cjs");
+const { Runner, seedProject, readProject } = require("./helpers.cjs");
 
-const KEY = "homehub-latex-project-v1";
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 // --- shared helpers ---------------------------------------------------------
@@ -29,24 +28,20 @@ const rows = (r) =>
       )
       .filter(Boolean),
   );
-const savedRaw = (r) => r.page.evaluate((k) => localStorage.getItem(k), KEY);
 const setModelValue = (r, txt) =>
   r.page.evaluate(
     (t) => window.monaco.editor.getModels()[0].setValue(t),
     txt,
   );
 
-// Seed a project on the app's origin (about:blank is opaque). waitReady()
-// gives a >=2 s window, so the app's 600 ms initial persist (defaults) has
-// already fired and no timer is pending — the caller's next goto() then
-// loads the seed instead of letting the debounce clobber it.
-async function seed(r, proj) {
+// Seed a project into OPFS on the app's origin (about:blank is opaque).
+// waitReady() gives a >=2 s window, so the app's 600 ms initial persist
+// has already fired and no timer is pending — the caller's next goto()
+// then loads the seed instead of letting the debounce clobber it.
+async function seed(r, p) {
   await r.goto();
   await r.waitReady();
-  await r.page.evaluate(
-    ([KEY, p]) => localStorage.setItem(KEY, JSON.stringify(p)),
-    [KEY, proj],
-  );
+  await seedProject(r, p);
 }
 
 // =====================================================================
@@ -55,8 +50,7 @@ async function seed(r, proj) {
   const r1 = new Runner("fixes-files");
   await r1.start();
   await seed(r1, {
-    v: 1,
-    projectName: "t",
+    name: "t",
     mainPath: "main.tex",
     openPaths: ["main.tex", "b.tex"],
     activePath: "b.tex",
@@ -164,8 +158,7 @@ async function seed(r, proj) {
   // #14c deleting the only .tex leaves no build target (and a .bib never
   // becomes the main file).
   await seed(r1, {
-    v: 1,
-    projectName: "t",
+    name: "t",
     mainPath: "main.tex",
     openPaths: ["main.tex"],
     files: {
@@ -197,7 +190,7 @@ async function seed(r, proj) {
   const doc = (extra) =>
     `\\documentclass{article}\n\\begin{document}\nSTART${extra}.\n\\end{document}\n`;
   await seed(r2, {
-    v: 1, projectName: "t", mainPath: "main.tex", openPaths: ["main.tex"],
+    name: "t", mainPath: "main.tex", openPaths: ["main.tex"],
     files: { "main.tex": doc("") },
   });
   await r2.goto();
@@ -255,7 +248,7 @@ async function seed(r, proj) {
 
   // #8 \bibliography in an \include'd file still triggers bibtex8.
   await seed(r2, {
-    v: 1, projectName: "t", mainPath: "main.tex", openPaths: ["main.tex"],
+    name: "t", mainPath: "main.tex", openPaths: ["main.tex"],
     files: {
       "main.tex":
         "\\documentclass{article}\n\\begin{document}\n\\include{back}\n\\end{document}\n",
@@ -279,7 +272,7 @@ async function seed(r, proj) {
   // the log carries the bibtex8 section. refs.bib stays in the project —
   // it opens the pipeline's bibtex gate.
   await seed(r2, {
-    v: 1, projectName: "t", mainPath: "main.tex", openPaths: ["main.tex"],
+    name: "t", mainPath: "main.tex", openPaths: ["main.tex"],
     files: {
       "main.tex":
         "\\documentclass{article}\n\\begin{document}\n\\include{back}\n\\end{document}\n",
@@ -302,7 +295,7 @@ async function seed(r, proj) {
   // #14a jobname: a.text.tex (and MAIN.TEX) compile — TeX strips only the
   // final .tex, case-insensitively.
   await seed(r2, {
-    v: 1, projectName: "t", mainPath: "a.text.tex", openPaths: ["a.text.tex"],
+    name: "t", mainPath: "a.text.tex", openPaths: ["a.text.tex"],
     files: {
       "a.text.tex":
         "\\documentclass{article}\n\\begin{document}\nJOBMARKA.\n\\end{document}\n",
@@ -322,7 +315,7 @@ async function seed(r, proj) {
   const r3 = new Runner("fixes-sync");
   await r3.start();
   await seed(r3, {
-    v: 1, projectName: "t", mainPath: "main.tex", openPaths: ["main.tex"],
+    name: "t", mainPath: "main.tex", openPaths: ["main.tex"],
     files: {
       // Blank lines = \par: each mark on its own PDF line / text span.
       "main.tex":
@@ -375,7 +368,7 @@ async function seed(r, proj) {
   // #17 a recompile must not reset the PDF scroll position.
   const body = Array.from({ length: 1200 }, (_, i) => `line ${i + 1}.`).join("\n");
   await seed(r3, {
-    v: 1, projectName: "t", mainPath: "main.tex", openPaths: ["main.tex"],
+    name: "t", mainPath: "main.tex", openPaths: ["main.tex"],
     files: {
       "main.tex": `\\documentclass{article}\n\\begin{document}\n${body}\n\\end{document}\n`,
     },
@@ -484,13 +477,8 @@ async function seed(r, proj) {
     );
   });
   await sleep(1500);
-  const storedB = await r4.page.evaluate(
-    (k) => {
-      const p = JSON.parse(localStorage.getItem(k) || "null");
-      return p ? p.files["b.tex"] : null;
-    },
-    KEY,
-  );
+  const saved12 = await readProject(r4);
+  const storedB = saved12 ? saved12.files["b.tex"] : null;
   r4.ok(
     "#12 an existing file is never overwritten by a drop",
     typeof storedB === "string" && storedB.includes("Dragged."),
@@ -508,55 +496,27 @@ async function seed(r, proj) {
     );
   });
   await sleep(1500);
-  const xinfo = await r4.page.evaluate((k) => {
-    const p = JSON.parse(localStorage.getItem(k) || "null");
-    const v = p ? p.files["x.txt"] : null;
-    if (typeof v !== "object" || v === null) return { kind: typeof v };
-    const bin = atob(v.b64);
-    return { kind: "b64", bytes: [...bin].map((c) => c.charCodeAt(0)) };
-  }, KEY);
+  const saved15 = await readProject(r4);
+  const v15 = saved15 ? saved15.files["x.txt"] : null;
+  const xinfo =
+    typeof v15 === "object" && v15 !== null
+      ? { kind: "binary", bytes: v15.bytes }
+      : { kind: typeof v15 };
   r4.ok(
     "#15 non-UTF-8 bytes stored as raw binary",
-    xinfo.kind === "b64" && xinfo.bytes.join(",") === "255,254,65",
+    xinfo.kind === "binary" && xinfo.bytes.join(",") === "255,254,65",
     JSON.stringify(xinfo),
   );
   fs.rmSync(dragDir, { recursive: true, force: true });
   await r4.finish();
 
   // --- 5. Storage ----------------------------------------------------------
-  const r5 = new Runner("fixes-storage");
-  await r5.start();
-  // #19 a corrupt saved project is reported, and the stored bytes are left
-  // untouched (the defaults must not be saved over them).
-  const bad = JSON.stringify({
-    v: 1,
-    projectName: "precious",
-    mainPath: "main.tex",
-    openPaths: ["main.tex"],
-    files: { "main.tex": "hello", "bad.bin": { b64: "!!!!" } },
-  });
-  await seed(r5, JSON.parse(bad));
-  await r5.goto();
-  await r5.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
-  r5.ok(
-    "#19 corrupt storage shows a notice",
-    /Couldn't read the saved project/.test(await notice(r5)),
-    await notice(r5),
-  );
-  await sleep(2500);
-  r5.ok(
-    "#19 the stored project was NOT overwritten",
-    (await savedRaw(r5)) === bad,
-  );
-  await r5.finish();
-
   // #24 a saved project with no .tex file keeps main EMPTY on load —
   // compiling must explain it, not treat the first file (.bib) as main.
   const r5c = new Runner("fixes-no-main");
   await r5c.start();
   await seed(r5c, {
-    v: 1,
-    projectName: "nomain",
+    name: "nomain",
     mainPath: "",
     openPaths: ["refs.bib"],
     activePath: "refs.bib",
@@ -576,17 +536,14 @@ async function seed(r, proj) {
   );
   await r5c.finish();
 
-  // #11 a quota failure is reported: the session isn't saved, and the
-  // user must be told (notice pill at the bottom of the page).
+  // #11 storage failure is reported: nothing is persisted, and the user
+  // must be told (notice pill at the bottom of the page). Rejecting
+  // navigator.storage.getDirectory kills every OPFS path the app has.
   const r5b = new Runner("fixes-quota");
   await r5b.start();
   await r5b.page.addInitScript(() => {
-    const orig = Storage.prototype.setItem;
-    Storage.prototype.setItem = function (k, v) {
-      if (k === "homehub-latex-project-v1")
-        throw new DOMException("quota", "QuotaExceededError");
-      return orig.call(this, k, v);
-    };
+    navigator.storage.getDirectory = () =>
+      Promise.reject(new DOMException("denied", "NotAllowedError"));
   });
   await r5b.goto();
   await r5b.page.waitForSelector('button[data-action="new-file"]', {
@@ -598,7 +555,7 @@ async function seed(r, proj) {
   for (let i = 0; i < 20; i++) {
     await sleep(500);
     seen = await r5b.page.evaluate(
-      () => (/Storage is full/.test(document.body.innerText) ? "shown" : ""),
+      () => (/Storage unavailable/.test(document.body.innerText) ? "shown" : ""),
     );
     if (seen) break;
   }
@@ -644,7 +601,7 @@ async function seed(r, proj) {
 
   // Every Runner's failures count — a check can FAIL yet the suite exit
   // 0 if its runner is missing from this list.
-  const failures = [r1, r2, r3, r4, r5, r5b, r5c, r6].reduce(
+  const failures = [r1, r2, r3, r4, r5b, r5c, r6].reduce(
     (n, x) => n + (x.failures || 0),
     0,
   );

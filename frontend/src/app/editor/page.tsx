@@ -14,12 +14,27 @@ import FileBrowser, {
 import {
   IconAuto,
   IconCheck,
+  IconChevronDown,
   IconClose,
   IconFile,
   IconPlay,
+  IconPlus,
   IconSpinner,
+  IconTrash,
 } from "@/components/icons";
 import { BusyTexCompiler } from "@/lib/busytex";
+import {
+  ACTIVE_PROJECT_KEY,
+  createProject,
+  decodeText,
+  deleteProject,
+  listProjects,
+  loadProject,
+  saveProject,
+  type FileData,
+  type ProjectMeta,
+  type ProjectSummary,
+} from "@/lib/opfs";
 import {
   decodeSynctex,
   findOutputForSource,
@@ -57,7 +72,6 @@ const defineTheme: BeforeMount = (monaco) => {
 
 const DEFAULT_MAIN = "main.tex";
 const DEFAULT_PROJECT_NAME = "LaTeX project";
-const STORAGE_KEY = "homehub-latex-project-v1";
 
 // Default project: a two-file bibtex example, so multi-file compilation and
 // bibtex8 (the pipeline auto-runs it whenever a .bib is present) work out of
@@ -102,20 +116,6 @@ Citations are resolved by bibtex8: Euler's classic
 `,
 };
 
-/** File contents: text files are strings, binary files are byte arrays. */
-type FileData = string | Uint8Array;
-
-/** What the project looks like in localStorage (binary as base64). */
-type StoredProject = {
-  v: 1;
-  projectName: string;
-  mainPath: string;
-  openPaths: string[];
-  /** Active tab on load (restored when the file is still open). */
-  activePath?: string;
-  files: Record<string, string | { b64: string }>;
-};
-
 // Extensions read as bytes on upload (everything else is read as text).
 // SVG stays text: it is XML, and Monaco can show it.
 const BINARY_EXT = new Set([
@@ -156,22 +156,6 @@ type Status =
   | { kind: "done"; ms: number }
   | { kind: "error"; message: string };
 
-function toB64(bytes: Uint8Array): string {
-  let bin = "";
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  return btoa(bin);
-}
-
-function fromB64(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
 function mimeOf(name: string): string {
   const dot = name.lastIndexOf(".");
   const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
@@ -206,9 +190,14 @@ export default function EditorPage() {
   const [openPaths, setOpenPaths] = useState<string[]>([DEFAULT_MAIN]);
   const [mainPath, setMainPath] = useState(DEFAULT_MAIN);
   const [projectName, setProjectName] = useState(DEFAULT_PROJECT_NAME);
-  // True once the saved project (if any) has been loaded from
-  // localStorage; persistence is gated on it so defaults can't clobber a
-  // saved project before the load effect runs.
+  // The OPFS project this session edits (null until the load effect
+  // resolves, or forever when storage is unavailable).
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectsMenuOpen, setProjectsMenuOpen] = useState(false);
+  // True once a project has been loaded from OPFS (or the attempt failed);
+  // persistence is gated on it so defaults can't be written before the load
+  // effect has settled.
   const [loaded, setLoaded] = useState(false);
   const [pdf, setPdf] = useState<Uint8Array | null>(null);
   const [log, setLog] = useState("");
@@ -244,9 +233,38 @@ export default function EditorPage() {
   const lockRef = useRef({ until: 0 });
   const autoTimerRef = useRef<number | undefined>(undefined);
   const noticeTimerRef = useRef<number | undefined>(undefined);
-  // True while consecutive saves are failing (quota): the failure notice is
-  // raised once per failure run, not on every debounced save.
+  // True while consecutive saves are failing (OPFS unavailable/full): the
+  // failure notice is raised once per failure run, not on every debounced
+  // save.
   const saveFailedRef = useRef(false);
+  // The FileData refs each path was last persisted with; saveProject diffs
+  // against this, so a keystroke rewrites one file, not the whole tree.
+  const savedRefsRef = useRef<Map<string, FileData>>(new Map());
+  // The last persisted (normalized) meta of the active project.
+  const metaRef = useRef<ProjectMeta | null>(null);
+  // Always-current persistence inputs for the debounced and async save
+  // paths (a closure made at render time would be stale 600 ms later).
+  const persistStateRef = useRef({
+    files,
+    mainPath,
+    openPaths,
+    activePath,
+    projectName,
+    activeProjectId,
+    loaded,
+  });
+  persistStateRef.current = {
+    files,
+    mainPath,
+    openPaths,
+    activePath,
+    projectName,
+    activeProjectId,
+    loaded,
+  };
+  // True while a project switch/new/delete is in flight; keeps a second
+  // one from starting.
+  const switchingRef = useRef(false);
   // The Monaco namespace (from the editor's onMount), for disposing models
   // on rename/delete — Monaco models are keyed by path and never disposed
   // otherwise, so a rename-back would resurrect pre-rename content.
@@ -258,9 +276,6 @@ export default function EditorPage() {
   // The PDF's scroll position before the latest compile; restored once the
   // new PDF renders (pdf.js renders async — the effect below polls).
   const pendingScrollRef = useRef<{ page: number; yTop: number } | null>(null);
-  // Set when the stored project was unreadable: the first persistence run
-  // (which would write the defaults over it) is skipped.
-  const skipNextSaveRef = useRef(false);
   // uploadFiles is redefined every render; the window-level drop handler
   // (attached once) calls it through this ref.
   const uploadFilesRef = useRef<(list: File[], dropped?: DroppedTree) => void>(
@@ -278,114 +293,113 @@ export default function EditorPage() {
   autoRef.current = autoRecompile;
   const compileRef = useRef<() => void>(() => {});
 
-  // --- load saved project (client-only; defaults render first, as SSR
-  //     did, so hydration never mismatches) ------------------------------
-  useEffect(() => {
-    let corrupt = false;
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const proj = JSON.parse(raw) as StoredProject;
-        if (
-          proj &&
-          proj.v === 1 &&
-          proj.files &&
-          typeof proj.files === "object"
-        ) {
-          const restored: Record<string, FileData> = {};
-          for (const [k, v] of Object.entries(proj.files)) {
-            if (typeof v === "string") {
-              restored[k] = v;
-            } else {
-              try {
-                restored[k] = fromB64(v.b64);
-              } catch {
-                corrupt = true; // a base64 entry that doesn't decode
-                break;
-              }
-            }
-          }
-          if (!corrupt && Object.keys(restored).length === 0) {
-            corrupt = true; // a saved project always has at least one file
-          }
-          if (!corrupt) {
-            // The stored main wins; otherwise the first .tex, mirroring
-            // deleteFile — a project without any .tex has NO main ("")
-            // rather than a .bib picked up as first key.
-            const main = Object.hasOwn(restored, proj.mainPath)
-              ? proj.mainPath
-              : (Object.keys(restored).find((p) =>
-                  p.toLowerCase().endsWith(".tex"),
-                ) ?? "");
-            const open = (proj.openPaths ?? []).filter((p) =>
-              Object.hasOwn(restored, p),
-            );
-            // Prefer the tab that was active when the session ended.
-            const active =
-              proj.activePath &&
-              Object.hasOwn(restored, proj.activePath) &&
-              open.includes(proj.activePath)
-                ? proj.activePath
-                : open.length
-                  ? open[open.length - 1]
-                  : main;
-            setFiles(restored);
-            setMainPath(main);
-            setOpenPaths(open.length ? open : main ? [main] : []);
-            setActivePath(active);
-            setProjectName(proj.projectName || DEFAULT_PROJECT_NAME);
-          }
-        } else {
-          corrupt = true;
-        }
+  /**
+   * Point the editor at a freshly loaded project: files, the meta-derived
+   * main/open/active state, and the persisted refs. Resets everything a
+   * previous project left behind (PDF, log, sync map, pending recompile)
+   * and disposes the OUTGOING project's Monaco models — models are keyed by
+   * path and survive project switches, so a same-named path in the new
+   * project would resurrect the old project's content.
+   */
+  const applyProject = (
+    id: string,
+    meta: ProjectMeta,
+    files: Record<string, FileData>,
+    list: ProjectSummary[],
+  ) => {
+    const m = monacoRef.current;
+    if (m) {
+      const outgoing = new Set(Object.keys(filesRef.current));
+      for (const model of m.editor.getModels()) {
+        if (outgoing.has(model.uri.path)) model.dispose();
       }
+    }
+    // The stored main wins; otherwise the first .tex, mirroring deleteFile —
+    // a project without any .tex has NO main ("") rather than a .bib picked
+    // up as first key.
+    const main = Object.hasOwn(files, meta.mainPath)
+      ? meta.mainPath
+      : (Object.keys(files).find((p) => p.toLowerCase().endsWith(".tex")) ?? "");
+    const open = (meta.openPaths ?? []).filter((p) => Object.hasOwn(files, p));
+    const openPathsNorm = open.length ? open : main ? [main] : [];
+    // Prefer the tab that was active when the session last left this project.
+    const active =
+      meta.activePath &&
+      Object.hasOwn(files, meta.activePath) &&
+      open.includes(meta.activePath)
+        ? meta.activePath
+        : open.length
+          ? open[open.length - 1]
+          : main;
+    metaRef.current = {
+      ...meta,
+      name: meta.name || DEFAULT_PROJECT_NAME,
+      mainPath: main,
+      openPaths: openPathsNorm,
+      activePath: active,
+    };
+    savedRefsRef.current = new Map(Object.entries(files));
+    setActiveProjectId(id);
+    setProjects(list);
+    setFiles(files);
+    setMainPath(main);
+    setOpenPaths(openPathsNorm);
+    setActivePath(active);
+    setProjectName(meta.name || DEFAULT_PROJECT_NAME);
+    // The PDF/log/sync belong to the previous project's build.
+    setPdf(null);
+    setLog("");
+    setLiveLog("");
+    setSyncEntries(null);
+    setStatus({ kind: "idle" });
+    window.clearTimeout(autoTimerRef.current);
+    try {
+      localStorage.setItem(ACTIVE_PROJECT_KEY, id);
     } catch {
-      corrupt = true; // unparseable storage
+      // best effort: the project is in memory regardless
     }
-    if (corrupt) {
-      // Start from the defaults, but don't let the first persistence run
-      // write them over the unreadable project. (showNotice is created per
-      // render, so the notice is set inline here.)
-      skipNextSaveRef.current = true;
-      setNotice("Couldn't read the saved project — starting fresh");
-      window.clearTimeout(noticeTimerRef.current);
-      noticeTimerRef.current = window.setTimeout(() => setNotice(null), 8000);
-    }
-    setLoaded(true);
-  }, []);
+  };
 
-  // --- persist to localStorage (debounced; binary as base64) ------------
+  // --- load the active project from OPFS (client-only; defaults render
+  //     first, as SSR did, so hydration never mismatches) -----------------
   useEffect(() => {
-    if (!loaded) return;
-    if (skipNextSaveRef.current) {
-      // The stored project was unreadable; the first run would overwrite
-      // it with the defaults. Skip it — the next real edit saves normally.
-      skipNextSaveRef.current = false;
-      return;
-    }
-    const t = window.setTimeout(() => {
-      const proj: StoredProject = {
-        v: 1,
-        projectName,
-        mainPath,
-        openPaths: openPaths.filter((p) => Object.hasOwn(files, p)),
-        activePath,
-        files: Object.fromEntries(
-          Object.entries(files).map(([k, v]) =>
-            [k, typeof v === "string" ? v : { b64: toB64(v) }] as const,
-          ),
-        ),
-      };
+    let cancelled = false;
+    void (async () => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(proj));
-        saveFailedRef.current = false;
+        let list = await listProjects();
+        if (list.length === 0) {
+          // First run: the default project IS the starting point.
+          const now = Date.now();
+          const id = await createDefaultProjectOnce();
+          list = [
+            {
+              v: 1,
+              name: DEFAULT_PROJECT_NAME,
+              mainPath: DEFAULT_MAIN,
+              openPaths: [DEFAULT_MAIN],
+              activePath: DEFAULT_MAIN,
+              createdAt: now,
+              updatedAt: now,
+              id,
+            },
+          ];
+        }
+        let stored: string | null = null;
+        try {
+          stored = localStorage.getItem(ACTIVE_PROJECT_KEY);
+        } catch {
+          stored = null;
+        }
+        const picked =
+          (stored ? list.find((p) => p.id === stored) : undefined) ?? list[0];
+        const { meta, files: loadedFiles } = await loadProject(picked.id);
+        if (cancelled) return;
+        applyProject(picked.id, meta, loadedFiles, list);
       } catch {
-        // Quota exceeded or storage unavailable: the session isn't saved.
-        // Notice once per failure run — the debounced save would re-raise
-        // it on every edit otherwise.
-        if (!saveFailedRef.current) {
-          saveFailedRef.current = true;
-          setNotice("Storage is full — changes are not being saved");
+        if (!cancelled) {
+          // OPFS unavailable: the session still works in memory, but nothing
+          // is persisted (activeProjectId stays null).
+          setNotice("Storage unavailable — changes are not being saved");
           window.clearTimeout(noticeTimerRef.current);
           noticeTimerRef.current = window.setTimeout(
             () => setNotice(null),
@@ -393,9 +407,159 @@ export default function EditorPage() {
           );
         }
       }
+      if (!cancelled) setLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // --- persist the active project to OPFS (debounced, diff-based) --------
+  const persistNow = useCallback(async () => {
+    const s = persistStateRef.current;
+    const meta = metaRef.current;
+    if (!s.loaded || !s.activeProjectId || !meta) return;
+    const nextMeta: ProjectMeta = {
+      ...meta,
+      name: s.projectName || DEFAULT_PROJECT_NAME,
+      mainPath: s.mainPath,
+      openPaths: s.openPaths.filter((p) => Object.hasOwn(s.files, p)),
+      activePath: s.activePath,
+    };
+    try {
+      await saveProject(s.activeProjectId, nextMeta, s.files, savedRefsRef.current);
+      savedRefsRef.current = new Map(Object.entries(s.files));
+      metaRef.current = { ...nextMeta, updatedAt: Date.now() };
+      saveFailedRef.current = false;
+      setProjects((prev) =>
+        prev.map((p) =>
+          p.id === s.activeProjectId
+            ? { ...p, name: nextMeta.name, updatedAt: metaRef.current!.updatedAt }
+            : p,
+        ),
+      );
+    } catch {
+      // Storage unavailable or full: the session isn't saved. Notice once
+      // per failure run — the debounced save would re-raise it on every
+      // edit otherwise.
+      if (!saveFailedRef.current) {
+        saveFailedRef.current = true;
+        setNotice("Storage unavailable — changes are not being saved");
+        window.clearTimeout(noticeTimerRef.current);
+        noticeTimerRef.current = window.setTimeout(() => setNotice(null), 8000);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loaded || !activeProjectId) return;
+    const t = window.setTimeout(() => {
+      void persistNow();
     }, 600);
     return () => window.clearTimeout(t);
-  }, [files, mainPath, openPaths, activePath, projectName, loaded]);
+  }, [files, mainPath, openPaths, activePath, projectName, loaded, activeProjectId, persistNow]);
+
+  // --- project operations -------------------------------------------------
+
+  const switchProject = (id: string) => {
+    if (id === activeProjectId || switchingRef.current) return;
+    setProjectsMenuOpen(false);
+    switchingRef.current = true;
+    void (async () => {
+      try {
+        // Flush the outgoing project's pending edits first.
+        await persistNow();
+        const list = await listProjects();
+        const { meta, files: loadedFiles } = await loadProject(id);
+        applyProject(id, meta, loadedFiles, list);
+      } catch {
+        showNotice("Couldn't open that project");
+      } finally {
+        switchingRef.current = false;
+      }
+    })();
+  };
+
+  const newProject = () => {
+    if (switchingRef.current) return;
+    setProjectsMenuOpen(false);
+    switchingRef.current = true;
+    void (async () => {
+      try {
+        await persistNow();
+        const name = nextProjectName(projects.map((p) => p.name));
+        const id = await createProject(
+          name,
+          DEFAULT_FILES,
+          {
+            mainPath: DEFAULT_MAIN,
+            openPaths: [DEFAULT_MAIN],
+            activePath: DEFAULT_MAIN,
+          },
+        );
+        const list = await listProjects();
+        const { meta, files: loadedFiles } = await loadProject(id);
+        applyProject(id, meta, loadedFiles, list);
+      } catch {
+        showNotice("Couldn't create the project");
+      } finally {
+        switchingRef.current = false;
+      }
+    })();
+  };
+
+  const deleteProjectById = (id: string) => {
+    if (switchingRef.current) return;
+    const target = projects.find((p) => p.id === id);
+    const name =
+      id === activeProjectId
+        ? projectName
+        : (target?.name ?? "the project");
+    if (!window.confirm(`Delete “${name}” and all its files?`)) return;
+    setProjectsMenuOpen(false);
+    switchingRef.current = true;
+    void (async () => {
+      try {
+        await deleteProject(id);
+        let list = await listProjects();
+        if (id === activeProjectId) {
+          try {
+            localStorage.removeItem(ACTIVE_PROJECT_KEY);
+          } catch {
+            // best effort
+          }
+          if (list.length === 0) {
+            // Deleting down to empty: start from a fresh default project.
+            await createDefaultProjectOnce();
+            list = await listProjects();
+          }
+          const { meta, files: loadedFiles } = await loadProject(list[0].id);
+          applyProject(list[0].id, meta, loadedFiles, list);
+        } else {
+          setProjects(list);
+        }
+      } catch {
+        showNotice("Couldn't delete that project");
+      } finally {
+        switchingRef.current = false;
+      }
+    })();
+  };
+
+  // The Projects menu closes on any click outside of it.
+  useEffect(() => {
+    if (!projectsMenuOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (
+        e.target instanceof Element &&
+        !e.target.closest('[data-menu="projects"]')
+      ) {
+        setProjectsMenuOpen(false);
+      }
+    };
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
+  }, [projectsMenuOpen]);
 
   // --- engine ------------------------------------------------------------
   useEffect(() => {
@@ -479,6 +643,9 @@ export default function EditorPage() {
       return;
     }
     busyRef.current = true;
+    // A project switch mid-build must not land the old project's PDF on the
+    // new project; the result is dropped instead.
+    const projectId = persistStateRef.current.activeProjectId;
     // Remember the PDF's scroll position so the new PDF can restore it —
     // a recompile must not yank the reader back to the top of page 1.
     pendingScrollRef.current = pdfRef.current?.getViewportTop() ?? null;
@@ -488,6 +655,7 @@ export default function EditorPage() {
     const started = performance.now();
     try {
       await compiler.init();
+      if (projectId !== persistStateRef.current.activeProjectId) return;
       // All files go to the worker (text as strings, binary as bytes);
       // the pipeline runs bibtex8 itself when any of them is a .bib.
       const result = await compiler.compile(files, mainPath);
@@ -519,9 +687,13 @@ export default function EditorPage() {
       busyRef.current = false;
       if (recompileQueuedRef.current) {
         recompileQueuedRef.current = false;
-        // Let the state above settle, then recompile through the
-        // always-current ref so the latest files are picked up.
-        window.setTimeout(() => compileRef.current(), 0);
+        // A project switch consumed the queued edit — retrying would
+        // compile the NEW project for no reason.
+        if (projectId === persistStateRef.current.activeProjectId) {
+          // Let the state above settle, then recompile through the
+          // always-current ref so the latest files are picked up.
+          window.setTimeout(() => compileRef.current(), 0);
+        }
       }
     }
   }, [files, mainPath]);
@@ -1054,6 +1226,68 @@ export default function EditorPage() {
           title="Project name (saved in your browser)"
           className="w-44 shrink rounded border border-transparent bg-transparent px-1.5 py-0.5 text-sm font-medium text-ink transition-colors hover:border-ink/15 focus:border-mint focus:outline-none"
         />
+        {/* Projects menu: switch between the OPFS projects, or create and
+            delete them. The active row shows the live name (the input
+            above edits it before the next debounced save). */}
+        <div className="relative shrink-0" data-menu="projects">
+          <button
+            data-action="projects"
+            onClick={() => setProjectsMenuOpen((v) => !v)}
+            title="Open, create or delete projects (kept in your browser)"
+            className={
+              "flex items-center gap-1 rounded border px-2.5 py-1 text-xs transition-colors " +
+              (projectsMenuOpen
+                ? "border-mint bg-peach/50 text-ink"
+                : "border-stone/40 text-stone hover:bg-peach hover:text-ink")
+            }
+          >
+            Projects
+            <IconChevronDown className="h-3 w-3" />
+          </button>
+          {projectsMenuOpen && (
+            <div className="absolute left-0 top-full z-30 mt-1 w-64 rounded-md border border-ink/10 bg-white py-1 shadow-lg">
+              {projects.map((p) => {
+                const active = p.id === activeProjectId;
+                return (
+                  <div
+                    key={p.id}
+                    data-project={p.id}
+                    data-active={active || undefined}
+                    className="group flex items-center gap-1 px-2 py-0.5"
+                  >
+                    <button
+                      onClick={() => switchProject(p.id)}
+                      title={active ? "Current project" : `Open ${p.name}`}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs text-ink hover:bg-peach/60"
+                    >
+                      <span className="truncate">
+                        {active ? projectName : p.name}
+                      </span>
+                      {active && (
+                        <IconCheck className="h-3 w-3 shrink-0 text-mint" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => deleteProjectById(p.id)}
+                      title="Delete project"
+                      className="shrink-0 rounded p-1 text-stone opacity-0 transition-opacity hover:bg-peach/60 hover:text-ink group-hover:opacity-100"
+                    >
+                      <IconTrash className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
+              <div className="my-1 h-px bg-ink/10" />
+              <button
+                onClick={newProject}
+                className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs font-medium text-ink hover:bg-peach/60"
+              >
+                <IconPlus className="h-3.5 w-3.5 text-mint" />
+                New project
+              </button>
+            </div>
+          )}
+        </div>
         <div className="flex min-w-0 flex-1 justify-center">
           <div className="flex items-center gap-2">
             <button
@@ -1333,13 +1567,44 @@ function lastLine(line: string, prev: string) {
 // outright and every lookup uses Object.hasOwn.
 const RESERVED_NAMES = new Set(["constructor", "__proto__", "prototype"]);
 
-/** Strict UTF-8 decode; null when the bytes are not valid UTF-8. */
-function decodeText(buf: Uint8Array): string | null {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
-  } catch {
-    return null;
+// Dev StrictMode mounts effects twice; if both first-run loads saw an
+// empty projects dir they would each create a default, leaving an orphan
+// folder in OPFS that the menu later lists as a second "LaTeX project".
+// Share the in-flight creation so only one directory is ever written. The
+// slot clears on settle, so a later genuine first run (delete-to-empty)
+// can create again.
+let firstRunCreate: Promise<string> | null = null;
+function createDefaultProjectOnce(): Promise<string> {
+  if (!firstRunCreate) {
+    const p = createProject(
+      DEFAULT_PROJECT_NAME,
+      DEFAULT_FILES,
+      {
+        mainPath: DEFAULT_MAIN,
+        openPaths: [DEFAULT_MAIN],
+        activePath: DEFAULT_MAIN,
+      },
+    );
+    firstRunCreate = p;
+    void p.then(
+      () => {
+        if (firstRunCreate === p) firstRunCreate = null;
+      },
+      () => {
+        if (firstRunCreate === p) firstRunCreate = null;
+      },
+    );
   }
+  return firstRunCreate;
+}
+
+/** "LaTeX project", "LaTeX project 2", … — the first one not taken. */
+function nextProjectName(taken: string[]): string {
+  for (let i = 1; i < 1000; i++) {
+    const name = i === 1 ? DEFAULT_PROJECT_NAME : `${DEFAULT_PROJECT_NAME} ${i}`;
+    if (!taken.includes(name)) return name;
+  }
+  return `${DEFAULT_PROJECT_NAME} ${Date.now()}`;
 }
 
 /** True when `path` would live under an existing file (a file can't be a

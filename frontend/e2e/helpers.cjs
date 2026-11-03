@@ -145,4 +145,115 @@ class Runner {
   }
 }
 
-module.exports = { Runner, APP_URL, CHROME, FIREFOX, PNG_PATH };
+const ACTIVE_KEY = "homehub-active-project-v1";
+
+/**
+ * Write a project straight into OPFS (bypassing the app) and make it the
+ * active one. Call AFTER goto + waitReady so the app's load effect has
+ * settled (and first-run defaults exist), then goto() again — the reload
+ * picks the seeded project up via the active-project localStorage key.
+ *
+ * files: { "rel/path": string | number[] } — strings are text files,
+ * number[] are binary (e.g. Array.from(pngBytes)).
+ */
+async function seedProject(r, { id, name, mainPath = "", openPaths = [], activePath = "", files = {}, source = null, createdAt, updatedAt }) {
+  const pid =
+    id ||
+    (await r.page.evaluate(() =>
+      crypto.randomUUID(),
+    ));
+  const now = Date.now();
+  await r.page.evaluate(
+    ({ key, id, name, mainPath, openPaths, activePath, files, source, createdAt, updatedAt }) =>
+      (async () => {
+        const root = await navigator.storage.getDirectory();
+        const projects = await root.getDirectoryHandle("projects", { create: true });
+        const dir = await projects.getDirectoryHandle(id, { create: true });
+        for (const [rel, data] of Object.entries(files)) {
+          const parts = rel.split("/");
+          const leaf = parts.pop();
+          let d = dir;
+          for (const part of parts) d = await d.getDirectoryHandle(part, { create: true });
+          const fh = await d.getFileHandle(leaf, { create: true });
+          const w = await fh.createWritable();
+          if (typeof data === "string") await w.write(data);
+          else await w.write(new Uint8Array(data));
+          await w.close();
+        }
+        const meta = {
+          v: 1,
+          name,
+          mainPath,
+          openPaths,
+          activePath,
+          createdAt,
+          updatedAt,
+        };
+        if (source) meta.source = source;
+        const fh = await dir.getFileHandle("project.json", { create: true });
+        const w = await fh.createWritable();
+        await w.write(JSON.stringify(meta));
+        await w.close();
+        localStorage.setItem(key, id);
+      })(),
+    {
+      key: ACTIVE_KEY,
+      id: pid,
+      name,
+      mainPath,
+      openPaths,
+      activePath,
+      files,
+      source,
+      createdAt,
+      updatedAt,
+    },
+  );
+  return pid;
+}
+
+/**
+ * Read the active project back out of OPFS (the app's saved state).
+ * Returns { id, meta, files } where each file is a string when its bytes
+ * are valid UTF-8, else { bytes: number[] } — so the suites can compare
+ * what the app actually persisted, not what it had in memory.
+ */
+async function readProject(r) {
+  return r.page.evaluate((key) =>
+    (async () => {
+      const id = localStorage.getItem(key);
+      if (!id) return null;
+      const root = await navigator.storage.getDirectory();
+      const projects = await root.getDirectoryHandle("projects");
+      const dir = await projects.getDirectoryHandle(id);
+      const meta = JSON.parse(
+        await (await (await dir.getFileHandle("project.json")).getFile()).text(),
+      );
+      const files = {};
+      async function walk(d, prefix) {
+        for await (const entry of d.values()) {
+          const p = prefix ? prefix + "/" + entry.name : entry.name;
+          if (entry.kind === "directory") {
+            await walk(entry, p);
+          } else if (entry.name !== "project.json") {
+            const buf = new Uint8Array(await (await entry.getFile()).arrayBuffer());
+            let ok = false;
+            let text = "";
+            try {
+              text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+              ok = true;
+            } catch {
+              // not valid UTF-8 → binary
+            }
+            files[p] = ok ? text : { bytes: Array.from(buf) };
+          }
+        }
+      }
+      await walk(dir, "");
+      return { id, meta, files };
+    })(),
+    ACTIVE_KEY,
+  );
+}
+
+module.exports = { Runner, APP_URL, CHROME, FIREFOX, PNG_PATH, seedProject, readProject, ACTIVE_KEY };

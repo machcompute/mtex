@@ -8,6 +8,7 @@ const suites = [
   "rename.cjs",
   "regression.cjs",
   "fixes.cjs",
+  "projects.cjs",
   "firefox.cjs",
 ];
 let failed = 0;
