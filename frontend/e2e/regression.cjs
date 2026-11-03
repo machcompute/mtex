@@ -155,7 +155,17 @@ const r = new Runner("reg");
   await r.waitReady();
   r.ok(
     "engine ready",
-    /^Ready\.$/.test(((await r.status.textContent()) || "").trim()),
+    /^(Ready\.|Compiled in \d+ ms)$/.test(
+      ((await r.status.textContent()) || "").trim(),
+    ),
+  );
+  // Auto-compile on open: the default project (it has a main.tex) has
+  // already been built by the time the app settles — no click happened.
+  r.ok(
+    "auto-compiled on open (no Recompile clicked yet)",
+    /^Compiled in \d+ ms$/.test(
+      ((await r.status.textContent()) || "").trim(),
+    ),
   );
 
   // Default project compiles with bibtex citations resolved.
@@ -211,7 +221,9 @@ const r = new Runner("reg");
   await r.waitReady();
   r.ok(
     "reloaded, engine ready",
-    /^Ready\.$/.test(((await r.status.textContent()) || "").trim()),
+    /^(Ready\.|Compiled in \d+ ms)$/.test(
+      ((await r.status.textContent()) || "").trim(),
+    ),
   );
 
   const subStatus = await r.recompile();

@@ -156,6 +156,13 @@ export default function EditorPage() {
   const [autoRecompile, setAutoRecompile] = useState(true);
   const [syncScroll, setSyncScroll] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
+  // Reactive twin of engineReadyRef: the auto-compile-on-open effect needs
+  // a state update, not just the ref, to know when the engine settles.
+  const [engineReady, setEngineReady] = useState(false);
+  // Bumped once per applied project (load, switch, pull): the open-time
+  // auto-compile effect keys on it so a re-pull of the SAME project id
+  // still re-triggers, while plain re-renders never do.
+  const [projectVersion, setProjectVersion] = useState(0);
 
   const compilerRef = useRef<BusyTexCompiler | null>(null);
   const busyRef = useRef(false);
@@ -287,6 +294,7 @@ export default function EditorPage() {
     };
     savedRefsRef.current = new Map(Object.entries(files));
     setActiveProjectId(id);
+    setProjectVersion((v) => v + 1);
     setProjects(list);
     setFiles(files);
     setMainPath(main);
@@ -360,6 +368,22 @@ export default function EditorPage() {
       cancelled = true;
     };
   }, []);
+
+  // --- auto-compile on open -------------------------------------------------
+  // A project compiles as soon as it opens, not only when you type: the
+  // trigger is whichever settles LAST — the loaded files or the ready
+  // engine — plus every project switch or re-pull (applyProject bumps
+  // projectVersion). A project without a main .tex has nothing to compile
+  // and stays idle. Typing has its own debounce; this fires once per open.
+  useEffect(() => {
+    if (!loaded || !engineReady || !activeProjectId) return;
+    if (!autoRef.current) return;
+    if (!mainPath || !Object.hasOwn(files, mainPath)) return;
+    compileRef.current();
+    // files/mainPath come from this render (batched with the version bump)
+    // and are read, not watched: firing keys on open/switch, not on edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, engineReady, activeProjectId, projectVersion]);
 
   // --- persist the active project to OPFS (debounced, diff-based) --------
   const persistNow = useCallback(async () => {
@@ -636,6 +660,7 @@ export default function EditorPage() {
       },
       () => {
         engineReadyRef.current = true;
+        setEngineReady(true);
         // Engine finished its background preload; stop showing
         // "Loading engine…" (unless a compile already started).
         setStatus((s) => (s.kind === "loading" ? { kind: "idle" } : s));

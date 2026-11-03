@@ -31,7 +31,9 @@ fs.copyFileSync(PNG_PATH, path.join(pickDir, "ffpaper", "figs", "logo.png"));
   await r.waitReady();
   r.ok(
     "engine ready in Firefox",
-    /^Ready\.$/.test(((await r.status.textContent()) || "").trim()),
+    /^(Ready\.|Compiled in \d+ ms)$/.test(
+      ((await r.status.textContent()) || "").trim(),
+    ),
     ((await r.status.textContent().catch(() => "")) || "").trim(),
   );
 

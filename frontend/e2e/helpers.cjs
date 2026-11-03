@@ -58,12 +58,17 @@ class Runner {
     return this.page.goto(APP_URL, { waitUntil: "load", timeout: 60000 });
   }
 
-  // Wait until the status reads "Ready." (engine + texmf assets loaded).
+  // Wait until the app has settled after a load: the engine is ready AND
+  // the open project's auto-compile has finished. Terminal statuses:
+  // "Ready." (no main file to compile), "Compiled in N ms", or a failed
+  // build. (A bare engine-ready window no longer exists — the auto-compile
+  // on open takes the status straight from Ready. to Compiling….)
   async waitReady() {
+    const settled = /^(Ready\.|Compiled in \d+ ms|Compilation failed)/;
     for (let i = 0; i < 90; i++) {
       await this.page.waitForTimeout(2000);
       const t = ((await this.status.textContent().catch(() => "")) || "").trim();
-      if (/^Ready\.$/.test(t)) return true;
+      if (settled.test(t)) return true;
     }
     return false;
   }
@@ -75,6 +80,13 @@ class Runner {
   // busy, or the status text changed synchronously (e.g. the "No main
   // .tex file" error returns before a compile starts). Matching message
   // text here would miss error messages that don't say "failed".
+  // The start evidence matters because a REBUILD can finish with the
+  // SAME terminal text as before the click (a project that already
+  // failed: "Compilation failed — see log" before and after); without
+  // it the wait would be indistinguishable from "nothing happened".
+  // Polls are 200 ms apart: a warm rebuild of a small project can finish
+  // in well under a second, and a 1 s poll could miss the whole busy
+  // window when the before-text already equals the terminal text.
   // Button state and status text are read in ONE page evaluate: separate
   // CDP reads can straddle the terminal commit (text read just before the
   // done state renders, button read just after), which would return a
@@ -93,8 +105,8 @@ class Runner {
     const before = (await snap()).text;
     await btn.click();
     let sawBusy = false;
-    for (let i = 0; i < 90; i++) {
-      await this.page.waitForTimeout(1000);
+    for (let i = 0; i < 450; i++) {
+      await this.page.waitForTimeout(200);
       const { disabled, text } = await snap();
       if (disabled) sawBusy = true;
       if ((sawBusy || text !== before) && !disabled) return text;

@@ -28,7 +28,9 @@ const r = new Runner("folder");
   await r.waitReady();
   r.ok(
     "engine ready",
-    /^Ready\.$/.test(((await r.status.textContent()) || "").trim()),
+    /^(Ready\.|Compiled in \d+ ms)$/.test(
+      ((await r.status.textContent()) || "").trim(),
+    ),
   );
 
   // Drop a synthetic folder onto the file panel.

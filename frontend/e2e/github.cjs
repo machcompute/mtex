@@ -292,7 +292,9 @@ const r = new Runner("github");
   await r.waitReady();
   r.ok(
     "engine ready",
-    /^Ready\.$/.test(((await r.status.textContent()) || "").trim()),
+    /^(Ready\.|Compiled in \d+ ms)$/.test(
+      ((await r.status.textContent()) || "").trim(),
+    ),
   );
 
   r.ok(
