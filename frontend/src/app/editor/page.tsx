@@ -1529,6 +1529,17 @@ export default function EditorPage() {
                   minimap: { enabled: false },
                   wordWrap: "on",
                   automaticLayout: true,
+                  // Monaco 0.55.1's occurrences-highlighter schedules each
+                  // highlight through an internal "delayer" whose completion
+                  // promise nothing ever handles. A tab switch inside the
+                  // ~100 ms highlight window cancels the pending request,
+                  // and the cancellation rejects that promise with
+                  // "Canceled" — an unhandled rejection Next's dev overlay
+                  // reports as "Runtime Canceled". With the highlight off
+                  // the promise is never created, so every cancel() is a
+                  // no-op. (Monaco 0.57 rewrote the delayer; revisit on
+                  // upgrade if we want the feature back.)
+                  occurrencesHighlight: "off",
                 }}
               />
             ) : activePath ? (
