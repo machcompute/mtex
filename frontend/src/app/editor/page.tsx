@@ -1453,7 +1453,7 @@ export default function EditorPage() {
 
         {/* Editor pane: Overleaf-style tabs + editor (or binary preview) */}
         <div className="flex min-w-0 flex-1 flex-col border-r border-ink/10 bg-white">
-          <div className="flex h-9 shrink-0 items-end overflow-x-auto border-b border-ink/10 bg-cream/70">
+          <div className="flex h-9 shrink-0 items-end overflow-x-auto border-b border-ink/10 bg-cream">
             {openPaths.map((p) => {
               const active = p === activePath;
               return (

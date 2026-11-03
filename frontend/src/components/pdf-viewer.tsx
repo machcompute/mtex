@@ -158,8 +158,14 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
     if (!data || data.byteLength === 0) {
       const empty = document.createElement("div");
       empty.className =
-        "flex h-full items-center justify-center text-sm text-stone";
-      empty.textContent = "No PDF output yet — press Recompile.";
+        "flex h-full flex-col items-center justify-center gap-2 text-stone";
+      // Same document glyph as IconFile (imperative DOM — keep in sync).
+      empty.innerHTML =
+        '<svg viewBox="0 0 16 16" class="h-10 w-10 text-stone/40" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h5.5L13 5v8.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5z"/><path d="M9.5 1.5V5H13"/></svg>';
+      const label = document.createElement("p");
+      label.className = "text-sm";
+      label.textContent = "No PDF output yet — press Recompile.";
+      empty.append(label);
       container.append(empty);
       return;
     }

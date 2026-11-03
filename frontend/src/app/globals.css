@@ -20,7 +20,17 @@
 body {
   background: var(--color-cream);
   color: var(--color-ink);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Geist (self-hosted via layout.tsx) is the UI face; the @theme maps
+     --font-sans to it. */
+  font-family: var(--font-sans);
+}
+
+/* Keyboard focus: one consistent mint ring on buttons and links. Inputs
+   deliberately keep their border-based focus (focus:border-mint). */
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--color-mint);
+  outline-offset: 1px;
 }
 
 /* Mint text selection (also colors the highlighted line when the PDF

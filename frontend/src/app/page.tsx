@@ -4,9 +4,12 @@ export default function Home() {
   return (
     <div className="flex flex-1 items-center justify-center bg-cream">
       <main className="flex flex-col items-center gap-6 text-center">
-        <h1 className="text-3xl font-semibold tracking-tight text-ink">
-          HomeHub
-        </h1>
+        <div className="flex items-center gap-3">
+          <span className="h-6 w-6 rounded-sm bg-mint" aria-hidden />
+          <h1 className="text-4xl font-semibold tracking-tight text-ink">
+            HomeHub
+          </h1>
+        </div>
         <p className="max-w-md text-lg text-stone">
           Your home automation and document hub.
         </p>
