@@ -35,11 +35,19 @@ import {
   listProjects,
   loadProject,
   saveProject,
+  savePreview,
   type FileData,
   type ProjectMeta,
   type ProjectSummary,
 } from "@/lib/opfs";
 import { MAX_PULL_FILES } from "@/lib/github";
+import {
+  DEFAULT_FILES,
+  DEFAULT_MAIN,
+  DEFAULT_PROJECT_NAME,
+  nextProjectName,
+} from "@/lib/defaults";
+import { renderFirstPagePng } from "@/lib/preview";
 import {
   decodeSynctex,
   findOutputForSource,
@@ -73,52 +81,6 @@ const defineTheme: BeforeMount = (monaco) => {
       "minimap.background": "#fcfaf9",
     },
   });
-};
-
-const DEFAULT_MAIN = "main.tex";
-const DEFAULT_PROJECT_NAME = "LaTeX project";
-
-// Default project: a two-file bibtex example, so multi-file compilation and
-// bibtex8 (the pipeline auto-runs it whenever a .bib is present) work out of
-// the box.
-const DEFAULT_FILES: Record<string, string> = {
-  [DEFAULT_MAIN]: `\\documentclass{article}
-\\usepackage{amsmath}
-
-\\title{HomeHub LaTeX}
-\\author{You}
-\\date{\\today}
-
-\\begin{document}
-\\maketitle
-
-Hello from a \\textbf{full TeX Live} running in your browser.
-Citations are resolved by bibtex8: Euler's classic
-\\cite{euler1748} and Knuth's \\cite{knuth1984}.
-
-\\begin{equation}
-  e^{i\\pi} + 1 = 0
-\\end{equation}
-
-\\bibliographystyle{plain}
-\\bibliography{refs}
-
-\\end{document}
-`,
-  "refs.bib": `@article{euler1748,
-  author  = {Euler, Leonhard},
-  title   = {Introductio in analysin infinitorum},
-  journal = {Genevae},
-  year    = {1748},
-}
-
-@book{knuth1984,
-  author    = {Knuth, Donald E.},
-  title     = {The {\\TeX}book},
-  publisher = {Addison-Wesley},
-  year      = {1984},
-}
-`,
 };
 
 const IMAGE_EXT = new Set([
@@ -726,6 +688,19 @@ export default function EditorPage() {
       if (result.pdf && result.pdf.byteLength > 0) {
         setPdf(result.pdf);
         setStatus({ kind: "done", ms: Math.round(performance.now() - started) });
+        // Refresh the dashboard's square thumbnail (first page). Fire-and-
+        // forget: rendering it is best-effort and must never affect the
+        // compile result the reader just saw.
+        if (projectId) {
+          void (async () => {
+            try {
+              const png = await renderFirstPagePng(result.pdf!);
+              if (png) await savePreview(projectId, png);
+            } catch {
+              // best effort — the thumbnail is optional
+            }
+          })();
+        }
       } else {
         setPdf(null);
         setStatus({ kind: "error", message: "Compilation failed — see log" });
@@ -1680,15 +1655,6 @@ function createDefaultProjectOnce(): Promise<string> {
     );
   }
   return firstRunCreate;
-}
-
-/** "LaTeX project", "LaTeX project 2", … — the first one not taken. */
-function nextProjectName(taken: string[]): string {
-  for (let i = 1; i < 1000; i++) {
-    const name = i === 1 ? DEFAULT_PROJECT_NAME : `${DEFAULT_PROJECT_NAME} ${i}`;
-    if (!taken.includes(name)) return name;
-  }
-  return `${DEFAULT_PROJECT_NAME} ${Date.now()}`;
 }
 
 /** True when `path` would live under an existing file (a file can't be a

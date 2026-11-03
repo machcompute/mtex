@@ -36,6 +36,12 @@ export type ProjectSummary = ProjectMeta & { id: string };
 
 const PROJECTS_DIR = "projects";
 const META_FILE = "project.json";
+/**
+ * The square first-page thumbnail the dashboard shows. It is project metadata,
+ * not a content file: it is skipped by every file walk so it never reaches the
+ * in-memory `files` map (the file browser, the compiler, upload/pull counts).
+ */
+export const PREVIEW_FILE = "preview.png";
 
 /** localStorage key of the project open in the last session. */
 export const ACTIVE_PROJECT_KEY = "homehub-active-project-v1";
@@ -138,7 +144,7 @@ async function walkFiles(
       if (entry.name === META_FILE) continue;
       for await (const [p, b] of await walkFiles(entry as FileSystemDirectoryHandle, path))
         out.set(p, b);
-    } else if (entry.name !== META_FILE) {
+    } else if (entry.name !== META_FILE && entry.name !== PREVIEW_FILE) {
       const file = await (entry as FileSystemFileHandle).getFile();
       out.set(path, new Uint8Array(await file.arrayBuffer()));
     }
@@ -267,6 +273,35 @@ export async function updateProjectMeta(
 
 export async function deleteProject(id: string): Promise<void> {
   await (await projectsRoot()).removeEntry(id, { recursive: true });
+}
+
+/**
+ * Persist the project's square first-page thumbnail (see PREVIEW_FILE).
+ * Overwrites any previous one; the project folder is created if missing.
+ */
+export async function savePreview(
+  id: string,
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<void> {
+  const dir = await (await projectsRoot()).getDirectoryHandle(id, { create: true });
+  await writeFile(dir, PREVIEW_FILE, bytes);
+}
+
+/**
+ * Read a project's thumbnail bytes, or null when it has never compiled (or the
+ * file is missing/unreadable). The dashboard falls back to a placeholder then.
+ */
+export async function loadPreview(
+  id: string,
+): Promise<Uint8Array<ArrayBuffer> | null> {
+  try {
+    const dir = await (await projectsRoot()).getDirectoryHandle(id);
+    const fh = await dir.getFileHandle(PREVIEW_FILE);
+    const file = await fh.getFile();
+    return new Uint8Array(await file.arrayBuffer());
+  } catch {
+    return null;
+  }
 }
 
 

@@ -248,7 +248,7 @@ async function readProject(r) {
           const p = prefix ? prefix + "/" + entry.name : entry.name;
           if (entry.kind === "directory") {
             await walk(entry, p);
-          } else if (entry.name !== "project.json") {
+          } else if (entry.name !== "project.json" && entry.name !== "preview.png") {
             const buf = new Uint8Array(await (await entry.getFile()).arrayBuffer());
             let ok = false;
             let text = "";

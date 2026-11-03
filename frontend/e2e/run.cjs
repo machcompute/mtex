@@ -9,6 +9,7 @@ const suites = [
   "regression.cjs",
   "fixes.cjs",
   "projects.cjs",
+  "dashboard.cjs",
   "github.cjs",
   "firefox.cjs",
 ];
