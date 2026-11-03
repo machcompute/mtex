@@ -8,7 +8,10 @@
 // is downloaded (its blob is never requested); binaries are kept
 // byte-for-byte; no tarball (codeload.github.com) traffic happens; and a
 // re-pull of the same repo — from another branch — REPLACES that project's
-// files (stale paths deleted) instead of creating a duplicate.
+// files (stale paths deleted) instead of creating a duplicate; and a push
+// uploads the project's files as ONE new commit on the branch's current HEAD
+// (byte-identical blobs, nested trees deepest-first, template message,
+// non-forced ref move) with the project's source repo/branch preselected.
 const fs = require("fs");
 const { Runner, PNG_PATH, readProject } = require("./helpers.cjs");
 
@@ -72,8 +75,9 @@ const TREE_DEV = {
 // the stub must too, or the preflight for the Authorization header fails.
 const CORS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, OPTIONS",
-  "access-control-allow-headers": "authorization, accept, x-github-api-version",
+  "access-control-allow-methods": "GET, POST, PATCH, OPTIONS",
+  "access-control-allow-headers":
+    "authorization, accept, content-type, x-github-api-version",
 };
 const okCors = { "access-control-allow-origin": "*" };
 const preflight = (route) =>
@@ -82,6 +86,11 @@ const preflight = (route) =>
 const blobHits = {};
 let codeloadHits = 0;
 let userAuthHeader = null;
+// Push direction: what the Git Data API received.
+const pushBlobShas = []; // { sha, bytes }
+const pushTreeShas = []; // { sha, entries }
+const pushCommits = []; // full POST bodies
+const pushRefs = []; // { ref, sha, force }
 
 async function stubGithub(r) {
   // Catch-all first (routes run in reverse registration order, so it is the
@@ -164,6 +173,91 @@ async function stubGithub(r) {
         contentType: "application/octet-stream",
         headers: okCors,
         body: bytes,
+      });
+    },
+  );
+  // --- push direction (Git Data API) ----------------------------------------
+  // Registered AFTER the catch-alls above: routes are consulted in reverse
+  // registration order, so these win where the URL overlaps (notably
+  // /branches/main and /branches/dev against the `branches*` glob).
+  await r.page.route("**/api.github.com/user/emails*", (route) => {
+    if (route.request().method() === "OPTIONS") return preflight(route);
+    return route.fulfill({
+      contentType: "application/json",
+      headers: okCors,
+      body: JSON.stringify([
+        { email: "test@example.com", primary: true, verified: true },
+      ]),
+    });
+  });
+  const branchHead = (name, sha) =>
+    r.page.route(
+      `**/api.github.com/repos/testuser/latex-repo/branches/${name}`,
+      (route) => {
+        if (route.request().method() === "OPTIONS") return preflight(route);
+        return route.fulfill({
+          contentType: "application/json",
+          headers: okCors,
+          body: JSON.stringify({
+            name,
+            commit: { sha, url: `https://api.github.com/repos/testuser/latex-repo/commits/${sha}` },
+          }),
+        });
+      },
+    );
+  await branchHead("main", "head-main");
+  await branchHead("dev", "head-dev");
+  await r.page.route("**/api.github.com/repos/testuser/latex-repo/git/blobs", (route) => {
+    const req = route.request();
+    if (req.method() === "OPTIONS") return preflight(route);
+    const body = JSON.parse(req.postData() || "{}");
+    const sha = `blob-push-${pushBlobShas.length + 1}`;
+    pushBlobShas.push({ sha, bytes: Buffer.from(body.content ?? "", "base64") });
+    return route.fulfill({
+      contentType: "application/json",
+      headers: okCors,
+      body: JSON.stringify({ sha }),
+    });
+  });
+  await r.page.route("**/api.github.com/repos/testuser/latex-repo/git/trees", (route) => {
+    const req = route.request();
+    if (req.method() === "OPTIONS") return preflight(route);
+    const body = JSON.parse(req.postData() || "{}");
+    const sha = `tree-push-${pushTreeShas.length + 1}`;
+    pushTreeShas.push({ sha, entries: body.tree ?? [] });
+    return route.fulfill({
+      contentType: "application/json",
+      headers: okCors,
+      body: JSON.stringify({ sha }),
+    });
+  });
+  await r.page.route(
+    "**/api.github.com/repos/testuser/latex-repo/git/commits",
+    (route) => {
+      const req = route.request();
+      if (req.method() === "OPTIONS") return preflight(route);
+      pushCommits.push(JSON.parse(req.postData() || "{}"));
+      return route.fulfill({
+        contentType: "application/json",
+        headers: okCors,
+        body: JSON.stringify({ sha: "new-commit-1" }),
+      });
+    },
+  );
+  await r.page.route(
+    "**/api.github.com/repos/testuser/latex-repo/git/refs/**",
+    (route) => {
+      const req = route.request();
+      if (req.method() === "OPTIONS") return preflight(route);
+      const body = JSON.parse(req.postData() || "{}");
+      pushRefs.push({
+        ref: `refs/${req.url().split("/git/refs/")[1]}`,
+        ...body,
+      });
+      return route.fulfill({
+        contentType: "application/json",
+        headers: okCors,
+        body: JSON.stringify({ ref: `refs/${req.url().split("/git/refs/")[1]}`, object: { type: "commit", sha: body.sha } }),
       });
     },
   );
@@ -425,6 +519,116 @@ const r = new Runner("github");
     "menu: default project untouched",
     rowNames.includes("LaTeX project"),
     JSON.stringify(rowNames),
+  );
+
+  // --- push: the project's files go back as ONE new commit ---------------------
+  await r.page.locator('button[data-action="github"]').click();
+  await r.page.waitForSelector('[data-modal="github"]', { timeout: 10000 });
+  await r.page.locator('[data-gh="login"]').waitFor({ timeout: 15000 });
+  await waitBranches(r, branchSel);
+  r.ok(
+    "push: the project's source repo is preselected",
+    (await repoSel.inputValue()) === "testuser/latex-repo",
+    String(await repoSel.inputValue()),
+  );
+  r.ok(
+    "push: the project's source branch is preselected",
+    (await branchSel.inputValue()) === "dev",
+    String(await branchSel.inputValue()),
+  );
+  r.ok("push: the push button is offered", (await r.page.locator('button[data-gh="push"]').count()) === 1);
+  await r.page.locator('button[data-gh="push"]').click();
+  await r.page.waitForSelector('[data-modal="github"]', {
+    state: "detached",
+    timeout: 30000,
+  });
+  r.ok(
+    "push: success notice with files, branch and sha",
+    /Pushed 3 files to testuser\/latex-repo @ dev \(new-com\)/.test(
+      (await r.page.locator("[data-notice]").first().textContent().catch(() => "")) ||
+        "",
+    ),
+    String(
+      (await r.page.locator("[data-notice]").first().textContent().catch(() => "")) ||
+        "",
+    ),
+  );
+
+  // Exactly the project's three files, byte-for-byte (set order can vary).
+  const pushedBytes = pushBlobShas.map((b) => b.bytes.toString());
+  r.ok(
+    "push: one blob per file, byte-for-byte",
+    pushBlobShas.length === 3 &&
+      JSON.stringify(pushedBytes.sort()) ===
+        JSON.stringify([MAIN_TEX_DEV, SECOND_TEX, PNG.toString()].sort()),
+    JSON.stringify(pushedBytes.map((s) => s.length)),
+  );
+  // Two trees, deepest first: figs (logo.png) then the root (all three paths).
+  r.ok(
+    "push: trees created deepest-first (figs then root)",
+    pushTreeShas.length === 2 &&
+      pushTreeShas[0].entries.length === 1 &&
+      pushTreeShas[0].entries[0].path === "logo.png" &&
+      pushTreeShas[0].entries[0].mode === "100644" &&
+      pushTreeShas[0].entries[0].type === "blob" &&
+      pushTreeShas[0].entries[0].sha === pushBlobShas.find((b) => b.bytes.equals(PNG))?.sha &&
+      pushTreeShas[1].entries.length === 3,
+    JSON.stringify(pushTreeShas),
+  );
+  const rootEntries = pushTreeShas[1]?.entries ?? [];
+  r.ok(
+    "push: root tree lists all three paths",
+    JSON.stringify(rootEntries.map((e) => e.path).sort()) ===
+      JSON.stringify(["figs", "main.tex", "second.tex"]),
+    JSON.stringify(rootEntries),
+  );
+  r.ok(
+    "push: root's figs entry points at the figs tree",
+    rootEntries.find((e) => e.path === "figs")?.type === "tree" &&
+      rootEntries.find((e) => e.path === "figs")?.sha === "tree-push-1",
+  );
+  r.ok(
+    "push: one commit on top of the branch's current head",
+    pushCommits.length === 1 &&
+      JSON.stringify(pushCommits[0].parents) === JSON.stringify(["head-dev"]),
+    JSON.stringify(pushCommits[0]?.parents),
+  );
+  r.ok(
+    "push: commit message follows the machlatex template",
+    /^machlatex \d{4}-\d{2}-\d{2}:\d{2}:\d{2}:\d{2}$/.test(pushCommits[0]?.message ?? ""),
+    pushCommits[0]?.message,
+  );
+  r.ok(
+    "push: commit authored by the signed-in user",
+    pushCommits[0]?.author?.name === "Test User" &&
+      pushCommits[0]?.author?.email === "test@example.com" &&
+      pushCommits[0]?.committer?.name === "Test User",
+    JSON.stringify(pushCommits[0]?.author),
+  );
+  r.ok(
+    "push: commit tree is the root tree",
+    pushCommits[0]?.tree === "tree-push-2",
+    pushCommits[0]?.tree,
+  );
+  r.ok(
+    "push: branch ref moved forward, non-forced",
+    pushRefs.length === 1 &&
+      pushRefs[0].ref === "refs/heads/dev" &&
+      pushRefs[0].sha === "new-commit-1" &&
+      pushRefs[0].force === false,
+    JSON.stringify(pushRefs),
+  );
+
+  // The project's recorded source is the pushed repo/branch.
+  const p3 = await readProject(r);
+  r.ok(
+    "OPFS: source is the pushed repo/branch",
+    !!p3 &&
+      p3.meta.source?.kind === "github" &&
+      p3.meta.source.owner === "testuser" &&
+      p3.meta.source.repo === "latex-repo" &&
+      p3.meta.source.branch === "dev",
+    p3 ? JSON.stringify(p3.meta.source) : "(null)",
   );
 
   r.ok("still no codeload traffic", codeloadHits === 0, `${codeloadHits} hit(s)`);

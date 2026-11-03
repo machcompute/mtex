@@ -5,16 +5,19 @@ import { IconClose, IconGitHub, IconSpinner } from "@/components/icons";
 import {
   clearPat,
   fetchRepoFiles,
+  getIdentity,
   getMe,
   listBranches,
   listRepos,
   loadPat,
+  pushCommitMessage,
+  pushFiles,
   savePat,
   type GhBranch,
   type GhRepo,
   type GhUser,
 } from "@/lib/github";
-import type { FileData, ProjectSummary } from "@/lib/opfs";
+import type { FileData, ProjectSource, ProjectSummary } from "@/lib/opfs";
 
 export type PullRequest = {
   owner: string;
@@ -25,20 +28,44 @@ export type PullRequest = {
   skippedCap: number;
 };
 
+export type PushRequest = {
+  owner: string;
+  repo: string;
+  branch: string;
+  /** The new commit the branch ref now points at. */
+  sha: string;
+  files: number;
+  message: string;
+};
+
 type Props = {
   /** All OPFS projects — used to tell a fresh pull from a re-pull of a repo
    * that was already imported. */
   projects: ProjectSummary[];
+  /** The active project's files — the Push button uploads exactly these. */
+  files: Record<string, FileData>;
+  /** Where the active project came from (a GitHub repo, if any) — that
+   * repo/branch is preselected on sign-in so a push is one click. */
+  projectSource: ProjectSource | null;
   onPulled: (req: PullRequest) => Promise<void>;
+  onPushed: (req: PushRequest) => Promise<void>;
   onClose: () => void;
 };
 
 /**
- * A serverless GitHub import: the user pastes a personal access token (kept in
- * localStorage), picks a repo and branch, and the files are pulled straight
- * from api.github.com into the browser. No server is involved.
+ * A serverless GitHub bridge: the user pastes a personal access token (kept in
+ * localStorage), picks a repo and branch, and pulls the files straight from
+ * api.github.com into the browser — or pushes the active project's files back
+ * as a new commit. No server is involved.
  */
-export default function GitHubModal({ projects, onPulled, onClose }: Props) {
+export default function GitHubModal({
+  projects,
+  files,
+  projectSource,
+  onPulled,
+  onPushed,
+  onClose,
+}: Props) {
   // A saved token seeds the signed-in step on open; the PAT step otherwise.
   const [token, setToken] = useState<string | null>(() => loadPat());
   const [patInput, setPatInput] = useState("");
@@ -53,6 +80,7 @@ export default function GitHubModal({ projects, onPulled, onClose }: Props) {
   const [authing, setAuthing] = useState(token !== null);
   const [loadingBranches, setLoadingBranches] = useState(false);
   const [pulling, setPulling] = useState(false);
+  const [pushing, setPushing] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -78,10 +106,17 @@ export default function GitHubModal({ projects, onPulled, onClose }: Props) {
   function applyAuth(t: string, res: { me: GhUser; repos: GhRepo[] }) {
     setUser(res.me);
     setRepos(res.repos);
-    if (res.repos.length > 0) {
-      setSelectedRepo(res.repos[0].full_name);
-      void loadBranches(t, res.repos[0]);
-    }
+    if (res.repos.length === 0) return;
+    // The active project's GitHub source (if any) wins the preselection —
+    // that repo/branch is where a push goes back to.
+    const src = projectSource;
+    const match =
+      src?.kind === "github"
+        ? res.repos.find((r) => r.owner.login === src.owner && r.name === src.repo)
+        : undefined;
+    const repo = match ?? res.repos[0];
+    setSelectedRepo(repo.full_name);
+    void loadBranches(t, repo, match && src ? src.branch : undefined);
   }
 
   async function signIn(t: string) {
@@ -96,14 +131,20 @@ export default function GitHubModal({ projects, onPulled, onClose }: Props) {
     }
   }
 
-  async function loadBranches(t: string, repo: GhRepo) {
+  async function loadBranches(t: string, repo: GhRepo, preferred?: string) {
     setLoadingBranches(true);
     setError(null);
     try {
       const br = await listBranches(t, repo.owner.login, repo.name);
       setBranches(br);
+      const preferredBranch = preferred
+        ? br.find((b) => b.name === preferred)?.name
+        : undefined;
       setSelectedBranch(
-        br.find((b) => b.name === repo.default_branch)?.name ?? br[0]?.name ?? null,
+        preferredBranch ??
+          br.find((b) => b.name === repo.default_branch)?.name ??
+          br[0]?.name ??
+          null,
       );
     } catch (e) {
       setBranches([]);
@@ -195,6 +236,51 @@ export default function GitHubModal({ projects, onPulled, onClose }: Props) {
     })();
   };
 
+  // Upload the active project's files as ONE new commit on top of the
+  // selected branch's current HEAD (the modal does the network work; the
+  // page records where the project now lives).
+  const handlePush = () => {
+    const t = token;
+    const repo = selectedRepoObj;
+    const branch = selectedBranch ?? repo?.default_branch;
+    if (!t || !repo || !branch || Object.keys(files).length === 0) return;
+    const owner = repo.owner.login;
+    const name = repo.name;
+    const message = pushCommitMessage();
+    setPushing(true);
+    setError(null);
+    setProgress({ done: 0, total: 0 });
+    void (async () => {
+      try {
+        const identity = await getIdentity(t);
+        const res = await pushFiles(
+          t,
+          owner,
+          name,
+          branch,
+          files,
+          message,
+          identity,
+          (done, total) => setProgress({ done, total }),
+        );
+        await onPushed({
+          owner,
+          repo: name,
+          branch,
+          sha: res.sha,
+          files: res.files,
+          message,
+        });
+        onClose();
+      } catch (e) {
+        setError(errMsg(e));
+      } finally {
+        setPushing(false);
+        setProgress(null);
+      }
+    })();
+  };
+
   const handleDisconnect = () => {
     clearPat();
     setToken(null);
@@ -207,7 +293,7 @@ export default function GitHubModal({ projects, onPulled, onClose }: Props) {
     setError(null);
   };
 
-  const busy = authing || pulling || loadingBranches;
+  const busy = authing || pulling || pushing || loadingBranches;
 
   return (
     <div
@@ -221,7 +307,7 @@ export default function GitHubModal({ projects, onPulled, onClose }: Props) {
         <div className="mb-3 flex items-center justify-between">
           <h2 className="flex items-center gap-1.5 text-sm font-semibold text-ink">
             <IconGitHub className="h-4 w-4" />
-            Import from GitHub
+            GitHub
           </h2>
           <button
             onClick={onClose}
@@ -325,10 +411,10 @@ export default function GitHubModal({ projects, onPulled, onClose }: Props) {
               </select>
             </label>
 
-            {pulling && progress && (
+            {(pulling || pushing) && progress && (
               <p data-gh="progress" className="flex items-center gap-1.5 text-xs text-stone">
                 <IconSpinner className="h-3 w-3" />
-                Pulling… {progress.done}/{progress.total || "…"}
+                {pushing ? "Pushing…" : "Pulling…"} {progress.done}/{progress.total || "…"}
               </p>
             )}
 
@@ -348,6 +434,26 @@ export default function GitHubModal({ projects, onPulled, onClose }: Props) {
                   existing ? "Re-pull" : "Pull into a project"
                 )}
               </button>
+              <button
+                data-gh="push"
+                onClick={handlePush}
+                disabled={
+                  busy || !selectedRepo || !selectedBranch || Object.keys(files).length === 0
+                }
+                title="Upload this project's files to the selected branch as a new commit"
+                className="flex flex-1 items-center justify-center gap-1.5 rounded bg-mint px-3 py-1.5 text-sm font-semibold text-ink transition-colors hover:bg-ink hover:text-mint disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {pushing ? (
+                  <>
+                    <IconSpinner className="h-3.5 w-3.5" />
+                    Pushing…
+                  </>
+                ) : (
+                  "Push"
+                )}
+              </button>
+            </div>
+            <div className="flex justify-end pt-1">
               <button
                 data-gh="disconnect"
                 onClick={handleDisconnect}

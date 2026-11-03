@@ -23,7 +23,7 @@ import {
   IconSpinner,
   IconTrash,
 } from "@/components/icons";
-import GitHubModal, { type PullRequest } from "@/components/github-modal";
+import GitHubModal, { type PullRequest, type PushRequest } from "@/components/github-modal";
 import { BusyTexCompiler } from "@/lib/busytex";
 import {
   ACTIVE_PROJECT_KEY,
@@ -38,6 +38,7 @@ import {
   savePreview,
   type FileData,
   type ProjectMeta,
+  type ProjectSource,
   type ProjectSummary,
 } from "@/lib/opfs";
 import { MAX_PULL_FILES } from "@/lib/github";
@@ -569,6 +570,27 @@ export default function EditorPage() {
     } finally {
       switchingRef.current = false;
     }
+  };
+
+  // The modal already pushed the files to GitHub; here we just record where
+  // the project now lives, so the next modal open preselects that
+  // repo/branch and a "Re-pull" matches the push target.
+  const pushGithub = async (req: PushRequest): Promise<void> => {
+    const id = activeProjectId;
+    if (!id) return;
+    const source: ProjectSource = {
+      kind: "github",
+      owner: req.owner,
+      repo: req.repo,
+      branch: req.branch,
+    };
+    if (metaRef.current) metaRef.current = { ...metaRef.current, source };
+    setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, source } : p)));
+    await persistNow();
+    showNotice(
+      `Pushed ${req.files} file${req.files === 1 ? "" : "s"} to ` +
+        `${req.owner}/${req.repo} @ ${req.branch} (${req.sha.slice(0, 7)})`,
+    );
   };
 
   // The Projects menu closes on any click outside of it.
@@ -1568,7 +1590,10 @@ export default function EditorPage() {
       {ghModalOpen && (
         <GitHubModal
           projects={projects}
+          files={files}
+          projectSource={projects.find((p) => p.id === activeProjectId)?.source ?? null}
           onPulled={pullGithub}
+          onPushed={pushGithub}
           onClose={() => setGhModalOpen(false)}
         />
       )}
