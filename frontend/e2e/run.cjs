@@ -9,6 +9,7 @@ const suites = [
   "regression.cjs",
   "fixes.cjs",
   "projects.cjs",
+  "github.cjs",
   "firefox.cjs",
 ];
 let failed = 0;

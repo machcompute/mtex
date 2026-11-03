@@ -13,6 +13,7 @@ node e2e/rename.cjs         # one suite: nested-file rename / move
 node e2e/regression.cjs     # one suite: compile, citations, network audit, vendored packages
 node e2e/fixes.cjs          # one suite: the bug-fix regression set
 node e2e/projects.cjs       # one suite: project create/switch/delete (OPFS)
+node e2e/github.cjs         # one suite: PAT-based GitHub import (stubbed API)
 node e2e/firefox.cjs        # one suite: folder picker button flow in real Firefox
 ```
 
@@ -79,6 +80,16 @@ persisted, not what it had in memory.
   marker edit persisted per project), rename persists across reload,
   delete with confirm dialog (inactive and active), delete-to-empty
   creating a fresh default, and outside-click close.
+- **github.cjs** — the serverless GitHub import with `api.github.com`
+  stubbed by route interception (CORS included, since the app sends a
+  bearer token cross-origin): the PAT is persisted and sent, the
+  repo/branch browser preselects the default branch, and a pull creates a
+  project named for the repo — dotfiles are filtered out of the tree
+  listing before anything is downloaded (their blobs are never requested),
+  binaries are kept byte-for-byte, and no tarball
+  (`codeload.github.com`) traffic happens. A re-pull of the same repo from
+  another branch replaces that project's files (stale paths deleted, new
+  branch recorded) instead of creating a duplicate row.
 - **firefox.cjs** — the folder *button* in a real Firefox. Firefox honors
   `webkitdirectory` (MDN: supported; CanIUse: Firefox 50+), so the button
   opens a native folder picker; the suite drives the whole flow — click

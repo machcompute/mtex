@@ -57,8 +57,16 @@ async function seed(r, p) {
     files: { "main.tex": "AAA\n", "b.tex": "BBB\n" },
   });
   await r1.goto();
-  await r1.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
-  await r1.page.waitForSelector(".monaco-editor .view-lines", { timeout: 30000 });
+  // The header renders BEFORE the load effect's OPFS read commits (the
+  // previous project shows until applyProject lands), so a header selector
+  // is no proof the seed is up. Wait for the restored tab itself — the
+  // previous project has no b.tex tab, so this can only be the seed.
+  await r1.page.waitForFunction(
+    () =>
+      document.querySelector("[data-tab][data-active]")?.dataset.tab === "b.tex",
+    null,
+    { timeout: 15000 },
+  );
 
   // #21 active tab restored on load.
   r1.ok(
@@ -167,7 +175,18 @@ async function seed(r, p) {
     },
   });
   await r1.goto();
-  await r1.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
+  // Same load race as #21: the page renders the DEFAULT project until the
+  // seed's OPFS read commits (its file set is identical — main.tex +
+  // refs.bib — so the panel can't disambiguate). A delete in that window
+  // hits the old state, and the "Recompile" below then starts a real
+  // xetex build instead of the no-main error. The seed's main.tex content
+  // is the one thing only the seed produces: wait for it in the model.
+  await r1.page.waitForFunction(
+    () =>
+      window.monaco?.editor.getModels()[0]?.getValue() === "AAA2\n",
+    null,
+    { timeout: 15000 },
+  );
   await r1.page
     .locator("li", { hasText: "main.tex" })
     .locator('button[title="Delete file"]')
@@ -330,14 +349,27 @@ async function seed(r, p) {
   r3.ok("synctex doc compiled", /Compiled in/.test(stS), stS);
 
   async function clickSpan(text) {
-    const box = await r3.page.evaluate((t) => {
-      const s = [...document.querySelectorAll("[data-pdf-viewer] span[data-baseline]")].find(
-        (e) => e.textContent.includes(t),
-      );
-      if (!s) return null;
-      const b = s.getBoundingClientRect();
-      return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
-    }, text);
+    // The text layer renders a beat after the canvas (widely so under
+    // load), so poll for the span INSTEAD of a one-shot lookup — a missed
+    // lookup fails the check even though the PDF is perfectly good. The
+    // span must also be inside the viewport, or the mouse click would land
+    // somewhere else entirely.
+    const box = await r3.page
+      .waitForFunction(
+        (t) => {
+          const s = [...document.querySelectorAll(
+            "[data-pdf-viewer] span[data-baseline]",
+          )].find((e) => e.textContent.includes(t));
+          if (!s) return null;
+          const b = s.getBoundingClientRect();
+          if (b.y < 0 || b.y > window.innerHeight) return null;
+          return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+        },
+        text,
+        { timeout: 15000 },
+      )
+      .then((h) => h.jsonValue())
+      .catch(() => null);
     if (!box) return false;
     await r3.page.mouse.click(box.x, box.y);
     await sleep(700);

@@ -40,6 +40,37 @@ const META_FILE = "project.json";
 /** localStorage key of the project open in the last session. */
 export const ACTIVE_PROJECT_KEY = "homehub-active-project-v1";
 
+/**
+ * Extensions that are always treated as binary (never decoded as text).
+ * Shared by folder uploads and the GitHub pull so the two stay in lockstep.
+ */
+export const BINARY_EXT = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "tif",
+  "tiff",
+  "bmp",
+  "avif",
+  "pdf",
+  "pfb",
+  "pfa",
+  "otf",
+  "ttf",
+  "woff",
+  "woff2",
+  "eot",
+]);
+
+/**
+ * File names that collide with Object.prototype. Storing them as keys of the
+ * plain `files` object would shadow the inherited members, so they are refused
+ * outright and every lookup uses Object.hasOwn.
+ */
+export const RESERVED_NAMES = new Set(["constructor", "__proto__", "prototype"]);
+
 async function projectsRoot(): Promise<FileSystemDirectoryHandle> {
   const root = await navigator.storage.getDirectory();
   return root.getDirectoryHandle(PROJECTS_DIR, { create: true });

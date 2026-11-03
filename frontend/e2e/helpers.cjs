@@ -75,16 +75,29 @@ class Runner {
   // busy, or the status text changed synchronously (e.g. the "No main
   // .tex file" error returns before a compile starts). Matching message
   // text here would miss error messages that don't say "failed".
+  // Button state and status text are read in ONE page evaluate: separate
+  // CDP reads can straddle the terminal commit (text read just before the
+  // done state renders, button read just after), which would return a
+  // stale "Compiling…" line for a build that has already finished.
   async recompile() {
     const btn = this.page.locator('button[title^="Recompile"]').first();
-    const before = ((await this.status.textContent().catch(() => "")) || "").trim();
+    const snap = () =>
+      this.page.evaluate(() => {
+        const b = document.querySelector('button[title^="Recompile"]');
+        const s = document.querySelector("header span.truncate");
+        return {
+          disabled: b ? b.disabled : true,
+          text: (s?.textContent || "").trim(),
+        };
+      });
+    const before = (await snap()).text;
     await btn.click();
     let sawBusy = false;
     for (let i = 0; i < 90; i++) {
       await this.page.waitForTimeout(1000);
-      if (await btn.isDisabled()) sawBusy = true;
-      const t = ((await this.status.textContent().catch(() => "")) || "").trim();
-      if ((sawBusy || t !== before) && !(await btn.isDisabled())) return t;
+      const { disabled, text } = await snap();
+      if (disabled) sawBusy = true;
+      if ((sawBusy || text !== before) && !disabled) return text;
     }
     return "";
   }

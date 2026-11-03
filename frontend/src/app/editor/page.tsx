@@ -17,14 +17,18 @@ import {
   IconChevronDown,
   IconClose,
   IconFile,
+  IconGitHub,
   IconPlay,
   IconPlus,
   IconSpinner,
   IconTrash,
 } from "@/components/icons";
+import GitHubModal, { type PullRequest } from "@/components/github-modal";
 import { BusyTexCompiler } from "@/lib/busytex";
 import {
   ACTIVE_PROJECT_KEY,
+  BINARY_EXT,
+  RESERVED_NAMES,
   createProject,
   decodeText,
   deleteProject,
@@ -35,6 +39,7 @@ import {
   type ProjectMeta,
   type ProjectSummary,
 } from "@/lib/opfs";
+import { MAX_PULL_FILES } from "@/lib/github";
 import {
   decodeSynctex,
   findOutputForSource,
@@ -116,28 +121,6 @@ Citations are resolved by bibtex8: Euler's classic
 `,
 };
 
-// Extensions read as bytes on upload (everything else is read as text).
-// SVG stays text: it is XML, and Monaco can show it.
-const BINARY_EXT = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "tif",
-  "tiff",
-  "bmp",
-  "avif",
-  "pdf",
-  "pfb",
-  "pfa",
-  "otf",
-  "ttf",
-  "woff",
-  "woff2",
-  "eot",
-]);
-
 const IMAGE_EXT = new Set([
   "png",
   "jpg",
@@ -195,6 +178,7 @@ export default function EditorPage() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectsMenuOpen, setProjectsMenuOpen] = useState(false);
+  const [ghModalOpen, setGhModalOpen] = useState(false);
   // True once a project has been loaded from OPFS (or the attempt failed);
   // persistence is gated on it so defaults can't be written before the load
   // effect has settled.
@@ -544,6 +528,85 @@ export default function EditorPage() {
         switchingRef.current = false;
       }
     })();
+  };
+
+  // Pull a GitHub repo into a project. The files arrive already fetched (the
+  // modal does the network work); here we only touch OPFS. A fresh repo
+  // creates a new project named for it; re-pulling the same repo (any branch)
+  // replaces the files of the project that already holds it — never a
+  // duplicate.
+  const pullGithub = async (req: PullRequest): Promise<void> => {
+    const { files, skippedJunk, skippedCap } = req;
+    switchingRef.current = true;
+    try {
+      const count = Object.keys(files).length;
+      if (count === 0) {
+        showNotice("That repo has no files to pull");
+        return;
+      }
+      const paths = Object.keys(files).sort();
+      const main =
+        paths.find((p) => p.toLowerCase() === "main.tex") ??
+        paths.find((p) => p.toLowerCase().endsWith(".tex")) ??
+        "";
+      const openPaths = main ? [main] : [];
+      const source = {
+        kind: "github" as const,
+        owner: req.owner,
+        repo: req.repo,
+        branch: req.branch,
+      };
+      const list = await listProjects();
+      const existing = list.find(
+        (p) =>
+          p.source?.kind === "github" &&
+          p.source.owner === req.owner &&
+          p.source.repo === req.repo,
+      );
+      let id: string;
+      if (existing) {
+        id = existing.id;
+        const old = await loadProject(id);
+        const newMeta: ProjectMeta = {
+          v: existing.v,
+          name: existing.name,
+          mainPath: main,
+          openPaths,
+          activePath: main,
+          createdAt: existing.createdAt,
+          // saveProject stamps a fresh updatedAt itself when it writes.
+          updatedAt: existing.updatedAt,
+          source,
+        };
+        // The old on-disk files as the "saved" map makes saveProject delete
+        // anything that is no longer in the repo and write everything new.
+        await saveProject(id, newMeta, files, new Map(Object.entries(old.files)));
+      } else {
+        id = await createProject(req.repo, files, {
+          mainPath: main,
+          openPaths,
+          activePath: main,
+          source,
+        });
+      }
+      const freshList = await listProjects();
+      const { meta, files: loadedFiles } = await loadProject(id);
+      applyProject(id, meta, loadedFiles, freshList);
+      showNotice(
+        `Pulled ${count} file${count === 1 ? "" : "s"} from ${req.owner}/${req.repo}` +
+          (skippedJunk
+            ? ` — ${skippedJunk} dotfile${skippedJunk === 1 ? "" : "s"} skipped`
+            : "") +
+          (skippedCap
+            ? ` — ${skippedCap} over the ${MAX_PULL_FILES}-file limit`
+            : ""),
+        skippedJunk > 0 || skippedCap > 0 ? 6000 : 3000,
+      );
+    } catch {
+      showNotice("Couldn't pull that repo from GitHub", 8000);
+    } finally {
+      switchingRef.current = false;
+    }
   };
 
   // The Projects menu closes on any click outside of it.
@@ -1288,6 +1351,15 @@ export default function EditorPage() {
             </div>
           )}
         </div>
+        <button
+          data-action="github"
+          onClick={() => setGhModalOpen(true)}
+          title="Import a project from GitHub (your token stays in this browser)"
+          className="flex shrink-0 items-center gap-1.5 rounded border border-stone/40 px-2.5 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
+        >
+          <IconGitHub className="h-3.5 w-3.5" />
+          GitHub
+        </button>
         <div className="flex min-w-0 flex-1 justify-center">
           <div className="flex items-center gap-2">
             <button
@@ -1507,6 +1579,13 @@ export default function EditorPage() {
           {notice}
         </div>
       )}
+      {ghModalOpen && (
+        <GitHubModal
+          projects={projects}
+          onPulled={pullGithub}
+          onClose={() => setGhModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1560,12 +1639,6 @@ function lastLine(line: string, prev: string) {
   if (trimmed.length <= 80) return trimmed;
   return prev.length > trimmed.length ? prev : trimmed.slice(0, 80) + "…";
 }
-
-// File names that collide with Object.prototype. Storing them as keys of
-// the plain `files` object would shadow the inherited members (and a
-// `files[name] !== undefined` lookup would hit them), so they are refused
-// outright and every lookup uses Object.hasOwn.
-const RESERVED_NAMES = new Set(["constructor", "__proto__", "prototype"]);
 
 // Dev StrictMode mounts effects twice; if both first-run loads saw an
 // empty projects dir they would each create a default, leaving an orphan
