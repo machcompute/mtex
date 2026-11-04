@@ -160,6 +160,14 @@ export default function PackagesModal({ onChanged, onClose }: Props) {
       };
       if (!res.ok)
         throw new Error(data.error ?? `install failed (${res.status})`);
+      // The fetched results predate the install; flip the flag in place so
+      // the card shows "installed" instead of a stale Install button (a
+      // second click would just 409 with "already installed").
+      setResults((prev) =>
+        prev
+          ? prev.map((r) => (r.name === name ? { ...r, installed: true } : r))
+          : prev,
+      );
       await afterChange(`Installed “${data.package?.name ?? name}”`);
     } catch (e) {
       setError(errMsg(e));
@@ -177,6 +185,13 @@ export default function PackagesModal({ onChanged, onClose }: Props) {
       });
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) throw new Error(data.error ?? `remove failed (${res.status})`);
+      // Mirror of the install fix: a removed package that is visible in
+      // the search results gets its Install button back.
+      setResults((prev) =>
+        prev
+          ? prev.map((r) => (r.name === name ? { ...r, installed: false } : r))
+          : prev,
+      );
       await afterChange(`Removed “${name}”`);
     } catch (e) {
       setError(errMsg(e));
