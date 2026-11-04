@@ -15,17 +15,21 @@
 // on a non-empty .idx, and reruns until the log stops asking for it.
 //
 // Packages: the engine's texlive-basic data package (~93 MB, preloaded)
-// covers most \usepackage. Anything else is pulled on demand — the page
-// installs it into the server's CTAN package store (POST /api/packages),
-// and the engine's kpathsea fetches the file from /api/texlive-remote/ at
-// compile time (TEXLIVE_REMOTE_ENDPOINT). So init fetches the installed
-// names once (remote_packages) and the pipeline's resolver treats them as
-// local packages: without that, an installed package would count as
-// unresolved and the pipeline would enable ALL data packages (pulling the
-// ~540 MB recommended+extra trees the document does not need). The engine
-// caches misses for its whole lifetime, so after installing or removing a
-// package the caller must dispose() the compiler — the next compile
-// restarts the worker with a fresh miss cache and package list.
+// covers most \usepackage. Anything else lives in the BROWSER's CTAN
+// package store (src/lib/ctan-store.ts — OPFS, the server keeps no
+// state). Init fetches the installed names once (remote_packages) and
+// the pipeline's resolver treats them as local packages: without that,
+// an installed package would count as unresolved and the pipeline would
+// enable ALL data packages (pulling the ~540 MB recommended+extra trees
+// the document does not need). Every compile also sends the installed
+// FILES in the payload at their absolute engine paths
+// (/texlive/texmf-dist/...), where the pipeline's POSIX PATH.join keeps
+// them — but only once per worker session, because the engine's /texlive
+// tree is never remounted between compiles, so the files persist. The
+// engine caches misses for its whole lifetime, so after installing or
+// removing a package the caller must dispose() the compiler — the next
+// compile restarts the worker with a fresh miss cache, package list, and
+// file set.
 //
 // Worker protocol (the pinned release's — plain message objects, no
 // wrapper):
@@ -36,6 +40,8 @@
 //             verbose, driver, data_packages_js, remote_endpoint,
 //             shell_escape}  ->  {pdf, log, synctex, exit_code, logs}
 //   events:  {ready}, {loaded}, {print: string}, {error: string}
+
+import { remotePackageNames, storeFiles } from "@/lib/ctan-store";
 
 // Same origin: src/app/api/texlive/[name]/route.ts downloads the pinned
 // release assets on first request and serves them from a local disk cache.
@@ -55,12 +61,6 @@ const PRELOAD_DATA_PACKAGES_JS = [`${TEXLIVE_BASE}/texlive-basic.js`];
 
 // The only driver that produces a PDF in this build (xelatex → xdvipdfmx).
 const DRIVER = "xetex_bibtex8_dvipdfmx";
-
-// The engine's on-demand package file endpoint (see
-// src/app/api/texlive-remote/). Leading slash on purpose: a relative URL
-// in the worker would resolve against the worker script's own directory
-// (/busytex/), not the page's origin root.
-const REMOTE_ENDPOINT = "/api/texlive-remote";
 
 // Bump whenever public/busytex/busytex_worker.js or
 // public/busytex/busytex_pipeline.js changes: browsers cache classic worker
@@ -85,32 +85,6 @@ type WorkerMessage = {
   synctex?: Uint8Array | null;
 };
 
-/**
- * The names the pipeline should treat as locally available: the installed
- * package names plus everything they \ProvidesPackage (pgf provides tikz,
- * algorithm provides algcompatible, …). Fails soft — an empty list only
- * means installed packages fall through to the enable-all-data-packages
- * fallback instead of the remote endpoint, which still compiles.
- */
-async function fetchRemotePackages(): Promise<string[]> {
-  try {
-    const res = await fetch("/api/packages");
-    if (!res.ok) throw new Error(`GET /api/packages -> ${res.status}`);
-    const data = (await res.json()) as {
-      packages: { name: string; provides: string[] }[];
-    };
-    const names = new Set<string>();
-    for (const p of data.packages) {
-      names.add(p.name.toLowerCase());
-      for (const n of p.provides) names.add(n.toLowerCase());
-    }
-    return [...names];
-  } catch (err) {
-    console.warn("[busytex] installed package list unavailable, continuing without remote_packages:", err);
-    return [];
-  }
-}
-
 export class BusyTexCompiler {
   private worker: Worker | null = null;
   private pending: ((msg: WorkerMessage) => void) | null = null;
@@ -118,6 +92,14 @@ export class BusyTexCompiler {
   private onReady: (() => void) | null = null;
   private onError: ((msg: string) => void) | null = null;
   private disposed = false;
+  /**
+   * The installed package files are part of a worker session's state, not
+   * a compile's: the engine's /texlive tree persists between compiles
+   * (only the project dir is remounted), so they are written once — on
+   * the first compile after (re)start. Reset whenever a worker is
+   * created or disposed, so a fresh worker always gets them.
+   */
+  private storeFilesSent = false;
 
   constructor(private workerUrl = `/busytex/busytex_worker.js?v=${WORKER_VERSION}`) {}
 
@@ -143,14 +125,24 @@ export class BusyTexCompiler {
       const disposedBefore = this.disposed;
       // The package list is fetched before the worker starts: the
       // init message carries it (see the file header), and the engine
-      // needs the right list from its very first compile.
-      const remote_packages = await fetchRemotePackages();
+      // needs the right list from its very first compile. Fails soft —
+      // an empty list only means installed packages fall through to the
+      // enable-all-data-packages fallback, which still compiles.
+      const remote_packages = await remotePackageNames().catch((err) => {
+        console.warn("[busytex] installed package list unavailable, continuing without remote_packages:", err);
+        return [];
+      });
       // The await yielded: a dispose() in that window makes this worker
       // start moot (the caller is tearing the compiler down).
       if (this.disposed && !disposedBefore) return;
       this.disposed = false;
       const worker = new Worker(this.workerUrl);
       this.worker = worker;
+      // A fresh worker has a fresh /texlive tree: whatever the previous
+      // session sent, this one must get the store files again. (Also
+      // covers a worker that died after a compile's store-file fetch —
+      // the flag may say "sent" for the dead worker.)
+      this.storeFilesSent = false;
 
       worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
         const msg = e.data;
@@ -225,9 +217,9 @@ export class BusyTexCompiler {
         texmf_local: [] as string[],
         preload: true,
         verbose: "silent",
-        // PATCH (see public/busytex/busytex_pipeline.js): the names the
-        // server's CTAN package store provides, treated as local so they
-        // never trigger the enable-all-data-packages fallback.
+        // The names the browser's CTAN package store (src/lib/ctan-store.ts)
+        // provides, treated as local so they never trigger the
+        // enable-all-data-packages fallback.
         remote_packages,
       });
     }
@@ -251,17 +243,34 @@ export class BusyTexCompiler {
     if (!this.worker) {
       await this.init();
     }
+    // The installed CTAN package files, once per worker session (see
+    // storeFilesSent): at their absolute engine paths the pipeline's
+    // POSIX PATH.join keeps them, and the engine's /texlive tree is never
+    // remounted between compiles, so resending would only re-write the
+    // same files. storeFiles() reads OPFS — if it fails, the flag stays
+    // unset and the next compile retries.
+    let storeFilesOut: {
+      path: string;
+      contents: string | Uint8Array<ArrayBuffer>;
+    }[] = [];
+    if (!this.storeFilesSent) {
+      storeFilesOut = await storeFiles();
+      this.storeFilesSent = true;
+    }
     // The pipeline writes each entry with FS.mkdir (dir) or FS.writeFile
     // (file), and FS.writeFile does not create parent directories — so a
     // nested path (a folder upload) also needs its ancestor directories.
     // A dir path is a string prefix of everything inside it, and the
     // pipeline sorts by path, so dirs always land before their children.
-    const all = Object.entries(files).map(([path, contents]) => ({
-      path,
-      contents,
-    }));
+    // The store files' absolute paths create no dirs: the pipeline's
+    // mkdir_p already handles their existing /texlive/... parents.
+    const all = [
+      ...Object.entries(files).map(([path, contents]) => ({ path, contents })),
+      ...storeFilesOut,
+    ];
     const dirs = new Set<string>();
     for (const { path } of all) {
+      if (path.startsWith("/")) continue;
       const parts = path.split("/");
       for (let i = 1; i < parts.length; i++)
         dirs.add(parts.slice(0, i).join("/"));
@@ -295,7 +304,10 @@ export class BusyTexCompiler {
         // unresolved and enables ALL of them — the ~540 MB fallback. null
         // means "resolve against the catalog and load only what is used".
         data_packages_js: null,
-        remote_endpoint: REMOTE_ENDPOINT,
+        // '' on purpose: the installed package files ride the payload
+        // (see storeFilesSent above), so the engine must never XHR a
+        // remote endpoint for them.
+        remote_endpoint: "",
         shell_escape: false,
       });
       this.pending = (msg) => {
@@ -316,5 +328,8 @@ export class BusyTexCompiler {
     this.worker?.terminate();
     this.worker = null;
     this.pending = null;
+    // The dead worker's /texlive tree is gone with it: the next worker
+    // must get the store files again.
+    this.storeFilesSent = false;
   }
 }

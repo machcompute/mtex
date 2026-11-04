@@ -7,26 +7,14 @@ import {
   IconSpinner,
   IconTrash,
 } from "@/components/icons";
-
-type PackageInfo = {
-  name: string;
-  category: string;
-  revision: number;
-  shortdesc: string;
-  size: number;
-  provides: string[];
-  files: number;
-  installedAt: string;
-};
-
-type SearchResult = {
-  name: string;
-  category: string;
-  revision: number;
-  shortdesc: string;
-  size: number;
-  installed: boolean;
-};
+import {
+  installWithDependencies,
+  listPackages,
+  removePackage,
+  searchPackages,
+  type PackageInfo,
+  type SearchResult,
+} from "@/lib/ctan-store";
 
 type Props = {
   /** Called after a successful install or remove, with a short
@@ -40,9 +28,9 @@ type Props = {
 /**
  * Pull and remove LaTeX packages for the in-browser engine. The engine
  * (TeX Live 2026 WASM) ships its base tree; anything a document
- * \usepackage's beyond that is installed HERE into the server's CTAN
- * package store, where it stays and is served to the engine on demand at
- * compile time.
+ * \usepackage's beyond that is installed into the browser's own CTAN
+ * package store (Origin Private File System — see src/lib/ctan-store.ts),
+ * where it stays and is loaded into the engine at compile time.
  */
 export default function PackagesModal({ onChanged, onClose }: Props) {
   const [installed, setInstalled] = useState<PackageInfo[]>([]);
@@ -63,14 +51,7 @@ export default function PackagesModal({ onChanged, onClose }: Props) {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch("/api/packages");
-        const data = (await res.json().catch(() => ({}))) as {
-          packages?: PackageInfo[];
-          error?: string;
-        };
-        if (!res.ok)
-          throw new Error(data.error ?? `could not list packages (${res.status})`);
-        if (!cancelled) setInstalled(data.packages ?? []);
+        if (!cancelled) setInstalled(await listPackages());
       } catch (e) {
         if (!cancelled) setError(errMsg(e));
       }
@@ -101,17 +82,8 @@ export default function PackagesModal({ onChanged, onClose }: Props) {
     const t = window.setTimeout(() => {
       void (async () => {
         try {
-          const res = await fetch(
-            `/api/packages/search?query=${encodeURIComponent(query.trim())}`,
-          );
-          const data = (await res.json().catch(() => ({}))) as {
-            results?: SearchResult[];
-            error?: string;
-          };
-          if (!res.ok)
-            throw new Error(data.error ?? `search failed (${res.status})`);
           if (!cancelled) {
-            setResults(data.results ?? []);
+            setResults(await searchPackages(query.trim()));
             setSearchError(null);
           }
         } catch (e) {
@@ -134,11 +106,7 @@ export default function PackagesModal({ onChanged, onClose }: Props) {
   // here is fine): refresh the installed list, then tell the page.
   async function afterChange(msg: string) {
     try {
-      const res = await fetch("/api/packages");
-      const data = (await res.json().catch(() => ({}))) as {
-        packages?: PackageInfo[];
-      };
-      if (res.ok) setInstalled(data.packages ?? []);
+      setInstalled(await listPackages());
     } catch {
       // best effort — the change itself succeeded
     }
@@ -149,37 +117,23 @@ export default function PackagesModal({ onChanged, onClose }: Props) {
     setBusy(name);
     setError(null);
     try {
-      const res = await fetch("/api/packages", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      const data = (await res.json().catch(() => ({}))) as {
-        package?: PackageInfo;
-        installedDependencies?: string[];
-        unresolved?: string[];
-        error?: string;
-      };
-      if (!res.ok)
-        throw new Error(data.error ?? `install failed (${res.status})`);
+      const result = await installWithDependencies(name);
       // The fetched results predate the install; flip the flags in place so
       // the cards show "installed" instead of stale Install buttons.
+      const deps = result.installedDependencies;
       setResults((prev) =>
         prev
           ? prev.map((r) =>
-              r.name === name ||
-              (data.installedDependencies ?? []).includes(r.name)
+              r.name === name || deps.includes(r.name)
                 ? { ...r, installed: true }
                 : r,
             )
           : prev,
       );
-      const deps = data.installedDependencies ?? [];
-      const unresolved = data.unresolved ?? [];
-      let msg = `Installed “${data.package?.name ?? name}”`;
+      let msg = `Installed “${result.package.name}”`;
       if (deps.length > 0) msg += ` (pulled in: ${deps.join(", ")})`;
-      if (unresolved.length > 0)
-        msg += ` — could not auto-install: ${unresolved.join(", ")}`;
+      if (result.unresolved.length > 0)
+        msg += ` — could not auto-install: ${result.unresolved.join(", ")}`;
       await afterChange(msg);
     } catch (e) {
       setError(errMsg(e));
@@ -192,11 +146,7 @@ export default function PackagesModal({ onChanged, onClose }: Props) {
     setBusy(name);
     setError(null);
     try {
-      const res = await fetch(`/api/packages/${encodeURIComponent(name)}`, {
-        method: "DELETE",
-      });
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) throw new Error(data.error ?? `remove failed (${res.status})`);
+      await removePackage(name);
       // Mirror of the install fix: a removed package that is visible in
       // the search results gets its Install button back.
       setResults((prev) =>
@@ -235,8 +185,8 @@ export default function PackagesModal({ onChanged, onClose }: Props) {
 
         <p className="mb-2 text-xs text-stone">
           The engine ships TeX Live 2026’s base tree. Search CTAN to pull
-          anything else — installs are kept on the server and served to the
-          engine on demand at compile time.
+          anything else — installs are kept in this browser (private file
+          system) and loaded into the engine at compile time.
         </p>
 
         {error && (
