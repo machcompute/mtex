@@ -287,9 +287,11 @@ export async function remotePackageNames(): Promise<string[]> {
 /**
  * The installed files at their engine paths, for the compile payload.
  * Text files are UTF-8 strings, binary files (fonts, …) byte arrays —
- * the pipeline hands both to FS.writeFile. Sent once per worker session
- * (see the file header): the engine's /texlive tree persists between
- * compiles, so resending would only re-write the same files.
+ * the pipeline registers both with kpathsea via kpse_remote_register (see
+ * the pipeline header for why they are not written into the /texlive tree).
+ * Sent once per worker session (see the file header): the registration
+ * persists for the worker's lifetime, so resending would only re-register
+ * the same files.
  */
 export async function storeFiles(): Promise<
   { path: string; contents: string | Uint8Array<ArrayBuffer> }[]

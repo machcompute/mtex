@@ -68,7 +68,7 @@ const DRIVER = "xetex_bibtex8_dvipdfmx";
 // public/busytex/busytex_pipeline.js changes: browsers cache classic worker
 // scripts aggressively and may not refetch them even on a hard reload.
 // Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 19;
+const WORKER_VERSION = 20;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -96,10 +96,12 @@ export class BusyTexCompiler {
   private disposed = false;
   /**
    * The installed package files are part of a worker session's state, not
-   * a compile's: the engine's /texlive tree persists between compiles
-   * (only the project dir is remounted), so they are written once — on
-   * the first compile after (re)start. Reset whenever a worker is
-   * created or disposed, so a fresh worker always gets them.
+   * a compile's: the pipeline registers them with kpathsea via
+   * kpse_remote_register (the engine's miss-hook), and that registration
+   * persists for the worker's lifetime (only the project dir is remounted
+   * between compiles). So they are sent once — on the first compile after
+   * (re)start. Reset whenever a worker is created or disposed, so a fresh
+   * worker always gets them.
    */
   private storeFilesSent = false;
 

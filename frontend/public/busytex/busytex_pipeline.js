@@ -41,13 +41,19 @@
 // assignment becomes a no-op instead of a fatal error. Line numbers in
 // errors are shifted by one.
 //
-// absolute payload paths — the write loop uses a payload path AS-IS when
-// it is absolute. Emscripten's PATH.join concatenates even for an
-// absolute second argument (it is PATH.normalize(l + '/' + r), not the
-// POSIX rule that an absolute right-hand side replaces), so the browser
-// store's files at /texlive/texmf-dist/... would have been written under
-// the project directory — invisible to kpathsea — and every
+// store files via kpse-remote — the browser store's files (absolute
+// /texlive/texmf-dist/... payload paths) are handed to kpathsea through the
+// engine's kpse_remote_register (its miss-hook) instead of written into the
+// FS. The /texlive tree's file list is a frozen ls-R shipped in the data
+// package (an immutable LZ4 node), so a file written under /texlive is
+// invisible to kpathsea even though FS.readdir sees it — every
 // \usepackage for an installed package failed with "File ... not found".
+// kpathsea consults the registered hits map on every search miss, before any
+// remote fetch, so a pre-registered file is found with no endpoint. Format
+// 26 is kpathsea's TEX (TEXINPUTS) format (.sty/.cls/.tex). The write loop
+// skips absolute paths for the same reason. (Emscripten's PATH.join
+// concatenates even an absolute second argument — PATH.normalize(l + '/' +
+// r) — so writing them would also have landed under the project dir.)
 //
 // Bump SCRIPT_VERSION in busytex_worker.js whenever this file changes.
 //
@@ -706,6 +712,22 @@ class BusytexPipeline {
 
         const { FS, PATH } = Module;
 
+        // (HomeHub change) The browser CTAN store's files (absolute
+        // /texlive/texmf-dist/... paths) are handed to kpathsea through the
+        // engine's kpse-remote miss-hook instead of written into the /texlive
+        // tree. The tree's file list is a frozen ls-R shipped in the data
+        // package (an immutable LZ4 node), so files written under /texlive are
+        // invisible to kpathsea even though FS.readdir sees them. kpathsea
+        // consults the registered hits map on every search miss — before any
+        // remote fetch — so a pre-registered file is found with no endpoint.
+        // Format 26 is kpathsea's TEX (TEXINPUTS) format: .sty/.cls/.tex and
+        // the other text files a LaTeX package ships.
+        if (Module.kpse_remote_register)
+            for (const { path, contents } of files) {
+                if (!path.startsWith('/texlive/') || contents == null) continue;
+                Module.kpse_remote_register(PATH.basename(path), 26, contents);
+            }
+
         const tex_path = PATH.basename(main_tex_path), dirname = PATH.dirname(main_tex_path);
 
         const [xdv_path, pdf_path, log_path, aux_path, blg_path, bbl_path, idx_path, ind_path, ilg_path] =
@@ -740,13 +762,13 @@ class BusytexPipeline {
 
         let dirs = new Set(['/', this.project_dir]);
         for (const { path, contents } of files.sort((lhs, rhs) => lhs['path'] < rhs['path'] ? -1 : 1)) {
-            // (HomeHub change) Absolute payload paths (the browser CTAN
-            // store's files, /texlive/texmf-dist/...) are used AS-IS.
-            // Emscripten's PATH.join does NOT special-case an absolute
-            // second argument — it concatenates (l + '/' + r), so joining
-            // would write them under the project directory, where kpathsea
-            // never looks.
-            const absolute_path = path.startsWith('/') ? PATH.normalize(path) : PATH.join(this.project_dir, path);
+            // (HomeHub change) The store's files (absolute /texlive/... paths)
+            // are NOT written into the FS — they are registered with kpathsea
+            // via kpse_remote_register above (the /texlive tree's frozen ls-R
+            // would hide files written there). Only project files (relative
+            // paths) are written, into the project directory.
+            if (path.startsWith('/texlive/')) continue;
+            const absolute_path = PATH.join(this.project_dir, path);
             if (contents == null)
                 this.mkdir_p(FS, PATH, absolute_path, dirs);
             else {
