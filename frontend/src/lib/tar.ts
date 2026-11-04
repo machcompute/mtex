@@ -10,7 +10,7 @@
  */
 
 /** A regular file of the archive: archive-relative posix path → bytes. */
-export type TarFiles = Map<string, Uint8Array>;
+export type TarFiles = Map<string, Uint8Array<ArrayBuffer>>;
 
 function readCstr(buf: Uint8Array, start: number, end: number): string {
   let i = start;
@@ -32,8 +32,8 @@ function readOctal(buf: Uint8Array, start: number): number {
  * archive or a path that would escape the extraction root (a malicious
  * or corrupt container must fail the install, not write elsewhere).
  */
-export function parseTar(buf: Uint8Array): TarFiles {
-  const files = new Map<string, Uint8Array>();
+export function parseTar(buf: Uint8Array<ArrayBuffer>): TarFiles {
+  const files = new Map<string, Uint8Array<ArrayBuffer>>();
   let off = 0;
   let pendingName = "";
   let zeroBlocks = 0;

@@ -131,8 +131,12 @@ async function writeMeta(
   await w.close();
 }
 
-/** Walk the project folder into a path -> bytes map (no meta file). */
-async function walkFiles(
+/**
+ * Walk a folder into a path -> bytes map (skips project.json and
+ * preview.png — those are project metadata, not content). Shared with the
+ * CTAN package store, which walks its texmf-dist tree the same way.
+ */
+export async function walkFiles(
   dir: FileSystemDirectoryHandle,
   prefix = "",
 ): Promise<Map<string, Uint8Array<ArrayBuffer>>> {
@@ -152,7 +156,12 @@ async function walkFiles(
   return out;
 }
 
-async function writeFile(
+/**
+ * Write one file under `dir` at `path` (posix, subdirectories created).
+ * Text is encoded as UTF-8; byte arrays are written as-is. Shared with the
+ * CTAN package store.
+ */
+export async function writeFile(
   dir: FileSystemDirectoryHandle,
   path: string,
   data: FileData,
