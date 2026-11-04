@@ -14,7 +14,8 @@
     "next": "16.4.3",
     "pdfjs-dist": "^6.4.299",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "xz-decompress": "^0.2.3"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
