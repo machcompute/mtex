@@ -23,8 +23,10 @@
 // enable ALL data packages (pulling the ~540 MB recommended+extra trees
 // the document does not need). Every compile also sends the installed
 // FILES in the payload at their absolute engine paths
-// (/texlive/texmf-dist/...), where the pipeline's POSIX PATH.join keeps
-// them — but only once per worker session, because the engine's /texlive
+// (/texlive/texmf-dist/...), which the pipeline writes as-is (an absolute
+// payload path must NOT be joined to the project dir — emscripten's
+// PATH.join concatenates instead of replacing) — but only once per worker
+// session, because the engine's /texlive
 // tree is never remounted between compiles, so the files persist. The
 // engine caches misses for its whole lifetime, so after installing or
 // removing a package the caller must dispose() the compiler — the next
@@ -66,7 +68,7 @@ const DRIVER = "xetex_bibtex8_dvipdfmx";
 // public/busytex/busytex_pipeline.js changes: browsers cache classic worker
 // scripts aggressively and may not refetch them even on a hard reload.
 // Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 18;
+const WORKER_VERSION = 19;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -244,11 +246,11 @@ export class BusyTexCompiler {
       await this.init();
     }
     // The installed CTAN package files, once per worker session (see
-    // storeFilesSent): at their absolute engine paths the pipeline's
-    // POSIX PATH.join keeps them, and the engine's /texlive tree is never
-    // remounted between compiles, so resending would only re-write the
-    // same files. storeFiles() reads OPFS — if it fails, the flag stays
-    // unset and the next compile retries.
+    // storeFilesSent): at their absolute engine paths the pipeline writes
+    // them as-is (see the file header), and the engine's /texlive tree is
+    // never remounted between compiles, so resending would only re-write
+    // the same files. storeFiles() reads OPFS — if it fails, the flag
+    // stays unset and the next compile retries.
     let storeFilesOut: {
       path: string;
       contents: string | Uint8Array<ArrayBuffer>;

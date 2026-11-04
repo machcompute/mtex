@@ -1,7 +1,7 @@
 // Vendored from the Texlyre busytex build of TeX Live 2026
 // (github.com/TeXlyre/texlyre-busytex-build, release
 // build_wasm_46ebb6216a5c1fe63dd1dc885831d1a8cef2dc86_31802832436_1 — the
-// same pinned release as the WASM assets in /api/texlive/), with five
+// same pinned release as the WASM assets in /api/texlive/), with six
 // changes:
 //
 // remote_packages — the data-package resolver takes an optional list of
@@ -40,6 +40,14 @@
 // stand-in is an inert dimension register, so the (engine-meaningless)
 // assignment becomes a no-op instead of a fatal error. Line numbers in
 // errors are shifted by one.
+//
+// absolute payload paths — the write loop uses a payload path AS-IS when
+// it is absolute. Emscripten's PATH.join concatenates even for an
+// absolute second argument (it is PATH.normalize(l + '/' + r), not the
+// POSIX rule that an absolute right-hand side replaces), so the browser
+// store's files at /texlive/texmf-dist/... would have been written under
+// the project directory — invisible to kpathsea — and every
+// \usepackage for an installed package failed with "File ... not found".
 //
 // Bump SCRIPT_VERSION in busytex_worker.js whenever this file changes.
 //
@@ -732,7 +740,13 @@ class BusytexPipeline {
 
         let dirs = new Set(['/', this.project_dir]);
         for (const { path, contents } of files.sort((lhs, rhs) => lhs['path'] < rhs['path'] ? -1 : 1)) {
-            const absolute_path = PATH.join(this.project_dir, path);
+            // (HomeHub change) Absolute payload paths (the browser CTAN
+            // store's files, /texlive/texmf-dist/...) are used AS-IS.
+            // Emscripten's PATH.join does NOT special-case an absolute
+            // second argument — it concatenates (l + '/' + r), so joining
+            // would write them under the project directory, where kpathsea
+            // never looks.
+            const absolute_path = path.startsWith('/') ? PATH.normalize(path) : PATH.join(this.project_dir, path);
             if (contents == null)
                 this.mkdir_p(FS, PATH, absolute_path, dirs);
             else {
