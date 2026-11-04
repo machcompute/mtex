@@ -33,7 +33,7 @@
 // browsers cache worker scripts aggressively and even a hard refresh may
 // not refetch them (the pipeline import is version-stamped with it). Keep
 // it in sync with WORKER_VERSION in src/lib/busytex.ts.
-const SCRIPT_VERSION = 16;
+const SCRIPT_VERSION = 17;
 
 function fail(prefix, e)
 {
@@ -53,13 +53,14 @@ self.onerror = (e) =>
 self.onunhandledrejection = (e) =>
     fail("unhandled promise rejection:", e.reason);
 
-// Load the biber class (unmodified release file) and the patched pipeline.
-// importScripts() is synchronous and same-origin-only; a failure here kills
-// the worker before it can do anything, so report it on {error} (the page
-// shows it in the status line instead of waiting forever).
+// Load the biber class (vendored copy, path-preserving patch — see the
+// file header) and the patched pipeline. importScripts() is synchronous
+// and same-origin-only; a failure here kills the worker before it can do
+// anything, so report it on {error} (the page shows it in the status line
+// instead of waiting forever).
 try
 {
-    importScripts("/api/texlive/busytex_biber.js");
+    importScripts("busytex_biber.js?v=" + SCRIPT_VERSION);
     importScripts("busytex_pipeline.js?v=" + SCRIPT_VERSION);
     // {ready}: the worker script (and its imports) loaded — the page can
     // confirm the worker started.

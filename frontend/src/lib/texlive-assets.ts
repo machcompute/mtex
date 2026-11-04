@@ -27,10 +27,8 @@ export const ASSETS: Record<string, string> = {
   "texlive-recommended.data": `${RELEASE_BASE}/texlive-recommended.data`,
   "texlive-extra.js": `${RELEASE_BASE}/texlive-extra.js`,
   "texlive-extra.data": `${RELEASE_BASE}/texlive-extra.data`,
-  // The biber module: the worker importScripts() its loader on start (it
-  // defines the class only), and biber.js/.wasm/.data load lazily on the
-  // first biber run.
-  "busytex_biber.js": `${RELEASE_BASE}/busytex_biber.js`,
+  // The biber module: biber.js/.wasm/.data load lazily on the first biber
+  // run (its loader is the vendored, patched copy in public/busytex/).
   "biber.js": `${RELEASE_BASE}/biber.js`,
   "biber.wasm": `${RELEASE_BASE}/biber.wasm`,
   "biber.data": `${RELEASE_BASE}/biber.data`,
