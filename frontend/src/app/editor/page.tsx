@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import Editor, { type BeforeMount, type Monaco } from "@monaco-editor/react";
 import type * as monaco from "monaco-editor";
 import PdfViewer, {
@@ -1300,10 +1301,14 @@ export default function EditorPage() {
     <div className="relative flex h-screen flex-col bg-cream">
       {/* Top bar (Overleaf-style) */}
       <header className="flex h-11 shrink-0 items-center gap-3 border-b border-ink/10 bg-cream px-3">
-        <h1 className="flex shrink-0 items-center gap-2 text-sm font-semibold text-ink">
+        <Link
+          href="/"
+          title="Back to the project dashboard"
+          className="flex shrink-0 items-center gap-2 rounded px-1 py-0.5 text-sm font-semibold text-ink transition-colors hover:bg-peach"
+        >
           <span className="h-3 w-3 rounded-sm bg-mint" />
           HomeHub
-        </h1>
+        </Link>
         <span className="h-4 w-px shrink-0 bg-ink/10" />
         <input
           value={projectName}

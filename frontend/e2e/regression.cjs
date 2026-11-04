@@ -347,6 +347,13 @@ const r = new Runner("reg");
     plpText.slice(0, 160),
   );
 
+  // --- the header brand goes back to the project dashboard --------------
+  const brand = r.page.locator('header a[href="/"]', { hasText: "HomeHub" });
+  r.ok("the HomeHub brand links to the dashboard", (await brand.count()) === 1);
+  await brand.first().click();
+  await r.page.waitForSelector('button:has-text("New project")', { timeout: 30000 });
+  r.ok("clicking the brand opens the dashboard", r.page.url().endsWith("/"), r.page.url());
+
   console.log(
     r.failures === 0 ? "ALL REGRESSION CHECKS PASSED" : r.failures + " CHECK(S) FAILED",
   );

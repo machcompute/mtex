@@ -121,6 +121,16 @@ async function seed(r, p) {
     await input.press("Enter");
     await sleep(300);
   };
+  // The seeded main.tex is bare text, not LaTeX: the open-time auto-compile
+  // and the debounced rebuild of the #1 edit above both FAIL, and a failed
+  // build opens the log drawer by design. Settle any in-flight build and
+  // close the drawer so the check below isolates the validation notice
+  // (before auto-compile-on-open this passed by luck: the FIRST compile in
+  // a session is slow enough to still be running at check time).
+  await r1.waitReady();
+  const hideLog = r1.page.locator("button", { hasText: "Hide log" });
+  if (await hideLog.count()) await hideLog.first().click();
+
   await newFile("b.tex");
   r1.ok(
     "#22 duplicate new file shows a notice",
