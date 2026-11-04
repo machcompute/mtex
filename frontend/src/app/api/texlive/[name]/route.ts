@@ -1,15 +1,21 @@
-// Same-origin server for the busytex WASM engine assets (full TeX Live
+// Same-origin server for the busytex WASM engine assets (full TeX Live 2026
 // compiled to WebAssembly), downloaded on first request from the pinned
-// busytex GitHub release and cached on disk.
+// release and cached on disk.
 //
-// The worker loads busytex.js and texlive-basic.js with importScripts(),
-// which browsers only allow for the worker's own origin — it therefore
-// cannot fetch them directly from github.com. The .wasm also needs the
-// application/wasm content type (GitHub serves octet-stream) for
+// The pinned release is Texlyre's busytex build of TeX Live 2026
+// (github.com/TeXlyre/texlyre-busytex-build). Its texmf tree ships as three
+// emscripten data packages; the worker preloads texlive-basic and pulls the
+// other two on demand when a \usepackage resolves to them, so the map below
+// must cover all of them (plus the standalone biber module).
+//
+// The worker loads busytex.js and the data-package .js files with
+// importScripts(), which browsers only allow for the worker's own origin —
+// it therefore cannot fetch them directly from github.com. The .wasm also
+// needs the application/wasm content type (GitHub serves octet-stream) for
 // streaming compilation, so the assets must come from us, not the CDN.
 //
 // The assets are immutable (pinned release tag): the response carries a
-// long-lived Cache-Control, so the ~72 MB .data package is downloaded
+// long-lived Cache-Control, so the ~93 MB basic .data package is downloaded
 // once — from the web on first request, from the local cache after.
 // Range requests are supported the way the previous Go backend did.
 
@@ -22,14 +28,30 @@ import { Readable } from "node:stream";
 // allowed with this project's cacheComponents setup.)
 
 const RELEASE_BASE =
-  "https://github.com/busytex/busytex/releases/download/build_b16fdf28019d93ccfd8f09776e4191835acea5dc";
+  "https://github.com/TeXlyre/texlyre-busytex-build/releases/download/build_wasm_46ebb6216a5c1fe63dd1dc885831d1a8cef2dc86_31802832436_1";
 
-// The fixed asset set the worker needs; anything else is rejected.
+// The fixed asset set the worker may load; anything else is rejected.
 const ASSETS: Record<string, string> = {
+  // The combined engine (xelatex/pdflatex/luahbtex + bibtex8 + xdvipdfmx +
+  // makeindex) and its preloaded TeX Live 2026 basic tree.
   "busytex.js": `${RELEASE_BASE}/busytex.js`,
   "busytex.wasm": `${RELEASE_BASE}/busytex.wasm`,
   "texlive-basic.js": `${RELEASE_BASE}/texlive-basic.js`,
   "texlive-basic.data": `${RELEASE_BASE}/texlive-basic.data`,
+  // On-demand data packages: the pipeline's resolver fetches the .js for
+  // the whole catalog (a ProvidesPackage scan) and the matching .data only
+  // when a compiled document actually uses a package from it.
+  "texlive-recommended.js": `${RELEASE_BASE}/texlive-recommended.js`,
+  "texlive-recommended.data": `${RELEASE_BASE}/texlive-recommended.data`,
+  "texlive-extra.js": `${RELEASE_BASE}/texlive-extra.js`,
+  "texlive-extra.data": `${RELEASE_BASE}/texlive-extra.data`,
+  // The biber module: the worker importScripts() its loader on start (it
+  // defines the class only), and biber.js/.wasm/.data load lazily on the
+  // first biber run.
+  "busytex_biber.js": `${RELEASE_BASE}/busytex_biber.js`,
+  "biber.js": `${RELEASE_BASE}/biber.js`,
+  "biber.wasm": `${RELEASE_BASE}/biber.wasm`,
+  "biber.data": `${RELEASE_BASE}/biber.data`,
 };
 
 function cacheDir() {

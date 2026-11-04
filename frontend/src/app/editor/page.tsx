@@ -22,9 +22,11 @@ import {
   IconPlay,
   IconPlus,
   IconSpinner,
+  IconSync,
   IconTrash,
 } from "@/components/icons";
 import GitHubModal, { type PullRequest, type PushRequest } from "@/components/github-modal";
+import PackagesModal from "@/components/packages-modal";
 import { BusyTexCompiler } from "@/lib/busytex";
 import {
   ACTIVE_PROJECT_KEY,
@@ -143,6 +145,7 @@ export default function EditorPage() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectsMenuOpen, setProjectsMenuOpen] = useState(false);
   const [ghModalOpen, setGhModalOpen] = useState(false);
+  const [pkgModalOpen, setPkgModalOpen] = useState(false);
   // True once a project has been loaded from OPFS (or the attempt failed);
   // persistence is gated on it so defaults can't be written before the load
   // effect has settled.
@@ -771,6 +774,13 @@ export default function EditorPage() {
       setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     } finally {
       busyRef.current = false;
+      if (restartPendingRef.current) {
+        restartPendingRef.current = false;
+        // A package changed mid-compile (see restartCompiler): drop the
+        // worker so the next compile restarts it with the new package
+        // list and a fresh miss cache.
+        compilerRef.current?.dispose();
+      }
       if (recompileQueuedRef.current) {
         recompileQueuedRef.current = false;
         // A project switch consumed the queued edit — retrying would
@@ -784,6 +794,26 @@ export default function EditorPage() {
     }
   }, [files, mainPath]);
   compileRef.current = compile;
+
+  // The engine caches file-lookup misses for its worker's lifetime, so a
+  // package install or remove only takes effect after the worker restarts.
+  // A compile in flight must not be torn down (its promise would never
+  // settle), so the restart is deferred to that compile's finally block.
+  const restartPendingRef = useRef(false);
+  const restartCompiler = () => {
+    if (busyRef.current) {
+      restartPendingRef.current = true;
+    } else {
+      compilerRef.current?.dispose();
+    }
+  };
+
+  // Called by the packages modal after a successful install/remove: the
+  // engine must restart to pick the package up (see above).
+  const handlePackagesChanged = (msg: string) => {
+    showNotice(`${msg} — the engine restarts with the next compile`, 5000);
+    restartCompiler();
+  };
 
   // Errors open the log drawer automatically.
   useEffect(() => {
@@ -1387,6 +1417,15 @@ export default function EditorPage() {
           <IconGitHub className="h-3.5 w-3.5" />
           GitHub
         </button>
+        <button
+          data-action="packages"
+          onClick={() => setPkgModalOpen(true)}
+          title="Pull or remove LaTeX packages from CTAN"
+          className="flex shrink-0 items-center gap-1.5 rounded border border-stone/40 px-2.5 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
+        >
+          <IconSync className="h-3.5 w-3.5" />
+          Packages
+        </button>
         <div className="flex min-w-0 flex-1 justify-center">
           <div className="flex items-center gap-2">
             <button
@@ -1625,6 +1664,12 @@ export default function EditorPage() {
           onPulled={pullGithub}
           onPushed={pushGithub}
           onClose={() => setGhModalOpen(false)}
+        />
+      )}
+      {pkgModalOpen && (
+        <PackagesModal
+          onChanged={handlePackagesChanged}
+          onClose={() => setPkgModalOpen(false)}
         />
       )}
     </div>

@@ -297,9 +297,10 @@ async function seed(r, p) {
     (await r2.pdfText()).slice(0, 200),
   );
 
-  // #9 a missing database is a bibtex8 error (exit 2): the build fails and
-  // the log carries the bibtex8 section. refs.bib stays in the project —
-  // it opens the pipeline's bibtex gate.
+  // #9 a missing database is a bibtex8 error: the build fails and the log
+  // carries the bibtex8 section (logcat format: "$ bibtex8 …" + "EXITCODE:
+  // n" + per-command LOG:/STDOUT:/STDERR: blocks). refs.bib stays in the
+  // project — it opens the pipeline's bibtex gate.
   await seed(r2, {
     name: "t", mainPath: "main.tex", openPaths: ["main.tex"],
     files: {
@@ -315,10 +316,16 @@ async function seed(r, p) {
   await r2.waitReady();
   const st9 = await r2.recompile();
   r2.ok("#9 broken bib fails the build", /failed/i.test(st9), st9);
+  const log9 = await r2.logText();
   r2.ok(
     "#9 log includes the bibtex8 section",
-    (await r2.logText()).includes("--- bibtex8 ---"),
-    (await r2.logText()).slice(-200),
+    /\$ bibtex8/.test(log9),
+    log9.slice(-200),
+  );
+  r2.ok(
+    "#9 the missing-database error is in the log",
+    /couldn't open database file/i.test(log9),
+    log9.slice(-200),
   );
 
   // #14a jobname: a.text.tex (and MAIN.TEX) compile — TeX strips only the

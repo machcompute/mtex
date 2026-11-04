@@ -1,7 +1,15 @@
 // Regression: default project (bibtex citations), network audit
-// (browser-only, no data exfiltration), and the vendored
-// caption/subcaption, algorithm2e and pgfplots(+pslatex) packages.
-const { Runner, seedProject } = require("./helpers.cjs");
+// (browser-only, no data exfiltration), and the on-demand CTAN packages
+// caption/subcaption, algorithm2e, the essentials set, and
+// pslatex+pgfplots(+tikz).
+//
+// Packages are installed into the server's CTAN package store (host-side,
+// before the browser even loads) through POST /api/packages — the same
+// path the editor's Packages button uses. The engine then fetches every
+// file it needs from /api/texlive-remote/ at compile time; this suite
+// asserts that those fetches actually happen (and stop after the files
+// are cached in the engine's FS).
+const { Runner, seedProject, APP_URL } = require("./helpers.cjs");
 
 const SUBDOC = [
   "\\documentclass{article}",
@@ -40,8 +48,36 @@ const ALGDOC = [
   "\\end{document}",
 ].join("\n");
 
-// The sync-texlive.sh default set: every \usepackage here was "File not
-// found" before the vendored tree existed.
+// Every \usepackage in the documents below that the engine's preloaded
+// texlive-basic tree does not contain. Installing one that basic DOES
+// contain is harmless (the local tree wins the lookup; the store file is
+// simply never fetched).
+const PKGS = [
+  "caption",
+  "algorithm2e",
+  "booktabs",
+  "mathtools",
+  "siunitx",
+  "enumitem",
+  "fontspec",
+  "xcolor",
+  "pgf", // provides tikz
+  "pgfplots",
+  "pslatex",
+  // algorithm2e \RequirePackage's these (deps are not pulled automatically)
+  "ifoddpage",
+  "relsize",
+  // pslatex only ships the .sty; the Times text metrics/fonts live in the
+  // separate `times` package (URW Base 35), and the pzcm* math family it
+  // selects (mapped to Zapf Chancery by tetex/dvips35.map) in `zapfchan` —
+  // all three are needed for xdvipdfmx to embed the fonts
+  "times",
+  "zapfchan",
+  // siunitx probes for it (babel's translations package); a miss is
+  // tolerated but the store serves it once installed
+  "translations",
+];
+
 const ESSDOC = [
   "\\documentclass{article}",
   "\\usepackage{booktabs}",
@@ -76,9 +112,8 @@ const ESSDOC = [
 // wrapped in a tikzpicture — that is how pgfplots installs the environment
 // (the manual: "we have to write each \PGFPlots{} graph into a \TikZ{}
 // picture"); a standalone \begin{axis} fails with "Environment axis
-// undefined" in EVERY TeX Live. The zapfchan TFM/PFB fonts are pulled in
-// because the zptmcm* virtual math fonts xdv references (e.g. zpzccmry)
-// compose from pzcmi8r, and xdvipdfmx aborts the whole PDF without it.
+// undefined" in EVERY TeX Live. The Times fonts themselves come with the
+// pslatex container (the whole package is pulled, not cherry-picked).
 const PLPDOC = [
   "\\documentclass{article}",
   "\\usepackage{pslatex}",
@@ -116,40 +151,54 @@ const PLPDOC = [
   "\\end{document}",
 ].join("\n");
 
+// --- host-side package store access (the browser never installs) ----------
+
+const API_BASE = APP_URL.replace(/\/editor$/, "");
+
+async function installPackage(name) {
+  const res = await fetch(`${API_BASE}/api/packages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (res.status === 409) return null; // already installed (previous run)
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) || {};
+    throw new Error(`install ${name} failed: ${res.status} ${data.error || ""}`);
+  }
+  const data = await res.json();
+  console.log(
+    `    installed ${data.package?.name} (${data.package?.files ?? "?"} files)`,
+  );
+  return data.package;
+}
+
 const r = new Runner("reg");
 
 (async () => {
+  // Install every package the documents below use BEFORE the browser
+  // loads: the engine fetches the installed list once at worker init and
+  // treats those names as local, so a package installed after init would
+  // fall through to the enable-all-data-packages fallback on its first
+  // compile.
+  for (const name of PKGS) {
+    console.log(`installing ${name}…`);
+    await installPackage(name);
+  }
+
   await r.start();
 
-  // Record the worker's print stream (engine diagnostics — including the
-  // PATCH 9 "extra texmf tree installed" line) for later checks. The
-  // drawer shows the TeX log after a compile, not the print stream, so it
-  // can't be read from the DOM.
-  await r.page.addInitScript(() => {
-    window.__workerPrints = [];
-    const desc = Object.getOwnPropertyDescriptor(Worker.prototype, "onmessage");
-    Object.defineProperty(Worker.prototype, "onmessage", {
-      configurable: true,
-      get() {
-        return desc.get.call(this);
-      },
-      set(fn) {
-        desc.set.call(this, (e) => {
-          try {
-            if (e && e.data && e.data.print !== undefined)
-              window.__workerPrints.push(e.data.print);
-          } catch (_) {}
-          fn(e);
-        });
-      },
-    });
-  });
-
-  // Network audit: record every request.
+  // Network audit: record every request, and the engine's remote package
+  // fetches (the kpathsea hook's synchronous XHRs) with their status.
   const requests = [];
+  const remoteReqs = [];
   r.page.on("request", (req) =>
     requests.push({ method: req.method(), url: req.url() }),
   );
+  r.page.on("response", async (res) => {
+    if (/\/api\/texlive-remote\//.test(res.url()))
+      remoteReqs.push({ url: res.url(), status: res.status() });
+  });
 
   await r.goto();
   await r.waitReady();
@@ -180,8 +229,16 @@ const r = new Runner("reg");
   const log = await r.logText();
   r.ok("bibtex ran (bbl read in log)", /\.bbl/.test(log));
 
-  // Network audit: browser-only. No POST/PUT, no non-engine /api/, no
-  // foreign origins (allow app origin, monaco CDN, and blob: URLs).
+  // The worker init fetched the installed package list (remote_packages).
+  r.ok(
+    "worker fetched the installed package list",
+    requests.some((req) => req.method === "GET" && /\/api\/packages$/.test(req.url)),
+  );
+
+  // Network audit: browser-only. The app talks to its own origin only:
+  // the engine assets (/api/texlive/), the package store API
+  // (/api/packages) and the engine's on-demand file endpoint
+  // (/api/texlive-remote/). No POST/PUT, no foreign origins.
   const badMethod = requests.filter(
     (req) => req.method === "POST" || req.method === "PUT",
   );
@@ -192,9 +249,13 @@ const r = new Runner("reg");
   );
   const badApi = requests
     .filter((req) => /\/api\//.test(req.url))
-    .filter((req) => !/\/api\/texlive\//.test(req.url));
+    .filter(
+      (req) =>
+        !/\/api\/texlive(-remote)?\//.test(req.url) &&
+        !/\/api\/packages(\/|$)/.test(req.url),
+    );
   r.ok(
-    "only /api/texlive/ used",
+    "only the app's own API endpoints used",
     badApi.length === 0,
     badApi.map((req) => req.url).join(", ").slice(0, 200),
   );
@@ -239,7 +300,7 @@ const r = new Runner("reg");
     subText.slice(0, 160),
   );
 
-  // --- algorithm2e: the other vendored package --------------------------
+  // --- algorithm2e ---------------------------------------------------------
   await seedProject(r, {
     name: "algo2e",
     mainPath: "main.tex",
@@ -261,11 +322,7 @@ const r = new Runner("reg");
     algText.slice(0, 160),
   );
 
-  // --- vendored essentials (scripts/sync-texlive.sh default set) ---------
-  // First compile in this session: the worker installs the extra tree into
-  // the FS root (PATCH 9). The second compile proves the tree persists
-  // across compiles: it must NOT be re-installed, and the packages must
-  // still resolve.
+  // --- essentials ----------------------------------------------------------
   await seedProject(r, {
     name: "essentials",
     mainPath: "main.tex",
@@ -279,39 +336,15 @@ const r = new Runner("reg");
   const essStatus = await r.recompile();
   r.ok("essentials doc compiled", /Compiled in \d+ ms/.test(essStatus), essStatus);
 
-  // Fresh JS context after the reload: the print stream so far belongs to
-  // THIS worker, so exactly one install line is expected after the first
-  // compile.
-  const installs1 = await r.page.evaluate(() =>
-    window.__workerPrints.filter((l) => /extra texmf tree installed/.test(l)),
-  );
-  r.ok(
-    "extra tree installed on first compile",
-    installs1.length === 1,
-    installs1.join(" | ").slice(0, 160) || "no install line",
-  );
-
+  // siunitx's unit separator is a thin space, which the text extraction
+  // widens — collapse whitespace before matching.
   const essText = await r.pdfText();
-  r.ok("siunitx rendered (3 m)", /3 m/.test(essText), essText.slice(0, 160));
+  const essFlat = essText.replace(/\s+/g, " ");
+  r.ok("siunitx rendered (3 m)", /3 m/.test(essFlat), essText.slice(0, 160));
   r.ok(
     "enumitem item rendered",
-    /enumitem bullet/.test(essText),
+    /enumitem bullet/.test(essFlat),
     essText.slice(0, 160),
-  );
-
-  const essStatus2 = await r.recompile();
-  r.ok(
-    "second compile reuses the installed tree",
-    /Compiled in \d+ ms/.test(essStatus2),
-    essStatus2,
-  );
-  const installs2 = await r.page.evaluate(() =>
-    window.__workerPrints.filter((l) => /extra texmf tree installed/.test(l)),
-  );
-  r.ok(
-    "no re-install on second compile",
-    installs2.length === 1,
-    installs2.join(" | ").slice(0, 160) || "no install line",
   );
 
   // --- pslatex + pgfplots (wrapped axis): the user's document shape ------
@@ -332,6 +365,54 @@ const r = new Runner("reg");
     plpStatus,
   );
 
+  // The on-demand mechanism: the engine fetched the installed packages'
+  // files from the store. The engine also probes for files that exist
+  // nowhere (.aux/.bbl before bibtex, OpenType font metrics, …) — those
+  // 404s are expected; a 404 for a .sty/.cls/.bst the document uses is
+  // not (it would have failed the compile).
+  const remoteMisses = remoteReqs.filter((q) => q.status !== 200);
+  const pkgFileMisses = remoteMisses.filter((q) => /\.(sty|cls|bst)(\?|$)/.test(q.url));
+  r.ok(
+    "no missing package files (.sty/.cls/.bst) on the remote endpoint",
+    remoteReqs.length > 0 && pkgFileMisses.length === 0,
+    `requests=${remoteReqs.length}` +
+      (pkgFileMisses.length
+        ? " misses=" + pkgFileMisses.map((q) => q.url.split("/").pop()).join(", ")
+        : ""),
+  );
+  for (const sty of [
+    "pgfplots.sty",
+    "tikz.sty", // provided by the pgf container
+    "caption.sty",
+    "subcaption.sty",
+    "algorithm2e.sty",
+    "ifoddpage.sty",
+  ]) {
+    r.ok(
+      `${sty} fetched from the store`,
+      remoteReqs.some(
+        (q) =>
+          q.status === 200 &&
+          /\/api\/texlive-remote\/\d+\//.test(q.url) &&
+          q.url.endsWith("/" + sty),
+      ),
+      remoteReqs.map((q) => q.url.split("/").pop()).slice(0, 30).join(", "),
+    );
+  }
+  // A \usepackage the store does not provide would make the resolver
+  // enable ALL data packages — the recommended+extra .data trees
+  // (~540 MB) would be downloaded. The .js catalogs are fetched at every
+  // worker init (the resolver's \ProvidesPackage scan); the .data trees
+  // are the fallback and must never load for the documents in this suite.
+  r.ok(
+    "no data-tree fallback (recommended/extra .data never fetched)",
+    requests.every((req) => !/texlive-(recommended|extra)\.data/.test(req.url)),
+    requests
+      .filter((req) => /texlive-(recommended|extra)\.data/.test(req.url))
+      .map((req) => req.url)
+      .join(", "),
+  );
+
   const plpText = await r.pdfText();
   const plpFlat = plpText.replace(/\s+/g, " ");
   r.ok("figure caption in PDF", /A figure/.test(plpText), plpText.slice(0, 160));
@@ -345,6 +426,23 @@ const r = new Runner("reg");
     "pslatex refs resolved (no ??)",
     !/\?\?/.test(plpText),
     plpText.slice(0, 160),
+  );
+
+  // The fetched files are cached in the engine's FS (and misses too): a
+  // second compile in the SAME worker must not touch the remote endpoint
+  // again. A page reload would start a fresh worker and re-fetch.
+  const remoteBefore = remoteReqs.length;
+  const plpStatus2 = await r.recompile();
+  r.ok(
+    "second compile succeeds",
+    /Compiled in \d+ ms/.test(plpStatus2),
+    plpStatus2,
+  );
+  const remoteAfter = remoteReqs.slice(remoteBefore);
+  r.ok(
+    "second compile re-fetches nothing (engine FS caches remote files)",
+    remoteAfter.length === 0,
+    remoteAfter.map((q) => q.url.split("/").pop()).join(", ").slice(0, 160),
   );
 
   // --- the header brand goes back to the project dashboard --------------
