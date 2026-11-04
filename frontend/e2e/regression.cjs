@@ -3,13 +3,24 @@
 // caption/subcaption, algorithm2e, the essentials set, and
 // pslatex+pgfplots(+tikz).
 //
-// Packages are installed into the server's CTAN package store (host-side,
-// before the browser even loads) through POST /api/packages — the same
-// path the editor's Packages button uses. The engine then fetches every
-// file it needs from /api/texlive-remote/ at compile time; this suite
-// asserts that those fetches actually happen (and stop after the files
-// are cached in the engine's FS).
-const { Runner, seedProject, APP_URL } = require("./helpers.cjs");
+// The package store is the browser's own (OPFS — src/lib/ctan-store.ts;
+// the server keeps no state), so this suite installs through the
+// Packages modal, the same path a user takes: search → Install → the
+// tlnet container is fetched through the stateless /api/ctan proxy,
+// unpacked in the page, and lands in OPFS with its transitive
+// dependencies. A fresh profile's store is empty, so the
+// dependency-resolution assertions run against a clean store. Installed
+// files ride the compile payload at their engine paths (there is no
+// on-demand endpoint), so the network audit asserts the /api/ctan/
+// traffic instead of engine fetches.
+const {
+  Runner,
+  seedProject,
+  openPackagesModal,
+  closePackagesModal,
+  installViaModal,
+  readCtanManifest,
+} = require("./helpers.cjs");
 
 const SUBDOC = [
   "\\documentclass{article}",
@@ -51,17 +62,18 @@ const ALGDOC = [
 // Every \usepackage in the documents below that the engine's preloaded
 // texlive-basic tree does not contain. Installing one that basic DOES
 // contain is harmless (the local tree wins the lookup; the store file is
-// simply never fetched).
+// simply never used). pgfplots and algorithm2e are installed FIRST, on
+// the clean store, so the dependency-resolution assertions are causal.
 const PKGS = [
-  "caption",
+  "pgfplots", // pulls in pgf (provides tikz), listings, xcolor, pdfcolmk, everyshi
   "algorithm2e", // pulls in ifoddpage, relsize, endfloat, tocbibind, type1cm
+  "caption",
   "booktabs",
   "mathtools", // mhsetup ships in its own container
   "siunitx",
   "enumitem",
   "fontspec",
-  "xcolor", // pulls in pdfcolmk
-  "pgfplots", // pulls in pgf (provides tikz), listings, xcolor, everyshi
+  "xcolor", // already pulled in by pgfplots — a no-op success
   "pslatex",
   // pslatex only ships the .sty; the Times text metrics/fonts live in the
   // separate `times` package (URW Base 35), and the pzcm* math family it
@@ -148,118 +160,17 @@ const PLPDOC = [
   "\\end{document}",
 ].join("\n");
 
-// --- host-side package store access (the browser never installs) ----------
-
-const API_BASE = APP_URL.replace(/\/editor$/, "");
-
-async function installPackage(name) {
-  const res = await fetch(`${API_BASE}/api/packages`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-  if (res.status === 409) return null; // already installed (previous run)
-  if (!res.ok) {
-    const data = (await res.json().catch(() => ({}))) || {};
-    throw new Error(`install ${name} failed: ${res.status} ${data.error || ""}`);
-  }
-  const data = await res.json();
-  console.log(
-    `    installed ${data.package?.name} (${data.package?.files ?? "?"} files)`,
-  );
-  return data.package;
-}
-
 const r = new Runner("reg");
 
 (async () => {
-  // Dependency resolution: POST /api/packages must install everything the
-  // package's LaTeX files \usepackage/\RequirePackage that the engine's
-  // basic tree does not have — transitively. Remove the closure first so
-  // the assertions are deterministic on re-runs.
-  for (const n of [
-    "pgf",
-    "listings",
-    "xcolor",
-    "pdfcolmk",
-    "everyshi",
-    "ifoddpage",
-    "relsize",
-    "endfloat",
-    "tocbibind",
-    "type1cm",
-  ]) {
-    await fetch(`${API_BASE}/api/packages/${n}`, { method: "DELETE" }).catch(
-      () => {},
-    );
-  }
-  const depPost = async (name) => {
-    const res = await fetch(`${API_BASE}/api/packages`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) throw new Error(`install ${name} failed: ${res.status}`);
-    return res.json();
-  };
-  const plp = await depPost("pgfplots");
-  const plpDeps = plp.installedDependencies ?? [];
-  r.ok(
-    "install pgfplots pulled in pgf (its \\RequirePackage)",
-    plpDeps.includes("pgf") && plpDeps.includes("listings"),
-    plpDeps.join(", "),
-  );
-  r.ok(
-    "install pgfplots pulled in xcolor + pdfcolmk (transitive, via pgf)",
-    plpDeps.includes("xcolor") && plpDeps.includes("pdfcolmk"),
-    plpDeps.join(", "),
-  );
-  // Doc/test files inside containers (lstdoc.sty, fancyvrb-ex.sty,
-  // pst-doc.cls) must NOT trigger installs: that cascade once pulled in
-  // pstricks, biblatex and friends.
-  r.ok(
-    "doc-file references not installed (no pstricks/biblatex cascade)",
-    (await (await fetch(`${API_BASE}/api/packages`)).json()).packages
-      .map((p) => p.name)
-      .every((n) => n !== "pstricks" && n !== "biblatex"),
-  );
-  const a2e = await depPost("algorithm2e");
-  const a2eDeps = a2e.installedDependencies ?? [];
-  r.ok(
-    "install algorithm2e pulled in ifoddpage + relsize",
-    a2eDeps.includes("ifoddpage") && a2eDeps.includes("relsize"),
-    a2eDeps.join(", "),
-  );
-  r.ok(
-    "no unresolved dependencies for the test installs",
-    (plp.unresolved ?? []).length === 0 &&
-      (a2e.unresolved ?? []).length === 0,
-    [plp.unresolved, a2e.unresolved].flat().join(", "),
-  );
-
-  // Install every package the documents below use BEFORE the browser
-  // loads: the engine fetches the installed list once at worker init and
-  // treats those names as local, so a package installed after init would
-  // fall through to the enable-all-data-packages fallback on its first
-  // compile.
-  for (const name of PKGS) {
-    console.log(`installing ${name}…`);
-    await installPackage(name);
-  }
-
   await r.start();
 
-  // Network audit: record every request, and the engine's remote package
-  // fetches (the kpathsea hook's synchronous XHRs) with their status.
+  // Network audit: record every request from the very start (the modal
+  // installs below make the /api/ctan/ requests).
   const requests = [];
-  const remoteReqs = [];
   r.page.on("request", (req) =>
     requests.push({ method: req.method(), url: req.url() }),
   );
-  r.page.on("response", async (res) => {
-    if (/\/api\/texlive-remote\//.test(res.url()))
-      remoteReqs.push({ url: res.url(), status: res.status() });
-  });
 
   await r.goto();
   await r.waitReady();
@@ -271,6 +182,8 @@ const r = new Runner("reg");
   );
   // Auto-compile on open: the default project (it has a main.tex) has
   // already been built by the time the app settles — no click happened.
+  // (It runs against an EMPTY store — the default project only uses
+  // amsmath, which the preloaded basic tree covers.)
   r.ok(
     "auto-compiled on open (no Recompile clicked yet)",
     /^Compiled in \d+ ms$/.test(
@@ -290,16 +203,79 @@ const r = new Runner("reg");
   const log = await r.logText();
   r.ok("bibtex ran (bbl read in log)", /\.bbl/.test(log));
 
-  // The worker init fetched the installed package list (remote_packages).
+  // --- the browser's CTAN store (the Packages modal) ---------------------
+  // Everything the documents below \usepackage beyond the preloaded
+  // texlive-basic tree must be in the store BEFORE those projects
+  // compile: a worker born without the names would fall through to the
+  // enable-all-data-packages fallback (the ~540 MB trees).
+  await openPackagesModal(r);
+
+  for (const name of PKGS) {
+    console.log(`installing ${name}…`);
+    const notice = await installViaModal(r, name);
+    if (name === "pgfplots") {
+      // Clean-store install: the whole closure must be in the store now.
+      const manifest = await readCtanManifest(r);
+      const has = (n) => n in manifest.packages;
+      r.ok(
+        "install pgfplots pulled in pgf (its \\RequirePackage)",
+        has("pgf") && has("listings"),
+        Object.keys(manifest.packages).join(", "),
+      );
+      r.ok(
+        "install pgfplots pulled in xcolor + pdfcolmk (transitive, via pgf)",
+        has("xcolor") && has("pdfcolmk"),
+        Object.keys(manifest.packages).join(", "),
+      );
+      // Doc/test files inside containers (lstdoc.sty, fancyvrb-ex.sty,
+      // pst-doc.cls) must NOT trigger installs: that cascade once pulled
+      // in pstricks, biblatex and friends.
+      r.ok(
+        "doc-file references not installed (no pstricks/biblatex cascade)",
+        !has("pstricks") && !has("biblatex"),
+      );
+      r.ok(
+        "pgfplots install reported no unresolved dependencies",
+        notice !== null && !/could not auto-install/.test(notice),
+        notice ?? "no install notice visible",
+      );
+    }
+    if (name === "algorithm2e") {
+      const manifest = await readCtanManifest(r);
+      r.ok(
+        "install algorithm2e pulled in ifoddpage + relsize",
+        "ifoddpage" in manifest.packages && "relsize" in manifest.packages,
+        Object.keys(manifest.packages).join(", "),
+      );
+      r.ok(
+        "algorithm2e install reported no unresolved dependencies",
+        notice !== null && !/could not auto-install/.test(notice),
+        notice ?? "no install notice visible",
+      );
+    }
+  }
+  await closePackagesModal(r);
+
+  // The proxy traffic the installs must have made: the package database
+  // (cached in OPFS after the first fetch) and one container per fresh
+  // install — all same-origin, because CTAN mirrors send no CORS headers.
+  const archiveReqs = requests.filter((req) =>
+    /\/api\/ctan\/archive\//.test(req.url),
+  );
   r.ok(
-    "worker fetched the installed package list",
-    requests.some((req) => req.method === "GET" && /\/api\/packages$/.test(req.url)),
+    "the tlpdb was fetched through the same-origin proxy",
+    requests.some((req) => req.url.endsWith("/api/ctan/tlpdb")),
+  );
+  r.ok(
+    "install containers came through the same-origin proxy",
+    archiveReqs.length >= PKGS.length,
+    archiveReqs.length + " archive requests",
   );
 
   // Network audit: browser-only. The app talks to its own origin only:
-  // the engine assets (/api/texlive/), the package store API
-  // (/api/packages) and the engine's on-demand file endpoint
-  // (/api/texlive-remote/). No POST/PUT, no foreign origins.
+  // the engine assets (/api/texlive/) and the stateless CTAN proxy
+  // (/api/ctan/). No POST/PUT (installs are client-side), no server
+  // package API (the store is in the browser), no foreign origins.
   const badMethod = requests.filter(
     (req) => req.method === "POST" || req.method === "PUT",
   );
@@ -308,12 +284,19 @@ const r = new Runner("reg");
     badMethod.length === 0,
     badMethod.map((req) => req.method + " " + req.url).join(", ").slice(0, 200),
   );
+  r.ok(
+    "no server package API used (the store lives in the browser)",
+    requests.every(
+      (req) =>
+        !/\/api\/packages/.test(req.url) &&
+        !/\/api\/texlive-remote/.test(req.url),
+    ),
+  );
   const badApi = requests
     .filter((req) => /\/api\//.test(req.url))
     .filter(
       (req) =>
-        !/\/api\/texlive(-remote)?\//.test(req.url) &&
-        !/\/api\/packages(\/|$)/.test(req.url),
+        !/\/api\/texlive\//.test(req.url) && !/\/api\/ctan\//.test(req.url),
     );
   r.ok(
     "only the app's own API endpoints used",
@@ -426,45 +409,14 @@ const r = new Runner("reg");
     plpStatus,
   );
 
-  // The on-demand mechanism: the engine fetched the installed packages'
-  // files from the store. The engine also probes for files that exist
-  // nowhere (.aux/.bbl before bibtex, OpenType font metrics, …) — those
-  // 404s are expected; a 404 for a .sty/.cls/.bst the document uses is
-  // not (it would have failed the compile).
-  const remoteMisses = remoteReqs.filter((q) => q.status !== 200);
-  const pkgFileMisses = remoteMisses.filter((q) => /\.(sty|cls|bst)(\?|$)/.test(q.url));
-  r.ok(
-    "no missing package files (.sty/.cls/.bst) on the remote endpoint",
-    remoteReqs.length > 0 && pkgFileMisses.length === 0,
-    `requests=${remoteReqs.length}` +
-      (pkgFileMisses.length
-        ? " misses=" + pkgFileMisses.map((q) => q.url.split("/").pop()).join(", ")
-        : ""),
-  );
-  for (const sty of [
-    "pgfplots.sty",
-    "tikz.sty", // provided by the pgf container
-    "caption.sty",
-    "subcaption.sty",
-    "algorithm2e.sty",
-    "ifoddpage.sty",
-  ]) {
-    r.ok(
-      `${sty} fetched from the store`,
-      remoteReqs.some(
-        (q) =>
-          q.status === 200 &&
-          /\/api\/texlive-remote\/\d+\//.test(q.url) &&
-          q.url.endsWith("/" + sty),
-      ),
-      remoteReqs.map((q) => q.url.split("/").pop()).slice(0, 30).join(", "),
-    );
-  }
-  // A \usepackage the store does not provide would make the resolver
-  // enable ALL data packages — the recommended+extra .data trees
-  // (~540 MB) would be downloaded. The .js catalogs are fetched at every
-  // worker init (the resolver's \ProvidesPackage scan); the .data trees
-  // are the fallback and must never load for the documents in this suite.
+  // The client-store mechanism end-to-end: the installed files rode this
+  // compile's payload at their engine paths, and the worker's init
+  // carried the store's names as remote_packages. A \usepackage the
+  // store does not provide would make the resolver enable ALL data
+  // packages — the recommended+extra .data trees (~540 MB) would be
+  // downloaded. The .js catalogs are fetched at every worker init (the
+  // resolver's \ProvidesPackage scan); the .data trees are the fallback
+  // and must never load for the documents in this suite.
   r.ok(
     "no data-tree fallback (recommended/extra .data never fetched)",
     requests.every((req) => !/texlive-(recommended|extra)\.data/.test(req.url)),
@@ -487,23 +439,6 @@ const r = new Runner("reg");
     "pslatex refs resolved (no ??)",
     !/\?\?/.test(plpText),
     plpText.slice(0, 160),
-  );
-
-  // The fetched files are cached in the engine's FS (and misses too): a
-  // second compile in the SAME worker must not touch the remote endpoint
-  // again. A page reload would start a fresh worker and re-fetch.
-  const remoteBefore = remoteReqs.length;
-  const plpStatus2 = await r.recompile();
-  r.ok(
-    "second compile succeeds",
-    /Compiled in \d+ ms/.test(plpStatus2),
-    plpStatus2,
-  );
-  const remoteAfter = remoteReqs.slice(remoteBefore);
-  r.ok(
-    "second compile re-fetches nothing (engine FS caches remote files)",
-    remoteAfter.length === 0,
-    remoteAfter.map((q) => q.url.split("/").pop()).join(", ").slice(0, 160),
   );
 
   // --- the header brand goes back to the project dashboard --------------

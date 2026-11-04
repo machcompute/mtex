@@ -11,6 +11,7 @@ npm run test:e2e            # all suites
 node e2e/folder.cjs         # one suite: recursive folder upload
 node e2e/rename.cjs         # one suite: nested-file rename / move
 node e2e/regression.cjs     # one suite: compile, citations, network audit, CTAN packages
+node e2e/biber.cjs          # one suite: biber with a subdirectory .bib
 node e2e/fixes.cjs          # one suite: the bug-fix regression set
 node e2e/projects.cjs       # one suite: project create/switch/delete (OPFS)
 node e2e/github.cjs         # one suite: PAT-based GitHub import (stubbed API)
@@ -39,10 +40,12 @@ engine assets from the web into `.texlive-cache/`, which the route then
 serves from disk — the browser load needs `busytex.js/.wasm` plus the
 `texlive-basic` data package (~130 MB total).
 
-`regression.cjs` additionally needs outbound access to CTAN: it installs
-the packages its documents use into the server's package store
-(`frontend/.texlive-extra/`, which persists across runs, so only the first
-run downloads them — a few MB of tlnet containers).
+`regression.cjs` and `biber.cjs` additionally need outbound access to
+CTAN: they install the packages their documents use through the Packages
+modal, into the browser's own OPFS store (`ctan/` — see
+`src/lib/ctan-store.ts`). Each fresh profile's store is empty, so every
+run downloads the ~20 MB package database (`texlive.tlpdb`) plus one
+tlnet container per install through the stateless `/api/ctan/` proxy.
 
 ## What the suites cover
 
@@ -65,25 +68,37 @@ persisted, not what it had in memory.
   OPFS project files follow.
 - **regression.cjs** — default project compiles with bibtex citations
   resolved (no `??`), a network audit proves the app stays browser-only
-  (no POST/PUT, only its own `/api/texlive/`, `/api/packages` and
-  `/api/texlive-remote/` endpoints, no foreign origins beyond the Monaco
-  CDN and `blob:`), and the on-demand CTAN packages (installed host-side
-  through `POST /api/packages` before the browser loads) work:
-  caption/subcaption renders subfigures and `\subref`, algorithm2e compiles
-  a numbered, ruled algorithm with its `\ref` resolved, the essentials set
-  (booktabs, xcolor, mathtools, siunitx, enumitem, fontspec) compiles, and
-  pslatex+pgfplots+TikZ compiles with its Times fonts. The list covers the
-  packages' own dependencies too (ifoddpage, relsize — algorithm2e's
-  `\RequirePackage`s — and times/zapfchan, whose metrics the xdvipdfmx
-  font chain needs; the tlpdb has no dependency metadata, so the store
-  installs only what is asked for). It also proves the on-demand mechanism
-  itself: the engine fetches the installed packages' files from
-  `/api/texlive-remote/` (no `.sty`/`.cls`/`.bst` miss — the 404s that do
-  happen are the engine probing files that exist nowhere, like the pre-bibtex
-  `.aux`), a `\usepackage` the store doesn't provide would trigger the
-  data-tree fallback (the ~540 MB recommended+extra `.data` download), which
-  the suite asserts never happens, and a second compile in the same worker
-  re-fetches nothing (the engine's FS caches the files and the misses).
+  (no POST/PUT, no server package API, only its own `/api/texlive/` and
+  stateless `/api/ctan/` proxy endpoints, no foreign origins beyond the
+  Monaco CDN and `blob:`), and the on-demand CTAN packages work: they are
+  installed through the Packages modal (the only install path — the store
+  is the browser's own OPFS), and afterwards caption/subcaption renders
+  subfigures and `\subref`, algorithm2e compiles a numbered, ruled
+  algorithm with its `\ref` resolved, the essentials set (booktabs, xcolor,
+  mathtools, siunitx, enumitem, fontspec) compiles, and pslatex+pgfplots+TikZ
+  compiles with its Times fonts. On the clean store it also asserts the
+  dependency resolver is causal: installing pgfplots pulls in pgf,
+  listings, xcolor, pdfcolmk (its `\RequirePackage` chain), installing
+  algorithm2e pulls in ifoddpage and relsize, and doc-file references inside
+  containers do NOT cascade (no pstricks/biblatex). The list covers the
+  packages' own dependencies too (times/zapfchan, whose metrics the
+  xdvipdfmx font chain needs; the tlpdb has no dependency metadata, so the
+  store only pulls what the installed packages' code asks for). It also
+  proves the client-store mechanism itself: the installed files ride the
+  compile payload at their engine paths (`/texlive/texmf-dist/...`), and a
+  `\usepackage` the store doesn't provide would trigger the data-tree
+  fallback (the ~540 MB recommended+extra `.data` download), which the
+  suite asserts never happens.
+- **biber.cjs** — biber with a subdirectory `.bib` (the thesis layout:
+  `main.tex` at the root, the data source at `bib/references.bib`).
+  biblatex is installed through the Packages modal first, which also
+  asserts the client resolver auto-pulls `logreq` (biblatex's
+  `\RequirePackage`, past the old server resolver's 512 KB scan cap). Then
+  the thesis project compiles: biber is invoked, finds
+  `bib/references.bib` (the vendored loader keeps the subdirectory; the
+  release loader flattened paths to basenames and biber failed with
+  "Cannot find 'bib/references.bib'"), and the cited entry reaches the
+  PDF.
 - **fixes.cjs** — the bug-fix regression set, one section per fixed
   behavior: rename-back without stale Monaco models, name validation,
   no-main-file handling, mid-compile edits, auto-recompile cancel,

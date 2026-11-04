@@ -6,9 +6,21 @@
 // vendored loader (public/busytex/busytex_biber.js) keeps the
 // subdirectory, and this suite asserts the entry actually reaches the
 // PDF (a biber failure still produces a PDF, with ?! citations).
-const { Runner, seedProject, APP_URL } = require("./helpers.cjs");
-
-const API_BASE = APP_URL.replace(/\/editor$/, "");
+//
+// biblatex itself is not in the engine's preloaded texlive-basic tree, so
+// it is installed through the Packages modal first (the store is the
+// browser's own — OPFS; the modal is the only install path). This also
+// guards the client dependency resolver: logreq (biblatex's
+// \RequirePackage) sits past the old server resolver's 512 KB scan cap
+// (biblatex.sty is 538 KB) and must be pulled in automatically.
+const {
+  Runner,
+  seedProject,
+  openPackagesModal,
+  closePackagesModal,
+  installViaModal,
+  readCtanManifest,
+} = require("./helpers.cjs");
 
 const MAIN = [
   "\\documentclass{article}",
@@ -29,39 +41,36 @@ const BIB = [
   "}",
 ].join("\n");
 
-// Host-side install (the engine's worker must be born AFTER the package
-// list contains biblatex, or the resolver would fall through to the
-// enable-all-data-packages fallback and pull the multi-hundred-MB trees).
-async function installPackage(name) {
-  const res = await fetch(`${API_BASE}/api/packages`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-  if (res.status === 409) return null; // already installed (previous run)
-  if (!res.ok) {
-    const data = (await res.json().catch(() => ({}))) || {};
-    throw new Error(`install ${name} failed: ${res.status} ${data.error || ""}`);
-  }
-  const data = await res.json();
-  console.log(`    installed ${data.package?.name} (+${(data.installedDependencies ?? []).length} deps)`);
-  return data.package;
-}
+const r = new Runner("biber");
 
 (async () => {
-  // logreq: biblatex's \RequirePackage{logreq} sits past the old server
-  // resolver's 512 KB scan cap (biblatex.sty is 538 KB), so the server
-  // store misses it as a dependency — install it explicitly here. The
-  // client resolver (src/lib/ctan-store.ts) raises the cap and pulls it
-  // in automatically.
-  await installPackage("logreq");
-  await installPackage("biblatex");
-
-  const r = new Runner("biber");
   try {
     await r.start();
     await r.goto();
     await r.waitReady();
+
+    // --- install biblatex through the modal (the only install path) ------
+    await openPackagesModal(r);
+    const notice = await installViaModal(r, "biblatex");
+    const manifest = await readCtanManifest(r);
+    r.ok(
+      "biblatex is in the browser's CTAN store",
+      "biblatex" in manifest.packages,
+      Object.keys(manifest.packages).join(", "),
+    );
+    r.ok(
+      "logreq was auto-pulled (biblatex's \\RequirePackage, past the old 512 KB scan cap)",
+      "logreq" in manifest.packages,
+      Object.keys(manifest.packages).join(", "),
+    );
+    r.ok(
+      "biblatex install reported no unresolved dependencies",
+      notice !== null && !/could not auto-install/.test(notice),
+      notice ?? "no install notice visible",
+    );
+    await closePackagesModal(r);
+
+    // --- seed the thesis-layout project (main.tex + bib/references.bib) --
     await seedProject(r, {
       name: "Biber subdir",
       mainPath: "main.tex",
@@ -89,4 +98,7 @@ async function installPackage(name) {
     await r.finish();
   }
   process.exit(r.failures ? 1 : 0);
-})();
+})().catch((e) => {
+  console.error("FATAL", e);
+  process.exit(1);
+});

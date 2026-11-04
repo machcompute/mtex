@@ -7,6 +7,7 @@ const suites = [
   "folder.cjs",
   "rename.cjs",
   "regression.cjs",
+  "biber.cjs",
   "fixes.cjs",
   "projects.cjs",
   "dashboard.cjs",

@@ -281,4 +281,112 @@ async function readProject(r) {
   );
 }
 
-module.exports = { Runner, APP_URL, CHROME, FIREFOX, PNG_PATH, seedProject, readProject, ACTIVE_KEY };
+// --- The Packages modal: the browser's CTAN package store ----------------
+//
+// The store is entirely client-side (src/lib/ctan-store.ts, OPFS — the
+// server keeps no state), so the suites install packages through the
+// modal: the same path a user takes. Search, install, and remove all run
+// in the page; the only server traffic is the stateless /api/ctan proxy
+// (tlpdb + install containers). A fresh profile's store is always empty,
+// so dependency-resolution assertions run against a clean store — no
+// cleanup pass is needed.
+
+/** Open the editor's Packages modal (always in the top bar). */
+async function openPackagesModal(r) {
+  await r.page.click('button[data-action="packages"]');
+  await r.page.waitForSelector('[data-modal="packages"]', { timeout: 10000 });
+}
+
+/** Close the Packages modal. */
+async function closePackagesModal(r) {
+  await r.page.click('[data-modal="packages"] button[title="Close"]');
+  await r.page.waitForSelector('[data-modal="packages"]', {
+    state: "detached",
+    timeout: 10000,
+  });
+}
+
+/**
+ * Search `name` in the modal and click its Install button, waiting for
+ * the row to flip from an Install button to the "installed" badge.
+ * Returns the page notice shown when the install settles (it carries the
+ * "pulled in: …" / "could not auto-install: …" line), or null when the
+ * package was already installed (an earlier install pulled it in as a
+ * dependency) or no notice was visible. Throws on a modal error or a
+ * timeout — an install that hangs silently would otherwise poison every
+ * later check.
+ */
+async function installViaModal(r, name, timeoutMs = 300000) {
+  const rowDone = (n) => {
+    const rows = document.querySelectorAll(`[data-pkg-row="${n}"]`);
+    return (
+      rows.length > 0 &&
+      !document.querySelector(`[data-pkg-row="${n}"] [data-pkg-install]`)
+    );
+  };
+  await r.page.fill('[data-pkg-search]', name);
+  // The row appears when the search settles. A fresh profile's first
+  // search downloads the ~20 MB package database through the /api/ctan
+  // proxy — give it a long window.
+  await r.page.waitForSelector(`[data-pkg-row="${name}"]`, {
+    timeout: 180000,
+  });
+  if (await r.page.evaluate(rowDone, name)) return null;
+  await r.page.click(`[data-pkg-row="${name}"] [data-pkg-install]`);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    await r.page.waitForTimeout(500);
+    const err = await r.page.evaluate(
+      () => document.querySelector("[data-pkg-error]")?.textContent ?? "",
+    );
+    if (err) throw new Error(`install ${name} failed: ${err}`);
+    if (await r.page.evaluate(rowDone, name)) {
+      // The row flips a beat BEFORE the install notice commits (the
+      // modal refreshes the installed list before telling the page), and
+      // an earlier install's notice may still be on screen (5 s window).
+      // Poll for the notice that names THIS package; give up after a few
+      // seconds (a no-op install or a slow commit simply has no fresh one).
+      for (let i = 0; i < 16; i++) {
+        const notice = await r.page.evaluate(
+          () => document.querySelector("[data-notice]")?.textContent ?? null,
+        );
+        if (notice && notice.includes(`Installed “${name}”`)) return notice;
+        await r.page.waitForTimeout(250);
+      }
+      return null;
+    }
+    if (Date.now() > deadline) throw new Error(`install ${name} timed out`);
+  }
+}
+
+/**
+ * The client store's manifest (OPFS `ctan/manifest.json`), or an empty
+ * manifest when the store has never been written.
+ */
+async function readCtanManifest(r) {
+  return r.page.evaluate(async () => {
+    try {
+      const root = await navigator.storage.getDirectory();
+      const dir = await root.getDirectoryHandle("ctan");
+      const fh = await dir.getFileHandle("manifest.json");
+      return JSON.parse(await (await fh.getFile()).text());
+    } catch {
+      return { v: 1, packages: {} };
+    }
+  });
+}
+
+module.exports = {
+  Runner,
+  APP_URL,
+  CHROME,
+  FIREFOX,
+  PNG_PATH,
+  seedProject,
+  readProject,
+  ACTIVE_KEY,
+  openPackagesModal,
+  closePackagesModal,
+  installViaModal,
+  readCtanManifest,
+};
