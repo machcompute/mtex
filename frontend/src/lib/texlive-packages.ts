@@ -32,6 +32,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { ensureAsset } from "@/lib/texlive-assets";
 
 // ---------------------------------------------------------------------------
 // store location
@@ -273,6 +274,177 @@ export function installPackage(name: string): Promise<PackageInfo> {
   const p = installChain.then(() => doInstall(name));
   installChain = p.catch(() => undefined);
   return p;
+}
+
+// ---------------------------------------------------------------------------
+// install with dependencies
+// ---------------------------------------------------------------------------
+// TeX Live's tlpdb has no per-package dependency data, so the practical
+// source of truth is the LaTeX code: the \usepackage / \RequirePackage /
+// \LoadClass of everything an installed package ships. We scan those and
+// pull in whatever is not already available — from the engine's basic tree
+// or from packages already in the store — and repeat transitively.
+
+const DEP_RE =
+  /\\(?:usepackage|RequirePackage|LoadClass)\*?(?:\[[^\]]*\])?\{([^{}]+)\}/g;
+// A real package name (lowercase letters, digits, hyphens); filters the
+// scan noise — \usepackage{#1} in macro templates, conditional fragments.
+const DEP_NAME_RE = /^[a-z][a-z0-9-]*$/;
+const SCAN_RE = /\.(sty|cls|def|tex3)$/;
+const SCAN_MAX = 512 * 1024;
+const MAX_DEPTH = 4;
+// Documentation and test content ships inside containers too (example
+// files like fancyvrb-ex.sty, manual classes like pst-doc.cls, test
+// suites) and \usepackages packages the real package never needs —
+// scanning it cascades installs (fancyvrb-ex -> pstricks -> pst-doc ->
+// biblatex -> ...). Skip it.
+const DOC_PATH_RE =
+  /\/(tests?|demos?|examples?|doc|docs|manual|manuals|tutorials?|templates?)\//;
+const DOC_FILE_RE =
+  /(^|\/)(examples?|demo)[^/]*$|(^|\/)[^/]*(doc|manual|-ex)\.(sty|cls)$/;
+
+// \usepackage names that are not tlpkg names (the file ships in a
+// differently-named container).
+const DEP_ALIASES: Record<string, string> = {
+  tikz: "pgf",
+  mathrsfs: "jknapltx",
+  mathptmx: "psnfss",
+  helvet: "psnfss",
+  mathabx: "jknapltx",
+};
+
+/**
+ * The basenames of every file in the engine's preloaded basic tree, so a
+ * dependency already in there can be skipped instead of installed twice.
+ * The list is embedded in texlive-basic.js as the data package's file map
+ * (the .data itself is LZ4-compressed, the .js is not).
+ */
+let basicNames: Promise<Set<string>> | null = null;
+function basicBasenameSet(): Promise<Set<string>> {
+  if (!basicNames) {
+    basicNames = (async () => {
+      const file = await ensureAsset("texlive-basic.js");
+      const src = await readFile(file, "utf8");
+      const start = src.indexOf("loadPackage({\"files\"");
+      if (start < 0) throw new Error("file map not found in texlive-basic.js");
+      const j = src.indexOf("[", start);
+      let depth = 0;
+      for (let k = j; k < src.length; k++) {
+        if (src[k] === "[") depth++;
+        else if (src[k] === "]" && --depth === 0) {
+          const map = src.slice(j, k + 1);
+          const names = new Set<string>();
+          for (const m of map.matchAll(/\{"filename": "([^"]+)"/g)) {
+            names.add(m[1].split("/").pop() ?? m[1]);
+          }
+          return names;
+        }
+      }
+      throw new Error("unterminated file map in texlive-basic.js");
+    })();
+    basicNames.catch(() => (basicNames = null)); // don't cache a failure
+  }
+  return basicNames;
+}
+
+export type InstallResult = {
+  package: PackageInfo;
+  /** tlpkg names pulled in on the way (transitive dependencies). */
+  installedDependencies: string[];
+  /** dependency names that map to no tlpkg (install them manually). */
+  unresolved: string[];
+};
+
+/**
+ * Install a package AND everything its LaTeX files require that the engine
+ * does not already have. Serialized with plain installs through the same
+ * chain (the manifest and file index must not race).
+ */
+export function installWithDependencies(name: string): Promise<InstallResult> {
+  const p = installChain.then(() => doInstallWithDeps(name));
+  installChain = p.catch(() => undefined);
+  return p;
+}
+
+async function doInstallWithDeps(name: string): Promise<InstallResult> {
+  // Idempotent: an already-installed root is kept as-is, but its missing
+  // dependencies are still pulled in (a stale Install button now succeeds
+  // instead of 409ing).
+  const root = (await getPackage(name)) ?? (await doInstall(name));
+  // The basic list is a nice-to-have (skip duplicates); without it we just
+  // risk installing a duplicate container, which is wasteful, not broken.
+  const basic = await basicBasenameSet().catch(() => null);
+  const installed: string[] = [];
+  const unresolved: string[] = [];
+  await resolveDeps(name, basic, installed, unresolved, 0);
+  return {
+    package: root,
+    installedDependencies: installed,
+    unresolved: [...new Set(unresolved)].sort(),
+  };
+}
+
+async function resolveDeps(
+  pkg: string,
+  basic: Set<string> | null,
+  installed: string[],
+  unresolved: string[],
+  depth: number,
+): Promise<void> {
+  if (depth > MAX_DEPTH) return;
+  const manifest = await readManifest();
+  const entry = manifest.packages[pkg];
+  if (!entry) return;
+
+  // 1. Collect every package name this container's LaTeX files require.
+  const deps = new Set<string>();
+  for (const rel of entry.files) {
+    if (!SCAN_RE.test(rel)) continue;
+    if (DOC_PATH_RE.test(rel) || DOC_FILE_RE.test(rel)) continue;
+    const st = await stat(path.join(tdsDir(), rel)).catch(() => null);
+    if (!st || st.size > SCAN_MAX) continue;
+    const src = await readFile(path.join(tdsDir(), rel), "utf8").catch(
+      () => "",
+    );
+    // Drop % comments first: containers ship commented-out
+    // \RequirePackage{...} lines that are not real dependencies.
+    const code = src
+      .split("\n")
+      .map((line) => line.split(/(?<!\\)%/)[0])
+      .join("\n");
+    for (const m of code.matchAll(DEP_RE)) {
+      for (const d of m[1].split(",")) {
+        const dep = d.trim().toLowerCase();
+        if (DEP_NAME_RE.test(dep) && dep !== pkg) deps.add(dep);
+      }
+    }
+  }
+
+  for (const dep of deps) {
+    // 2. Skip what the engine already has.
+    if (basic && (basic.has(`${dep}.sty`) || basic.has(`${dep}.cls`))) continue;
+    if (await isInStore(dep)) continue;
+
+    // 3. Map to a tlpkg and install it (then scan THAT container, too).
+    const tlpkg = DEP_ALIASES[dep] ?? dep;
+    if (tlpkg in (await readManifest()).packages) continue;
+    const tlpdb = await loadTlpdb();
+    if (!tlpdb.has(tlpkg)) {
+      unresolved.push(dep);
+      continue;
+    }
+    await doInstall(tlpkg);
+    installed.push(tlpkg);
+    await resolveDeps(tlpkg, basic, installed, unresolved, depth + 1);
+  }
+}
+
+/** True if the store already provides `name` (as a tlpkg or a filename). */
+async function isInStore(name: string): Promise<boolean> {
+  const m = await readManifest();
+  return Object.values(m.packages).some(
+    (p) => p.name === name || p.provides.includes(name),
+  );
 }
 
 async function doInstall(name: string): Promise<PackageInfo> {

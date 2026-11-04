@@ -156,19 +156,31 @@ export default function PackagesModal({ onChanged, onClose }: Props) {
       });
       const data = (await res.json().catch(() => ({}))) as {
         package?: PackageInfo;
+        installedDependencies?: string[];
+        unresolved?: string[];
         error?: string;
       };
       if (!res.ok)
         throw new Error(data.error ?? `install failed (${res.status})`);
-      // The fetched results predate the install; flip the flag in place so
-      // the card shows "installed" instead of a stale Install button (a
-      // second click would just 409 with "already installed").
+      // The fetched results predate the install; flip the flags in place so
+      // the cards show "installed" instead of stale Install buttons.
       setResults((prev) =>
         prev
-          ? prev.map((r) => (r.name === name ? { ...r, installed: true } : r))
+          ? prev.map((r) =>
+              r.name === name ||
+              (data.installedDependencies ?? []).includes(r.name)
+                ? { ...r, installed: true }
+                : r,
+            )
           : prev,
       );
-      await afterChange(`Installed “${data.package?.name ?? name}”`);
+      const deps = data.installedDependencies ?? [];
+      const unresolved = data.unresolved ?? [];
+      let msg = `Installed “${data.package?.name ?? name}”`;
+      if (deps.length > 0) msg += ` (pulled in: ${deps.join(", ")})`;
+      if (unresolved.length > 0)
+        msg += ` — could not auto-install: ${unresolved.join(", ")}`;
+      await afterChange(msg);
     } catch (e) {
       setError(errMsg(e));
     } finally {

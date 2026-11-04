@@ -1,14 +1,15 @@
 // The server's CTAN package store (see src/lib/texlive-packages.ts).
 //
 // GET  /api/packages            the installed packages
-// POST /api/packages {"name"}   install a package from CTAN
+// POST /api/packages {"name"}   install a package from CTAN, including
+//                               every dependency its LaTeX files require
 //
 // Installing/removing a package does not reach the running engine: the
 // page disposes the compiler after a change so the next compile restarts
 // the worker with a fresh miss cache and package list.
 
 import {
-  installPackage,
+  installWithDependencies,
   listPackages,
   PackageError,
 } from "@/lib/texlive-packages";
@@ -41,8 +42,8 @@ export async function POST(request: Request) {
   }
 
   try {
-    const info = await installPackage(name);
-    return Response.json({ package: info }, { status: 201 });
+    const result = await installWithDependencies(name);
+    return Response.json(result, { status: 201 });
   } catch (err) {
     if (err instanceof PackageError) {
       return Response.json({ error: err.message }, { status: err.status });

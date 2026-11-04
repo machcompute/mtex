@@ -54,23 +54,20 @@ const ALGDOC = [
 // simply never fetched).
 const PKGS = [
   "caption",
-  "algorithm2e",
+  "algorithm2e", // pulls in ifoddpage, relsize, endfloat, tocbibind, type1cm
   "booktabs",
-  "mathtools",
+  "mathtools", // mhsetup ships in its own container
   "siunitx",
   "enumitem",
   "fontspec",
-  "xcolor",
-  "pgf", // provides tikz
-  "pgfplots",
+  "xcolor", // pulls in pdfcolmk
+  "pgfplots", // pulls in pgf (provides tikz), listings, xcolor, everyshi
   "pslatex",
-  // algorithm2e \RequirePackage's these (deps are not pulled automatically)
-  "ifoddpage",
-  "relsize",
   // pslatex only ships the .sty; the Times text metrics/fonts live in the
   // separate `times` package (URW Base 35), and the pzcm* math family it
-  // selects (mapped to Zapf Chancery by tetex/dvips35.map) in `zapfchan` —
-  // all three are needed for xdvipdfmx to embed the fonts
+  // selects (mapped to Zapf Chancery by tetex/dvips35.map) in `zapfchan`.
+  // These are fontmap deps — invisible to the \usepackage scanner, so
+  // they must be installed by hand.
   "times",
   "zapfchan",
   // siunitx probes for it (babel's translations package); a miss is
@@ -176,6 +173,70 @@ async function installPackage(name) {
 const r = new Runner("reg");
 
 (async () => {
+  // Dependency resolution: POST /api/packages must install everything the
+  // package's LaTeX files \usepackage/\RequirePackage that the engine's
+  // basic tree does not have — transitively. Remove the closure first so
+  // the assertions are deterministic on re-runs.
+  for (const n of [
+    "pgf",
+    "listings",
+    "xcolor",
+    "pdfcolmk",
+    "everyshi",
+    "ifoddpage",
+    "relsize",
+    "endfloat",
+    "tocbibind",
+    "type1cm",
+  ]) {
+    await fetch(`${API_BASE}/api/packages/${n}`, { method: "DELETE" }).catch(
+      () => {},
+    );
+  }
+  const depPost = async (name) => {
+    const res = await fetch(`${API_BASE}/api/packages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error(`install ${name} failed: ${res.status}`);
+    return res.json();
+  };
+  const plp = await depPost("pgfplots");
+  const plpDeps = plp.installedDependencies ?? [];
+  r.ok(
+    "install pgfplots pulled in pgf (its \\RequirePackage)",
+    plpDeps.includes("pgf") && plpDeps.includes("listings"),
+    plpDeps.join(", "),
+  );
+  r.ok(
+    "install pgfplots pulled in xcolor + pdfcolmk (transitive, via pgf)",
+    plpDeps.includes("xcolor") && plpDeps.includes("pdfcolmk"),
+    plpDeps.join(", "),
+  );
+  // Doc/test files inside containers (lstdoc.sty, fancyvrb-ex.sty,
+  // pst-doc.cls) must NOT trigger installs: that cascade once pulled in
+  // pstricks, biblatex and friends.
+  r.ok(
+    "doc-file references not installed (no pstricks/biblatex cascade)",
+    (await (await fetch(`${API_BASE}/api/packages`)).json()).packages
+      .map((p) => p.name)
+      .every((n) => n !== "pstricks" && n !== "biblatex"),
+  );
+  const a2e = await depPost("algorithm2e");
+  const a2eDeps = a2e.installedDependencies ?? [];
+  r.ok(
+    "install algorithm2e pulled in ifoddpage + relsize",
+    a2eDeps.includes("ifoddpage") && a2eDeps.includes("relsize"),
+    a2eDeps.join(", "),
+  );
+  r.ok(
+    "no unresolved dependencies for the test installs",
+    (plp.unresolved ?? []).length === 0 &&
+      (a2e.unresolved ?? []).length === 0,
+    [plp.unresolved, a2e.unresolved].flat().join(", "),
+  );
+
   // Install every package the documents below use BEFORE the browser
   // loads: the engine fetches the installed list once at worker init and
   // treats those names as local, so a package installed after init would
