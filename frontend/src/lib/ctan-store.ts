@@ -562,6 +562,12 @@ const DEP_ALIASES: Record<string, string> = {
   mathptmx: "psnfss",
   helvet: "psnfss",
   mathabx: "jknapltx",
+  // Conditional dep: footmisc.sty \RequirePackage{perpage} only when loaded
+  // with the perpage option — the scanner's regex can't see conditionals.
+  // perpage.sty ships in the bigfoot tlpkg (no standalone package).
+  perpage: "bigfoot",
+  // manyfoot.sty ships in the ncctools tlpkg (bigfoot \RequirePackage's it).
+  manyfoot: "ncctools",
 };
 
 /**
