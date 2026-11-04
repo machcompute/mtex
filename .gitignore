@@ -8,11 +8,6 @@ npm-debug.log*
 # request by the Next.js /api/texlive route and cached here (~96 MB).
 .texlive-cache/
 
-# On-demand LaTeX package store (CTAN containers extracted server-side,
-# served to the engine through /api/texlive-remote; see frontend/src/lib/
-# texlive-packages.ts). Created on first package install.
-.texlive-extra/
-
 # Env & secrets
 .env
 .env.local

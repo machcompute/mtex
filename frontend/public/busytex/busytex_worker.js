@@ -12,10 +12,12 @@
 //    finished loading, so the page can stop showing "Loading engine…"
 //    (upstream posts {initialized: versions} instead; the applet version
 //    map is not needed by the page).
-// 4. remote_packages: the names of LaTeX packages the SERVER has installed
-//    in its CTAN package store (served to the engine on demand through
-//    TEXLIVE_REMOTE_ENDPOINT — see /api/texlive-remote/). They are passed
-//    to the pipeline, whose resolver treats them as local packages, so a
+// 4. remote_packages: the names of LaTeX packages installed in the
+//    BROWSER's CTAN package store (src/lib/ctan-store.ts — OPFS, the
+//    server keeps no state). The store's files ride the compile payload
+//    at their absolute engine paths, so remote_endpoint is '' and the
+//    engine never XHRs a remote endpoint. The names are passed to the
+//    pipeline, whose resolver treats them as local packages, so a
 //    \usepackage for an installed package never triggers the "unresolved →
 //    enable ALL data packages" fallback (which would pull the ~540 MB
 //    recommended+extra trees the package does not need).
@@ -33,7 +35,7 @@
 // browsers cache worker scripts aggressively and even a hard refresh may
 // not refetch them (the pipeline import is version-stamped with it). Keep
 // it in sync with WORKER_VERSION in src/lib/busytex.ts.
-const SCRIPT_VERSION = 17;
+const SCRIPT_VERSION = 18;
 
 function fail(prefix, e)
 {

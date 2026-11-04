@@ -24,7 +24,7 @@
 // is also why the page disposes the compiler after a package change: a
 // removed package's stale files would otherwise keep resolving.
 //
-// Ported from the server store (texlive-packages.ts); the dependency
+// Ported from the (now removed) server-side store; the dependency
 // scanner's size cap is raised from 512 KB to 4 MB — biblatex.sty is
 // 538 KB, and the old cap silently skipped it, missing its \RequirePackage
 // dependencies (logreq).

@@ -5,10 +5,12 @@
 // changes:
 //
 // remote_packages — the data-package resolver takes an optional list of
-// LaTeX package names that the SERVER has installed in its CTAN package
-// store (files served to the engine on demand through
-// TEXLIVE_REMOTE_ENDPOINT, see /api/texlive-remote/). resolve() treats
-// them as local packages, so a \usepackage for an installed package is
+// LaTeX package names that the BROWSER's CTAN package store (see
+// src/lib/ctan-store.ts — OPFS, the server keeps no state) has
+// installed. The store's files ride the compile payload at their
+// absolute engine paths (/texlive/texmf-dist/...), and remote_endpoint
+// is '' — the engine never XHRs a remote endpoint. resolve() treats the
+// names as local packages, so a \usepackage for an installed package is
 // marked source:'local' instead of falling through to the "unresolved →
 // enable ALL data packages" fallback (which would pull the recommended
 // and extra data trees — hundreds of MB the package does not need).
