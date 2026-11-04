@@ -98,10 +98,16 @@ const IMAGE_EXT = new Set([
   "svg",
 ]);
 
+// The engine's emscripten loader reports data-asset downloads as
+// "Downloading data…" / "Downloading data… (loaded/total)" print lines.
+// The status slot renders them as a progress bar (total 0 = still unknown,
+// indeterminate) and they never reach the log drawer.
+type DownloadProgress = { loaded: number; total: number };
+
 type Status =
   | { kind: "idle" }
-  | { kind: "loading"; line: string }
-  | { kind: "compiling"; line: string }
+  | { kind: "loading"; line: string; progress?: DownloadProgress }
+  | { kind: "compiling"; line: string; progress?: DownloadProgress }
   | { kind: "done"; ms: number }
   | { kind: "error"; message: string };
 
@@ -642,6 +648,21 @@ export default function EditorPage() {
     compilerRef.current = compiler;
     compiler.init(
       (line) => {
+        // Data-asset download progress: shown as a bar in the status slot,
+        // never logged (the drawer is for errors, not byte counts).
+        const dl = line.match(/^Downloading data\.\.\.(\s*\((\d+)\/(\d+)\))?\s*$/);
+        if (dl) {
+          setStatus((s) => {
+            if (s.kind !== "loading" && s.kind !== "compiling") return s;
+            return {
+              ...s,
+              progress: dl[2]
+                ? { loaded: Number(dl[2]), total: Number(dl[3]) }
+                : { loaded: 0, total: 0 },
+            };
+          });
+          return;
+        }
         // Live stream for the log drawer (capped so a chatty engine can't
         // grow it without bound).
         setLiveLog((prev) => {
@@ -651,7 +672,11 @@ export default function EditorPage() {
         });
         setStatus((s) => {
           if (s.kind === "compiling")
-            return { kind: "compiling", line: lastLine(line, s.line) };
+            return {
+              kind: "compiling",
+              line: lastLine(line, s.line),
+              progress: undefined,
+            };
           // Terminal states survive late print lines (the engine can emit
           // trailing output after a successful compile).
           if (engineReadyRef.current || s.kind === "done" || s.kind === "error")
@@ -659,6 +684,7 @@ export default function EditorPage() {
           return {
             kind: "loading",
             line: lastLine(line, s.kind === "loading" ? s.line : ""),
+            progress: undefined,
           };
         });
       },
@@ -1326,6 +1352,15 @@ export default function EditorPage() {
           : status.kind === "done"
             ? `Compiled in ${status.ms} ms`
             : status.message;
+  // A data-asset download in flight replaces the streaming status text
+  // with a progress bar (determinate once the loader knows the total).
+  const downloading =
+    (status.kind === "loading" || status.kind === "compiling") &&
+    status.progress !== undefined;
+  const dlPct =
+    downloading && status.progress!.total > 0
+      ? Math.min(100, Math.round((status.progress!.loaded / status.progress!.total) * 100))
+      : null;
 
   return (
     <div className="relative flex h-screen flex-col bg-cream">
@@ -1466,14 +1501,34 @@ export default function EditorPage() {
               <IconCheck className="h-3.5 w-3.5 text-mint" />
             ) : null}
           </span>
-          <span
-            className={
-              "w-64 shrink-0 truncate text-xs " +
-              (status.kind === "error" ? "text-red-600" : "text-stone")
-            }
-          >
-            {statusText}
-          </span>
+          {downloading ? (
+            <span className="flex w-64 shrink-0 items-center gap-2">
+              <span className="relative h-1.5 w-44 overflow-hidden rounded-full bg-ink/10">
+                {dlPct !== null ? (
+                  <span
+                    className="absolute inset-y-0 left-0 rounded-full bg-mint transition-[width] duration-300"
+                    style={{ width: `${dlPct}%` }}
+                  />
+                ) : (
+                  <span className="absolute inset-y-0 left-0 w-1/3 animate-pulse rounded-full bg-mint" />
+                )}
+              </span>
+              {dlPct !== null && (
+                <span className="w-8 shrink-0 text-right text-xs tabular-nums text-stone">
+                  {dlPct}%
+                </span>
+              )}
+            </span>
+          ) : (
+            <span
+              className={
+                "w-64 shrink-0 truncate text-xs " +
+                (status.kind === "error" ? "text-red-600" : "text-stone")
+              }
+            >
+              {statusText}
+            </span>
+          )}
           <button
             title={
               autoRecompile
