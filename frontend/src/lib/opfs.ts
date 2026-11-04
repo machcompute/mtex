@@ -95,6 +95,18 @@ export function decodeText(buf: Uint8Array): string | null {
   }
 }
 
+/**
+ * Lenient UTF-8 decode: invalid bytes become U+FFFD instead of failing.
+ * For pattern scans over .sty/.cls sources — some old packages (the
+ * algorithm2e.sty, latin-1 accented letters) are not valid UTF-8, and a
+ * strict decode would make the scan see an empty file and report zero
+ * dependencies. The patterns looked for are ASCII, so the replacements
+ * are inert.
+ */
+export function decodeTextLenient(buf: Uint8Array): string {
+  return new TextDecoder("utf-8").decode(buf);
+}
+
 // The DOM lib types lag behind the async-iterable directory handles that
 // both Chromium and Firefox ship; walk them through this.
 async function* iterDir(

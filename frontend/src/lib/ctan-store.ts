@@ -16,9 +16,10 @@
 // OPFS.
 //
 // Compiled documents get the installed files in the compile payload at
-// their absolute engine paths (/texlive/texmf-dist/...) — the pipeline's
-// POSIX PATH.join keeps absolute paths, so they land in the engine's
-// preloaded tree, where kpathsea searches. That tree is never remounted
+// their absolute engine paths (/texlive/texmf-dist/...) — the pipeline
+// writes absolute payload paths as-is (its PATH.join would concatenate
+// them under the project dir, where kpathsea never looks), so they land
+// in the engine's preloaded tree. That tree is never remounted
 // between compiles, so the files persist for the worker's whole life and
 // the payload carries them once per worker session (see storeFiles). That
 // is also why the page disposes the compiler after a package change: a
@@ -29,7 +30,13 @@
 // 538 KB, and the old cap silently skipped it, missing its \RequirePackage
 // dependencies (logreq).
 
-import { BINARY_EXT, decodeText, walkFiles, writeFile } from "@/lib/opfs";
+import {
+  BINARY_EXT,
+  decodeText,
+  decodeTextLenient,
+  walkFiles,
+  writeFile,
+} from "@/lib/opfs";
 import { parseTar } from "@/lib/tar";
 import { XzReadableStream } from "xz-decompress";
 
@@ -95,8 +102,10 @@ async function readBytes(
 ): Promise<Uint8Array<ArrayBuffer> | null> {
   const parts = rel.split("/");
   let d = dir;
-  for (const p of parts) d = await d.getDirectoryHandle(p);
   try {
+    // Directory parts only — the leaf is a FILE; handing it to
+    // getDirectoryHandle throws on an existing entry of the wrong type.
+    for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p);
     const fh = await d.getFileHandle(parts[parts.length - 1]);
     const file = await fh.getFile();
     return new Uint8Array(await file.arrayBuffer());
@@ -449,7 +458,9 @@ async function doInstall(name: string): Promise<PackageInfo> {
     // data-tree fallback.
     provides.add(base.replace(PROBE, "").toLowerCase());
     if (bytes.byteLength <= 2 * 1024 * 1024) {
-      const m = PROVIDES_RE.exec(decodeText(bytes) ?? "");
+      // Lenient: a few containers are not valid UTF-8 (latin-1 accented
+      // letters), and a missed probe would hide a provided name.
+      const m = PROVIDES_RE.exec(decodeTextLenient(bytes));
       if (m) provides.add(m[1].toLowerCase().trim());
     }
   }
@@ -605,7 +616,10 @@ async function resolveDeps(
     if (DOC_PATH_RE.test(rel) || DOC_FILE_RE.test(rel)) continue;
     const bytes = await readBytes(tds, rel);
     if (!bytes || bytes.byteLength > SCAN_MAX) continue;
-    const src = decodeText(bytes) ?? "";
+    // Lenient: algorithm2e.sty is not valid UTF-8 (latin-1 bytes), and a
+    // strict decode would hand the scan an empty source — its
+    // \RequirePackage{ifoddpage/relsize/...} would go unreported.
+    const src = decodeTextLenient(bytes);
     // Drop % comments first: containers ship commented-out
     // \RequirePackage{...} lines that are not real dependencies.
     const code = src
