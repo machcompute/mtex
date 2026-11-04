@@ -1,7 +1,7 @@
 // Vendored from the Texlyre busytex build of TeX Live 2026
 // (github.com/TeXlyre/texlyre-busytex-build, release
 // build_wasm_46ebb6216a5c1fe63dd1dc885831d1a8cef2dc86_31802832436_1 — the
-// same pinned release as the WASM assets in /api/texlive/), with four
+// same pinned release as the WASM assets in /api/texlive/), with five
 // changes:
 //
 // remote_packages — the data-package resolver takes an optional list of
@@ -29,6 +29,15 @@
 // TeX errors were swallowed and the build died later at xdvipdfmx with
 // "Could not open specified DVI (or XDV) file" instead of showing the
 // real error.
+//
+// pdfTeX compatibility preamble — the main .tex is written with one line
+// prepended: \ifx\pdfpxdimen\undefined\newdimen\pdfpxdimen\fi. Templates
+// written for pdflatex assign pdfTeX-only primitives such as \pdfpxdimen
+// without an engine guard; under xelatex/luatex the control sequence is
+// undefined and the compile halts on "! Undefined control sequence". The
+// stand-in is an inert dimension register, so the (engine-meaningless)
+// assignment becomes a no-op instead of a fatal error. Line numbers in
+// errors are shifted by one.
 //
 // Bump SCRIPT_VERSION in busytex_worker.js whenever this file changes.
 //
@@ -726,7 +735,9 @@ class BusytexPipeline {
                 this.mkdir_p(FS, PATH, absolute_path, dirs);
             else {
                 this.mkdir_p(FS, PATH, PATH.dirname(absolute_path), dirs);
-                FS.writeFile(absolute_path, contents);
+                // (HomeHub change) pdfTeX compatibility preamble for the
+                // main file — see the header block.
+                FS.writeFile(absolute_path, path == main_tex_path ? '\\ifx\\pdfpxdimen\\undefined\\newdimen\\pdfpxdimen\\fi\n' + contents : contents);
             }
         }
 
