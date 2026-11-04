@@ -1,7 +1,7 @@
 // Vendored from the Texlyre busytex build of TeX Live 2026
 // (github.com/TeXlyre/texlyre-busytex-build, release
 // build_wasm_46ebb6216a5c1fe63dd1dc885831d1a8cef2dc86_31802832436_1 — the
-// same pinned release as the WASM assets in /api/texlive/), with three
+// same pinned release as the WASM assets in /api/texlive/), with four
 // changes:
 //
 // remote_packages — the data-package resolver takes an optional list of
@@ -22,6 +22,13 @@
 // \bibliography fails the build (upstream masks bibtex8's exit code to 0
 // whenever it prints anything, which would ship a PDF full of ?? while
 // reporting success).
+//
+// TeX errors — any log line starting "! " (TeX's hard-error marker) is
+// fatal. The upstream exit-code mask (non-empty stdout without a known
+// fatal string => success) only knew a handful of error strings, so most
+// TeX errors were swallowed and the build died later at xdvipdfmx with
+// "Could not open specified DVI (or XDV) file" instead of showing the
+// real error.
 //
 // Bump SCRIPT_VERSION in busytex_worker.js whenever this file changes.
 //
@@ -567,7 +574,18 @@ class BusytexPipeline {
 
         const aux = this.read_all_text(FS, cmd_aux_path);
         const log = this.read_all_text(FS, cmd_log_path);
-        const effective_exit_code = stdout.trim() ? (error_messages.some(err => stdout.includes(err)) ? exit_code : 0) : exit_code;
+        // TeX marks every hard error with a line starting "! " (! Missing $
+        // inserted., ! LaTeX Error: ..., etc.). The string list above covers
+        // only a few of them; without this, the exit-code masking below
+        // swallows the rest and the failure surfaces later as xdvipdfmx's
+        // "Could not open specified DVI (or XDV) file" — which says nothing
+        // about the document. Checked in the log file: emscripten's stdout
+        // capture does not carry the error lines (only the banner). No
+        // false positives: ordinary log lines never start with "! " (source
+        // lines echoed on error carry an "l.N " prefix), and neither
+        // bibtex8's .blg nor xdvipdfmx/makeindex output uses the marker.
+        const tex_error = /^! /m.test(log) || /^! /m.test(stdout);
+        const effective_exit_code = stdout.trim() ? ((error_messages.some(err => stdout.includes(err)) || tex_error) ? exit_code : 0) : exit_code;
 
         logs.push({
             cmd: cmd.join(' '),

@@ -66,7 +66,7 @@ const REMOTE_ENDPOINT = "/api/texlive-remote";
 // public/busytex/busytex_pipeline.js changes: browsers cache classic worker
 // scripts aggressively and may not refetch them even on a hard reload.
 // Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 14;
+const WORKER_VERSION = 15;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
