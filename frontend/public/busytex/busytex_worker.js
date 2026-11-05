@@ -35,7 +35,7 @@
 // browsers cache worker scripts aggressively and even a hard refresh may
 // not refetch them (the pipeline import is version-stamped with it). Keep
 // it in sync with WORKER_VERSION in src/lib/busytex.ts.
-const SCRIPT_VERSION = 20;
+const SCRIPT_VERSION = 25;
 
 function fail(prefix, e)
 {

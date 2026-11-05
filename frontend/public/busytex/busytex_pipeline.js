@@ -720,13 +720,98 @@ class BusytexPipeline {
         // invisible to kpathsea even though FS.readdir sees them. kpathsea
         // consults the registered hits map on every search miss — before any
         // remote fetch — so a pre-registered file is found with no endpoint.
-        // Format 26 is kpathsea's TEX (TEXINPUTS) format: .sty/.cls/.tex and
-        // the other text files a LaTeX package ships.
-        if (Module.kpse_remote_register)
+        //
+        // The hook keys registered files by "<format>/<name>", and both halves
+        // must equal what the engine asks for. The format is an integer the
+        // engine passes per lookup type; the name keeps or drops the file
+        // extension depending on the type. The numbers are the TL2026
+        // kpathsea kpse_file_format_type enum (texk/kpathsea/types.h, which
+        // replaced the old FORMAT_* enum): TFM is 3 (kpse_tfm_format, bare
+        // name — the engine looks up "zptmcmr", not "zptmcmr.tfm"), AFM is 4
+        // (extension kept), OFM is 20, TEX is 26 (extension kept), VF is 33
+        // (bare name), OVF is 23, Type 1/PFB is 32 (BOTH the bare name and
+        // the full name with extension — a font-map record keeps the .pfb
+        // in its physical font name, so dvi.c looks the file up as
+        // "utmri8a.pfb"), font map is 11, OpenType is 47 (the engine
+        // appends ".otf"), TrueType is 36 (bare name). Every file is
+        // therefore always registered under (basename, 26), and font files
+        // additionally under the (name, format) pair(s) their type uses.
+        const kpse_register_file = (path, contents) => {
+            const base = PATH.basename(path);
+            const dot = base.lastIndexOf('.');
+            const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : '';
+            const stem = dot > 0 ? base.slice(0, dot) : base;
+            Module.kpse_remote_register(base, 26, contents);
+            const extra = {
+                tfm: [[stem, 3]],
+                afm: [[base, 4]],
+                ofm: [[base, 20]],
+                vf: [[stem, 33]],
+                ovf: [[stem, 23]],
+                pfb: [[stem, 32], [base, 32]],
+                map: [[base, 11]],
+                otf: [[base, 47]],
+                ttf: [[stem, 36]],
+            }[ext];
+            if (extra)
+                for (const [name, format] of extra)
+                    Module.kpse_remote_register(name, format, contents);
+        };
+        if (Module.kpse_remote_register) {
             for (const { path, contents } of files) {
                 if (!path.startsWith('/texlive/') || contents == null) continue;
-                Module.kpse_remote_register(PATH.basename(path), 26, contents);
+                kpse_register_file(path, contents);
             }
+
+            // (HomeHub change) xdvipdfmx looks up a physical Type 1 font by
+            // its TeX name, not its .pfb file name: a VF's SETFONT packets
+            // name the base font ("ptmr8r"), and dvi_locate_font() resolves
+            // it through the font-map line `ptmr8r ... <utmr8a.pfb` and then
+            // kpse-looks-up "ptmr8r" as a bare Type 1 name (format 32).
+            // Registering the PFB under its own file stem alone would miss
+            // every such alias, so each map line whose target file is a
+            // store .pfb also registers that PFB under the line's name. The
+            // alias sources are the basic tree's generated pdftex.map —
+            // readable via FS.readFile even though the frozen ls-R hides new
+            // files from kpathsea search — and the .map files the store
+            // ships.
+            const pfb_by_file = new Map();
+            for (const { path, contents } of files)
+                if (path.startsWith('/texlive/') && path.endsWith('.pfb') && contents != null)
+                    pfb_by_file.set(PATH.basename(path), contents);
+            if (pfb_by_file.size) {
+                const seen = new Set();
+                const scan_map_lines = (text) => {
+                    for (const raw of text.split('\n')) {
+                        const line = raw.trim();
+                        if (!line || line.startsWith('%') || line.startsWith('#')) continue;
+                        const m = /<([A-Za-z0-9_.-]+\.pfb)[>\s]*$/.exec(line);
+                        if (!m) continue;
+                        const contents = pfb_by_file.get(m[1]);
+                        if (!contents) continue;
+                        const name = line.split(/\s+/)[0];
+                        if (seen.has(name)) continue;
+                        seen.add(name);
+                        Module.kpse_remote_register(name, 32, contents);
+                    }
+                };
+                let basic_map = null;
+                for (const p of ['/texlive/texmf-dist/texmf-var/fonts/map/pdftex/updmap/pdftex.map', '/texlive/texmf-dist/web2c/dvipdfmx/pdftex.map']) {
+                    try {
+                        basic_map = FS.readFile(p, { encoding: 'utf8' });
+                        break;
+                    } catch { /* try the next candidate */ }
+                }
+                if (basic_map != null)
+                    scan_map_lines(basic_map);
+                for (const { path, contents } of files) {
+                    if (!path.startsWith('/texlive/') || !path.endsWith('.map') || contents == null) continue;
+                    try {
+                        scan_map_lines(new TextDecoder('utf-8').decode(contents));
+                    } catch { /* undecodable map — skip it */ }
+                }
+            }
+        }
 
         const tex_path = PATH.basename(main_tex_path), dirname = PATH.dirname(main_tex_path);
 
