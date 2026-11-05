@@ -13,6 +13,11 @@ const suites = [
   "dashboard.cjs",
   "github.cjs",
   "firefox.cjs",
+  // The OPFS layout: settings + thumbnails live in artifacts/<id>/, not in
+  // the content folders. Seeds an old-layout project (meta + preview inside
+  // projects/<id>/) and checks the transparent migration plus the new layout
+  // for fresh projects. No compiles — the engine is never needed.
+  "artifacts.cjs",
   // The babel language auto-fix: a clean-store Portuguese document hits
   // "Unknown option 'portuguese'", the editor finds the babel-* tlpkg that
   // ships the .ldf, installs it, restarts the engine, and recompiles. Pulls

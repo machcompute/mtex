@@ -15,6 +15,7 @@ node e2e/biber.cjs          # one suite: biber with a subdirectory .bib
 node e2e/babel-pt.cjs       # one suite: babel language auto-install (clean store)
 node e2e/fixes.cjs          # one suite: the bug-fix regression set
 node e2e/projects.cjs       # one suite: project create/switch/delete (OPFS)
+node e2e/artifacts.cjs      # one suite: OPFS artifacts layout + old-layout migration
 node e2e/github.cjs         # one suite: PAT-based GitHub import (stubbed API)
 node e2e/firefox.cjs        # one suite: folder picker button flow in real Firefox
 ```
@@ -51,11 +52,11 @@ tlnet container per install through the stateless `/api/ctan/` proxy.
 ## What the suites cover
 
 Suites that need a pre-saved state use the `seedProject`/`readProject`
-helpers in `helpers.cjs`: they write/read the project folders straight
-into the browser's OPFS (`projects/<id>/` + `project.json`) and set the
-`homehub-active-project-v1` localStorage key, so a reload loads exactly
-what the test seeded — and checks compare what the app actually
-persisted, not what it had in memory.
+helpers in `helpers.cjs`: they write/read the project straight into the
+browser's OPFS — content in `projects/<id>/`, the `project.json` settings
+in `artifacts/<id>/` — and set the `homehub-active-project-v1`
+localStorage key, so a reload loads exactly what the test seeded — and
+checks compare what the app actually persisted, not what it had in memory.
 
 - **folder.cjs** — drops a synthetic folder (`paper/doc.tex`,
   `paper/figs/logo.png`) onto the file panel: panel rows and indentation,
@@ -112,6 +113,15 @@ persisted, not what it had in memory.
   marker edit persisted per project), rename persists across reload,
   delete with confirm dialog (inactive and active), delete-to-empty
   creating a fresh default, and outside-click close.
+- **artifacts.cjs** — the OPFS layout: a project's settings and thumbnail
+  live in `artifacts/<id>/` (keyed like the content folders in
+  `projects/<id>/`), keeping derived data out of the source tree. Seeds a
+  project in the OLD layout (`project.json` + `preview.png` inside the
+  content folder), then checks the transparent migration — both move to
+  `artifacts/<id>/` on first access, the old copies are removed, the
+  content is untouched, the migration is idempotent, the migrated project
+  still lists/opens with its thumbnail — and that fresh projects get the
+  new layout from day one.
 - **github.cjs** — the serverless GitHub import with `api.github.com`
   stubbed by route interception (CORS included, since the app sends a
   bearer token cross-origin): the PAT is persisted and sent, the

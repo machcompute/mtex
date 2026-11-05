@@ -203,7 +203,7 @@ const mainValue = async (r) => {
     const id = localStorage.getItem("homehub-active-project-v1");
     if (!id) return null;
     const root = await navigator.storage.getDirectory();
-    const dir = await (await root.getDirectoryHandle("projects")).getDirectoryHandle(id);
+    const dir = await (await root.getDirectoryHandle("artifacts")).getDirectoryHandle(id);
     return JSON.parse(await (await (await dir.getFileHandle("project.json")).getFile()).text());
   });
   r.ok("rename: meta.name persisted", savedMeta?.name === "Renamed proj", savedMeta?.name);

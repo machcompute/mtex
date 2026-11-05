@@ -1,11 +1,20 @@
 /**
  * Project storage on the browser's Origin Private File System (OPFS).
  *
- * Each project is a folder `projects/<id>/` holding the project's files at
- * their relative paths plus a `project.json` meta file. The editor page's
- * in-memory `files` map remains the session's source of truth; this module
- * only persists and restores it. Saves are diff-based (callers pass the
- * refs they last persisted) so a keystroke rewrites one file, not the tree.
+ * A project is two folders keyed by the same id:
+ *   projects/<id>/    the content — the project's files at their relative
+ *                     paths (the .tex/.bib/images the compiler sees)
+ *   artifacts/<id>/   per-project artifacts — project.json (settings) and
+ *                     preview.png (the dashboard thumbnail), plus room for
+ *                     any future derived data (build caches, …)
+ * Keeping content and artifacts apart means a content walk never has to
+ * special-case metadata, and derived artifacts can grow under artifacts/
+ * without touching the source tree.
+ *
+ * The editor page's in-memory `files` map remains the session's source of
+ * truth for content; this module only persists and restores it. Saves are
+ * diff-based (callers pass the refs they last persisted) so a keystroke
+ * rewrites one file, not the tree.
  */
 
 /**
@@ -35,11 +44,17 @@ export type ProjectMeta = {
 export type ProjectSummary = ProjectMeta & { id: string };
 
 const PROJECTS_DIR = "projects";
+/**
+ * Per-project artifacts (settings, thumbnails, build data): the same <id>
+ * folders as projects/, but holding derived data rather than content.
+ */
+const ARTIFACTS_DIR = "artifacts";
+/** The project's settings file, stored in artifacts/<id>/. */
 const META_FILE = "project.json";
 /**
- * The square first-page thumbnail the dashboard shows. It is project metadata,
- * not a content file: it is skipped by every file walk so it never reaches the
- * in-memory `files` map (the file browser, the compiler, upload/pull counts).
+ * The square first-page thumbnail the dashboard shows. It is an artifact, not
+ * content: it lives in artifacts/<id>/ and is skipped by every content walk so
+ * it never reaches the in-memory `files` map (file browser, compiler, counts).
  */
 export const PREVIEW_FILE = "preview.png";
 
@@ -80,6 +95,11 @@ export const RESERVED_NAMES = new Set(["constructor", "__proto__", "prototype"])
 async function projectsRoot(): Promise<FileSystemDirectoryHandle> {
   const root = await navigator.storage.getDirectory();
   return root.getDirectoryHandle(PROJECTS_DIR, { create: true });
+}
+
+async function artifactsRoot(): Promise<FileSystemDirectoryHandle> {
+  const root = await navigator.storage.getDirectory();
+  return root.getDirectoryHandle(ARTIFACTS_DIR, { create: true });
 }
 
 function textBytes(s: string): Uint8Array<ArrayBuffer> {
@@ -143,10 +163,87 @@ async function writeMeta(
   await w.close();
 }
 
+/** The project's content dir, projects/<id>/, or null when it doesn't exist. */
+async function projectDir(
+  id: string,
+): Promise<FileSystemDirectoryHandle | null> {
+  try {
+    return await (await projectsRoot()).getDirectoryHandle(id);
+  } catch {
+    return null;
+  }
+}
+
+/** The project's artifacts dir, artifacts/<id>/ (created on demand). */
+async function artifactsDir(id: string): Promise<FileSystemDirectoryHandle> {
+  return (await artifactsRoot()).getDirectoryHandle(id, { create: true });
+}
+
+/**
+ * A project's settings. Read from artifacts/<id>/project.json; when it's not
+ * there but the OLD in-project location (projects/<id>/) still has it, move it
+ * across first (a one-time, idempotent migration for pre-layout stores).
+ * Returns null when the project has no readable meta. `pDir` is the
+ * projects/<id>/ handle (may be null).
+ */
+async function getMeta(
+  id: string,
+  pDir: FileSystemDirectoryHandle | null,
+): Promise<ProjectMeta | null> {
+  const aRoot = await artifactsRoot();
+  try {
+    const meta = await readMeta(await aRoot.getDirectoryHandle(id));
+    if (meta) return meta;
+  } catch {
+    // no artifacts/<id>/ yet
+  }
+  if (pDir) {
+    const meta = await readMeta(pDir);
+    if (meta) {
+      await writeMeta(await artifactsDir(id), meta);
+      await pDir.removeEntry(META_FILE).catch(() => {});
+      return meta;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read an artifact file (by name) from artifacts/<id>/; when it's not there
+ * but still lives in the OLD in-project location (projects/<id>/name), move it
+ * across first. Returns the bytes, or null when it's in neither place.
+ */
+async function readArtifact(
+  id: string,
+  name: string,
+): Promise<Uint8Array<ArrayBuffer> | null> {
+  const aRoot = await artifactsRoot();
+  const readFrom = async (d: FileSystemDirectoryHandle) =>
+    new Uint8Array(
+      await (await (await d.getFileHandle(name)).getFile()).arrayBuffer(),
+    );
+  try {
+    return await readFrom(await aRoot.getDirectoryHandle(id));
+  } catch {
+    // not in artifacts yet
+  }
+  const pDir = await projectDir(id);
+  if (!pDir) return null;
+  try {
+    const bytes = await readFrom(pDir);
+    await writeFile(await artifactsDir(id), name, bytes);
+    await pDir.removeEntry(name).catch(() => {});
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Walk a folder into a path -> bytes map (skips project.json and
- * preview.png — those are project metadata, not content). Shared with the
- * CTAN package store, which walks its texmf-dist tree the same way.
+ * preview.png — those are artifacts, not content; the skip is a no-op in the
+ * current layout but covers a store mid-migration). Shared with the CTAN
+ * package store, which walks its texmf-dist tree the same way.
  */
 export async function walkFiles(
   dir: FileSystemDirectoryHandle,
@@ -210,7 +307,7 @@ export async function createProject(
   const dir = await (await projectsRoot()).getDirectoryHandle(id);
   for (const [p, data] of Object.entries(files)) await writeFile(dir, p, data);
   const now = Date.now();
-  await writeMeta(dir, {
+  await writeMeta(await artifactsDir(id), {
     v: 1,
     name,
     mainPath: meta?.mainPath ?? "",
@@ -228,8 +325,9 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   const out: ProjectSummary[] = [];
   for await (const entry of iterDir(root)) {
     if (entry.kind !== "directory") continue;
-    const meta = await readMeta(entry as FileSystemDirectoryHandle);
-    if (meta) out.push({ ...meta, id: entry.name });
+    const dir = entry as FileSystemDirectoryHandle;
+    const meta = await getMeta(dir.name, dir);
+    if (meta) out.push({ ...meta, id: dir.name });
   }
   return out.sort((a, b) => b.updatedAt - a.updatedAt);
 }
@@ -241,10 +339,10 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 export async function loadProject(
   id: string,
 ): Promise<{ meta: ProjectMeta; files: Record<string, FileData> }> {
-  const dir = await (await projectsRoot()).getDirectoryHandle(id);
-  const meta = await readMeta(dir);
+  const dir = await projectDir(id);
+  const meta = await getMeta(id, dir);
   if (!meta) throw new Error(`project ${id} has no readable meta`);
-  const raw = await walkFiles(dir);
+  const raw = dir ? await walkFiles(dir) : new Map<string, Uint8Array<ArrayBuffer>>();
   const files: Record<string, FileData> = {};
   for (const [p, bytes] of raw) {
     files[p] = decodeText(bytes) ?? bytes;
@@ -279,33 +377,35 @@ export async function saveProject(
       await d.removeEntry(name);
     }
   }
-  await writeMeta(dir, { ...meta, updatedAt: Date.now() });
+  await writeMeta(await artifactsDir(id), { ...meta, updatedAt: Date.now() });
 }
 
 export async function updateProjectMeta(
   id: string,
   patch: Partial<ProjectMeta>,
 ): Promise<void> {
-  const dir = await (await projectsRoot()).getDirectoryHandle(id);
-  const meta = await readMeta(dir);
+  const dir = await projectDir(id);
+  const meta = await getMeta(id, dir);
   if (!meta) throw new Error(`project ${id} has no readable meta`);
-  await writeMeta(dir, { ...meta, ...patch, updatedAt: Date.now() });
+  await writeMeta(await artifactsDir(id), { ...meta, ...patch, updatedAt: Date.now() });
 }
 
 export async function deleteProject(id: string): Promise<void> {
-  await (await projectsRoot()).removeEntry(id, { recursive: true });
+  const root = await projectsRoot();
+  await root.removeEntry(id, { recursive: true }).catch(() => {});
+  const aRoot = await artifactsRoot();
+  await aRoot.removeEntry(id, { recursive: true }).catch(() => {});
 }
 
 /**
  * Persist the project's square first-page thumbnail (see PREVIEW_FILE).
- * Overwrites any previous one; the project folder is created if missing.
+ * Overwrites any previous one; the artifacts folder is created if missing.
  */
 export async function savePreview(
   id: string,
   bytes: Uint8Array<ArrayBuffer>,
 ): Promise<void> {
-  const dir = await (await projectsRoot()).getDirectoryHandle(id, { create: true });
-  await writeFile(dir, PREVIEW_FILE, bytes);
+  await writeFile(await artifactsDir(id), PREVIEW_FILE, bytes);
 }
 
 /**
@@ -315,14 +415,7 @@ export async function savePreview(
 export async function loadPreview(
   id: string,
 ): Promise<Uint8Array<ArrayBuffer> | null> {
-  try {
-    const dir = await (await projectsRoot()).getDirectoryHandle(id);
-    const fh = await dir.getFileHandle(PREVIEW_FILE);
-    const file = await fh.getFile();
-    return new Uint8Array(await file.arrayBuffer());
-  } catch {
-    return null;
-  }
+  return readArtifact(id, PREVIEW_FILE);
 }
 
 

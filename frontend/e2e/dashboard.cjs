@@ -39,14 +39,14 @@ const waitName = async (r, name) => {
   return false;
 };
 
-// Does `preview.png` exist in the active project's OPFS folder?
+// Does `preview.png` exist in the active project's artifacts folder?
 const previewOnDisk = (r) =>
   r.page.evaluate((key) =>
     (async () => {
       const id = localStorage.getItem(key);
       if (!id) return false;
       const root = await navigator.storage.getDirectory();
-      const dir = await (await root.getDirectoryHandle("projects")).getDirectoryHandle(id);
+      const dir = await (await root.getDirectoryHandle("artifacts")).getDirectoryHandle(id);
       try {
         await dir.getFileHandle("preview.png");
         return true;

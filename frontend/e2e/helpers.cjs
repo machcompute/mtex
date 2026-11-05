@@ -229,7 +229,10 @@ async function seedProject(r, { id, name, mainPath = "", openPaths = [], activeP
           updatedAt,
         };
         if (source) meta.source = source;
-        const fh = await dir.getFileHandle("project.json", { create: true });
+        // Meta is an artifact: artifacts/<id>/project.json, not in the content dir.
+        const artifacts = await root.getDirectoryHandle("artifacts", { create: true });
+        const aDir = await artifacts.getDirectoryHandle(id, { create: true });
+        const fh = await aDir.getFileHandle("project.json", { create: true });
         const w = await fh.createWritable();
         await w.write(JSON.stringify(meta));
         await w.close();
@@ -265,8 +268,9 @@ async function readProject(r) {
       const root = await navigator.storage.getDirectory();
       const projects = await root.getDirectoryHandle("projects");
       const dir = await projects.getDirectoryHandle(id);
+      const aDir = await (await root.getDirectoryHandle("artifacts")).getDirectoryHandle(id);
       const meta = JSON.parse(
-        await (await (await dir.getFileHandle("project.json")).getFile()).text(),
+        await (await (await aDir.getFileHandle("project.json")).getFile()).text(),
       );
       const files = {};
       async function walk(d, prefix) {
