@@ -12,6 +12,7 @@ node e2e/folder.cjs         # one suite: recursive folder upload
 node e2e/rename.cjs         # one suite: nested-file rename / move
 node e2e/regression.cjs     # one suite: compile, citations, network audit, CTAN packages
 node e2e/biber.cjs          # one suite: biber with a subdirectory .bib
+node e2e/babel-pt.cjs       # one suite: babel language auto-install (clean store)
 node e2e/fixes.cjs          # one suite: the bug-fix regression set
 node e2e/projects.cjs       # one suite: project create/switch/delete (OPFS)
 node e2e/github.cjs         # one suite: PAT-based GitHub import (stubbed API)

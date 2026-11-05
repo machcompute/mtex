@@ -4,7 +4,7 @@
 // document's first compile does not sit on missing packages. This suite
 // is the only one that opts IN (every other suite visits the editor
 // with ?noDefaults=1 — see the Runner in helpers.cjs), so its fresh
-// profile runs the real sweep: tlpdb + 17 containers through the
+// profile runs the real sweep: tlpdb + 18 containers through the
 // stateless /api/ctan proxy, unpacked into OPFS.
 //
 // Verified here: the sweep installs the whole set and marks the
@@ -41,6 +41,7 @@ const DEFAULT_PACKAGES = [
   "times",
   "zapfchan",
   "symbol",
+  "babel-portuges",
 ];
 
 // Defaults-only document: everything beyond the preloaded basic tree is
@@ -94,7 +95,7 @@ const r = new Runner("defaults", "chromium", { autoDefaults: true });
   await r.goto();
 
   // The sweep runs in the background on first load. It downloads the
-  // ~20 MB package database plus 17 containers (and their
+  // ~20 MB package database plus 18 containers (and their
   // dependencies) through the proxy — give it a long window, and log
   // occasionally so a hang is diagnosable. While it installs, the status
   // progress bar takes over the status slot (one step per package). The
@@ -121,7 +122,7 @@ const r = new Runner("defaults", "chromium", { autoDefaults: true });
   let loggedAt = 0;
   while (Date.now() < deadline) {
     const m = await readCtanManifest(r);
-    if (typeof m.defaultsVersion === "number" && m.defaultsVersion >= 1) {
+    if (typeof m.defaultsVersion === "number" && m.defaultsVersion >= 2) {
       swept = true;
       break;
     }
@@ -142,7 +143,7 @@ const r = new Runner("defaults", "chromium", { autoDefaults: true });
   r.ok("first-run sweep completed (manifest marked)", swept, `defaultsVersion=${m.defaultsVersion}`);
   const missing = DEFAULT_PACKAGES.filter((n) => !(n in m.packages));
   r.ok(
-    "all 17 default packages are in the store",
+    `all ${DEFAULT_PACKAGES.length} default packages are in the store`,
     missing.length === 0,
     missing.length ? "missing: " + missing.join(", ") : Object.keys(m.packages).length + " packages",
   );

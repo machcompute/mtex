@@ -13,9 +13,14 @@ const suites = [
   "dashboard.cjs",
   "github.cjs",
   "firefox.cjs",
+  // The babel language auto-fix: a clean-store Portuguese document hits
+  // "Unknown option 'portuguese'", the editor finds the babel-* tlpkg that
+  // ships the .ldf, installs it, restarts the engine, and recompiles. Pulls
+  // the package database plus one container from CTAN.
+  "babel-pt.cjs",
   // The first-run default package sweep (the only suite that opts in):
   // the heaviest one — a fresh profile pulls the package database plus
-  // 17 containers from CTAN — so it runs last.
+  // 18 containers from CTAN — so it runs last.
   "defaults.cjs",
 ];
 let failed = 0;

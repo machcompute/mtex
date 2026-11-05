@@ -129,16 +129,21 @@ type TlpdbEntry = {
   checksum: string;
 };
 
-let tlpdbPromise: Promise<Map<string, TlpdbEntry>> | null = null;
+let tlpdbTextPromise: Promise<string> | null = null;
 
-async function loadTlpdb(): Promise<Map<string, TlpdbEntry>> {
-  if (!tlpdbPromise) {
-    tlpdbPromise = (async () => {
+/**
+ * The raw tlnet package database (~20 MB of plain text), cached in OPFS
+ * after the first fetch. Both the metadata map (loadTlpdb) and the
+ * file→package index (fileOwners) parse it, so the download happens once
+ * and the text is shared between them.
+ */
+async function tlpdbText(): Promise<string> {
+  if (!tlpdbTextPromise) {
+    tlpdbTextPromise = (async () => {
       const root = await storeRoot();
-      let text: string | null = null;
       try {
         const fh = await root.getFileHandle("texlive.tlpdb");
-        text = await (await fh.getFile()).text();
+        return await (await fh.getFile()).text();
       } catch {
         // not cached yet: fetch it (the stateless proxy relays CTAN)
         const res = await fetch("/api/ctan/tlpdb");
@@ -153,12 +158,23 @@ async function loadTlpdb(): Promise<Map<string, TlpdbEntry>> {
         ).createWritable();
         await w.write(buf);
         await w.close();
-        text = new TextDecoder("utf-8").decode(buf);
+        return new TextDecoder("utf-8").decode(buf);
       }
-      return parseTlpdb(text);
     })();
-    // A failed load must not poison later calls (the download can fail
+    // A failed download must not poison later calls (it can fail
     // transiently); drop the promise so the next call retries.
+    void tlpdbTextPromise.catch(() => {
+      tlpdbTextPromise = null;
+    });
+  }
+  return tlpdbTextPromise;
+}
+
+let tlpdbPromise: Promise<Map<string, TlpdbEntry>> | null = null;
+
+async function loadTlpdb(): Promise<Map<string, TlpdbEntry>> {
+  if (!tlpdbPromise) {
+    tlpdbPromise = tlpdbText().then(parseTlpdb);
     void tlpdbPromise.catch(() => {
       tlpdbPromise = null;
     });
@@ -202,6 +218,85 @@ function parseTlpdb(text: string): Map<string, TlpdbEntry> {
   }
   if (cur) map.set(cur.name, cur);
   return map;
+}
+
+// ---------------------------------------------------------------------------
+// which tlpkg ships a given file (auto-install a missing babel language)
+// ---------------------------------------------------------------------------
+
+// Recent TeX Live split babel's per-language definition files (X.ldf) out
+// of the `babel` core into their own tlpkg (babel-portuges, babel-french, …),
+// and the engine's preloaded tree ships only babel-english — so a non-English
+// \usepackage[...]{babel} fails with "Unknown option" until the matching
+// tlpkg is installed. To find it we index the raw tlpdb's per-package
+// runfiles (the files that land in the installed texmf-dist tree):
+// lower-cased file basename -> the tlpkg names that ship that file. The
+// cached metadata entries (TlpdbEntry) carry no file list, so this is a
+// second, one-time rescan of the same raw text.
+let tlpdbFileOwners: Promise<Map<string, string[]>> | null = null;
+
+function fileOwners(): Promise<Map<string, string[]>> {
+  if (!tlpdbFileOwners) {
+    tlpdbFileOwners = tlpdbText().then((text) => {
+      const owners = new Map<string, string[]>();
+      let pkg: string | null = null;
+      let inRunfiles = false;
+      for (const line of text.split("\n")) {
+        if (line === "") {
+          // a blank line ends an entry
+          pkg = null;
+          inRunfiles = false;
+          continue;
+        }
+        if (line[0] === " " || line[0] === "\t") {
+          // an indented file line (runfiles / docfiles / srcfiles entry)
+          if (inRunfiles && pkg) {
+            // drop any trailing attributes (details="…"); take the basename
+            const base = line.trim().split(" ")[0].split("/").pop();
+            if (base) {
+              const key = base.toLowerCase();
+              const list = owners.get(key);
+              if (list) list.push(pkg);
+              else owners.set(key, [pkg]);
+            }
+          }
+          continue;
+        }
+        // a "key value" field line
+        const eq = line.indexOf(" ");
+        const key = eq >= 0 ? line.slice(0, eq) : line;
+        const value = eq >= 0 ? line.slice(eq + 1) : "";
+        if (key === "name") {
+          pkg = value;
+          inRunfiles = false;
+        } else if (key === "runfiles") {
+          inRunfiles = true;
+        } else {
+          // docfiles, srcfiles, containersize, … end the runfiles list
+          inRunfiles = false;
+        }
+      }
+      return owners;
+    });
+    void tlpdbFileOwners.catch(() => {
+      tlpdbFileOwners = null; // don't cache a failed parse
+    });
+  }
+  return tlpdbFileOwners;
+}
+
+/**
+ * The tlpkg that ships the RUNTIME file `basename`, or null when no single
+ * owner is unambiguous. A sole owner is returned as-is; with several owners
+ * we trust only a babel-* one (this index exists for the babel case, where
+ * e.g. "portuguese.ldf" has a single owner) and otherwise refuse to guess.
+ * Throws only when the tlpdb itself cannot be loaded (caller retries).
+ */
+export async function packageForFile(basename: string): Promise<string | null> {
+  const owners = (await fileOwners()).get(basename.toLowerCase());
+  if (!owners || owners.length === 0) return null;
+  if (owners.length === 1) return owners[0];
+  return owners.find((n) => n.startsWith("babel-")) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,10 +435,15 @@ export async function storeFiles(): Promise<
  * The curated set a recent document is likely to \usepackage, installed
  * into a fresh store automatically so the first compile does not sit on
  * an empty "Installed (0)". The base tree already covers geometry,
- * hyperref, babel (all languages), amsmath, natbib, times.sty, … — this
- * list is what most documents need beyond that. The font packs (times,
- * zapfchan, symbol) are pslatex's font maps: the .sty lives in the base
- * tree, the physical PFB glyphs come from these containers.
+ * hyperref, amsmath, natbib, times.sty, … — this list is what most
+ * documents need beyond that. The font packs (times, zapfchan, symbol) are
+ * pslatex's font maps: the .sty lives in the base tree, the physical PFB
+ * glyphs come from these containers. babel-portuges is the one babel
+ * language the base tree cannot load: recent TeX Live split babel's
+ * per-language .ldf files into babel-* tlpkg (the base tree ships only
+ * babel-english), and Portuguese is a common thesis language. Every other
+ * babel language is covered on demand by the compile-time auto-install
+ * (packageForFile), which needs no curation.
  */
 export const DEFAULT_PACKAGES = [
   "fontspec",
@@ -363,6 +463,7 @@ export const DEFAULT_PACKAGES = [
   "times",
   "zapfchan",
   "symbol",
+  "babel-portuges",
 ] as const;
 
 /**
@@ -373,7 +474,7 @@ export const DEFAULT_PACKAGES = [
  * At the CURRENT version, though, the marker is written once and the
  * sweep is a no-op, so a removal always survives a plain reload.
  */
-export const DEFAULTS_VERSION = 1;
+export const DEFAULTS_VERSION = 2;
 
 let defaultsPromise: Promise<string[]> | null = null;
 

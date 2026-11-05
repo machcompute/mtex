@@ -21,7 +21,7 @@ class Runner {
    * @param {object} [opts]
    * @param {boolean} [opts.autoDefaults=false] — visit the editor with the
    *   first-run default package sweep ENABLED (no ?noDefaults=1). Every
-   *   suite opts out by default: the sweep pulls 17 packages from CTAN
+   *   suite opts out by default: the sweep pulls 18 packages from CTAN
    *   (minutes, per fresh profile) and would break the clean-store
    *   assertions. Only defaults.cjs opts in.
    */

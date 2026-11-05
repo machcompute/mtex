@@ -36,7 +36,11 @@ import {
 import GitHubModal, { type PullRequest, type PushRequest } from "@/components/github-modal";
 import PackagesModal from "@/components/packages-modal";
 import { BusyTexCompiler } from "@/lib/busytex";
-import { ensureDefaults } from "@/lib/ctan-store";
+import {
+  ensureDefaults,
+  installWithDependencies,
+  packageForFile,
+} from "@/lib/ctan-store";
 import {
   ACTIVE_PROJECT_KEY,
   BINARY_EXT,
@@ -329,6 +333,11 @@ export default function EditorPage() {
   // finishing compile retries once, because the debounce that fired it
   // can't retry itself.
   const recompileQueuedRef = useRef(false);
+  // Babel languages we already auto-installed for (one attempt each): the
+  // auto-install only recompiles when it succeeds, so marking a language
+  // can't cause a recompile loop, and it stops a persistently-unfixable
+  // language (no tlpkg ships its .ldf) from re-attempting on every build.
+  const babelAutoFixedRef = useRef<Set<string>>(new Set());
   // The PDF's scroll position before the latest compile; restored once the
   // new PDF renders (pdf.js renders async — the effect below polls).
   const pendingScrollRef = useRef<{ page: number; yTop: number } | null>(null);
@@ -925,6 +934,44 @@ export default function EditorPage() {
         setStatus({ kind: "error", message: "Compilation failed — see log" });
       }
       setLog(result.log);
+      // A missing babel language (\usepackage[portuguese]{babel}): recent TeX
+      // Live ships each language's definition file (<lang>.ldf) in its own
+      // babel-* tlpkg that the base tree lacks, so the build fails with
+      // "Unknown option 'portuguese'". Install the tlpkg that provides the
+      // file and recompile. The worker must restart first — it caches
+      // file-lookup misses for its lifetime, so the new file is invisible
+      // until a fresh worker (see restartCompiler) is built and the store
+      // files re-sent.
+      if (!result.pdf) {
+        const m =
+          /Package babel Error: Unknown option '([^']+)'/.exec(result.log ?? "");
+        const lang = m?.[1]?.toLowerCase();
+        if (lang && !babelAutoFixedRef.current.has(lang)) {
+          const pkg = await packageForFile(`${lang}.ldf`).catch(() => null);
+          if (pkg) {
+            setStatus({
+              kind: "compiling",
+              line: `installing ${pkg} (language “${lang}”)…`,
+            });
+            let installed = false;
+            try {
+              await installWithDependencies(pkg);
+              installed = true;
+            } catch {
+              // the install failed — keep the "Compilation failed" status
+            }
+            if (installed) {
+              babelAutoFixedRef.current.add(lang);
+              // Reuse the mid-compile package-change path: the finally block
+              // below disposes the worker (restartPending) and requeues a
+              // compile (recompileQueued) that picks the file up.
+              restartPendingRef.current = true;
+              recompileQueuedRef.current = true;
+              return;
+            }
+          }
+        }
+      }
       // Decode synctex for PDF<->source navigation; a failed build has no
       // usable map, and decoding is best-effort (bad bytes = no navigation).
       // Input-table paths are resolved against the project files so a
