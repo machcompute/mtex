@@ -9,8 +9,9 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import Link from "next/link";
-import Editor, { type BeforeMount, type Monaco } from "@monaco-editor/react";
+import type { BeforeMount, Monaco } from "@monaco-editor/react";
 import type * as monaco from "monaco-editor";
+import MonacoEditor from "@/components/monaco-editor";
 import PdfViewer, {
   toArrayBuffer,
   type PdfViewerHandle,
@@ -1944,7 +1945,7 @@ export default function EditorPage() {
       </div>
       <div className="min-h-0 flex-1">
         {activePath && activeSource !== null ? (
-          <Editor
+          <MonacoEditor
             height="100%"
             path={activePath}
             defaultLanguage="latex"
