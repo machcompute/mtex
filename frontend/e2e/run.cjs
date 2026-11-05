@@ -24,6 +24,11 @@ const suites = [
   // reuses an unchanged build's PDF without running the engine. Installs
   // biblatex through the modal (the classic bibtex8 path needs no install).
   "incremental.cjs",
+  // The bottom-zone chat: the page proxies /api/chat to the LAN LLM
+  // router (server-side key, SSE streaming); asserts the drawer UX, a
+  // streamed reply, the active-file context, and that the key never
+  // reaches the browser. Needs the router up plus .env.local.
+  "chat.cjs",
   // The babel language auto-fix: a clean-store Portuguese document hits
   // "Unknown option 'portuguese'", the editor finds the babel-* tlpkg that
   // ships the .ldf, installs it, restarts the engine, and recompiles. Pulls

@@ -130,6 +130,10 @@ type Status =
   | { kind: "done"; ms: number }
   | { kind: "error"; message: string };
 
+// One message in the chat drawer's conversation (the system context is
+// built per request and never stored here).
+type ChatMessage = { role: "user" | "assistant"; content: string };
+
 // --- workspace layout ----------------------------------------------------
 // The panes are user-arrangeable: drag the files panel's right edge and
 // the log drawer's top edge to resize them, drag the handle between the
@@ -253,6 +257,14 @@ export default function EditorPage() {
   const [log, setLog] = useState("");
   const [liveLog, setLiveLog] = useState("");
   const [showLog, setShowLog] = useState(false);
+  // Which pane the bottom drawer shows: the build log or the chat.
+  const [bottomTab, setBottomTab] = useState<"log" | "chat">("log");
+  // The chat conversation (in-memory; it lives with this page's session,
+  // like the log — it is not part of the project).
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   // Decoded synctex data for the current PDF (null = no navigation yet).
   const [syncEntries, setSyncEntries] = useState<SyncEntry[] | null>(null);
@@ -353,6 +365,12 @@ export default function EditorPage() {
   // scrolling back to the bottom resumes following.
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logFollowRef = useRef(true);
+  // The chat drawer's scroll container and sticky-to-bottom flag (same
+  // behavior as the log: follows until the user scrolls up).
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const chatFollowRef = useRef(true);
+  // In-flight chat stream; Stop (and unmount) abort it.
+  const chatAbortRef = useRef<AbortController | null>(null);
   // uploadFiles is redefined every render; the window-level drop handler
   // (attached once) calls it through this ref.
   const uploadFilesRef = useRef<(list: File[], dropped?: DroppedTree) => void>(
@@ -472,6 +490,158 @@ export default function EditorPage() {
     const el = logScrollRef.current;
     if (el && logFollowRef.current) el.scrollTop = el.scrollHeight;
   }, [showLog, liveLog, log]);
+
+  // --- chat (bottom drawer, proxied through /api/chat — the router's key
+  //     never reaches the browser) ----------------------------------------
+  const handleChatScroll = useCallback(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    chatFollowRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  }, []);
+
+  // Follow the streaming reply until the user scrolls up to read.
+  useEffect(() => {
+    if (!showLog || bottomTab !== "chat") return;
+    const el = chatScrollRef.current;
+    if (el && chatFollowRef.current) el.scrollTop = el.scrollHeight;
+  }, [showLog, bottomTab, chatMessages, chatError]);
+
+  // A stream that outlives the page (unmount) is aborted.
+  useEffect(
+    () => () => {
+      chatAbortRef.current?.abort();
+    },
+    [],
+  );
+
+  const stopChat = () => {
+    chatAbortRef.current?.abort();
+  };
+
+  const clearChat = () => {
+    chatAbortRef.current?.abort();
+    setChatMessages([]);
+    setChatError(null);
+  };
+
+  const sendChat = async () => {
+    const text = chatInput.trim();
+    if (!text || chatBusy) return;
+    // The model answers about the file the user is actually looking at.
+    // Binary files can't be inlined; the name is enough for the model to
+    // ask about.
+    const active =
+      activePath && Object.hasOwn(files, activePath) ? activePath : null;
+    const systemContent = active
+      ? `You are a helpful LaTeX assistant inside HomeHub, a browser-based TeX Live editor (XeLaTeX, TeX Live 2026). The user is editing "${active}" in the editor right now:\n\n<file path="${active}">\n${
+          typeof files[active] === "string"
+            ? files[active].slice(0, 24_000)
+            : "(binary file)"
+        }\n</file>\n\nAnswer concisely, in the user's language, and use \`\`\`tex code fences for code.`
+      : "You are a helpful LaTeX assistant inside HomeHub, a browser-based TeX Live editor (XeLaTeX, TeX Live 2026). Answer concisely, in the user's language, and use ```tex code fences for code.";
+    setChatError(null);
+    setChatInput("");
+    setChatBusy(true);
+    chatFollowRef.current = true;
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+    setChatMessages((prev) => [
+      ...prev,
+      { role: "user", content: text },
+      { role: "assistant", content: "" },
+    ]);
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          messages: [
+            { role: "system", content: systemContent },
+            ...chatMessages,
+            { role: "user", content: text },
+          ],
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        let detail = "";
+        try {
+          detail = String((await res.json())?.error ?? "");
+        } catch {
+          detail = `HTTP ${res.status}`;
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        // The upstream is SSE: "data: {…}\n" lines, "\n\n" between
+        // events, and a final "data: [DONE]".
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).replace(/\r$/, "").trim();
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          let delta = "";
+          try {
+            const d = (
+              JSON.parse(payload) as {
+                choices?: { delta?: { content?: unknown } }[];
+              }
+            ).choices?.[0]?.delta?.content;
+            if (typeof d === "string") delta = d;
+          } catch {
+            // A partial or malformed line is skipped; the stream ends
+            // with [DONE] regardless.
+          }
+          if (delta) {
+            setChatMessages((prev) => {
+              const next = prev.slice();
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              next[next.length - 1] = {
+                ...last,
+                content: last.content + delta,
+              };
+              return next;
+            });
+          }
+        }
+      }
+      // A stream that ended with an empty assistant message means the
+      // model produced nothing — say so instead of a blank bubble.
+      setChatMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.role === "assistant" && last.content === "") {
+          return prev.slice(0, -1).concat({
+            role: "assistant",
+            content: "(no response from the model)",
+          });
+        }
+        return prev;
+      });
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        setChatError((err as Error).message || "chat request failed");
+      }
+      // Drop the empty assistant stub so the transcript stays clean.
+      setChatMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.role === "assistant" && last.content === "")
+          return prev.slice(0, -1);
+        return prev;
+      });
+    } finally {
+      chatAbortRef.current = null;
+      setChatBusy(false);
+    }
+  };
 
   // --- load the active project from OPFS (client-only; defaults render
   //     first, as SSR did, so hydration never mismatches) -----------------
@@ -2081,10 +2251,42 @@ export default function EditorPage() {
             <IconAuto className="h-4 w-4" />
           </button>
           <button
-            onClick={() => setShowLog((v) => !v)}
-            className="rounded border border-stone/40 px-3 py-1.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
+            title="Toggle the log drawer"
+            onClick={() => {
+              if (!showLog || bottomTab !== "log") {
+                setBottomTab("log");
+                setShowLog(true);
+              } else {
+                setShowLog(false);
+              }
+            }}
+            className={
+              "rounded border border-stone/40 px-3 py-1.5 text-xs transition-colors hover:bg-peach hover:text-ink " +
+              (showLog && bottomTab === "log"
+                ? "bg-peach text-ink"
+                : "text-stone")
+            }
           >
-            {showLog ? "Hide log" : "View log"}
+            {showLog && bottomTab === "log" ? "Hide log" : "View log"}
+          </button>
+          <button
+            title="Toggle the chat drawer"
+            onClick={() => {
+              if (!showLog || bottomTab !== "chat") {
+                setBottomTab("chat");
+                setShowLog(true);
+              } else {
+                setShowLog(false);
+              }
+            }}
+            className={
+              "rounded border border-stone/40 px-3 py-1.5 text-xs transition-colors hover:bg-peach hover:text-ink " +
+              (showLog && bottomTab === "chat"
+                ? "bg-peach text-ink"
+                : "text-stone")
+            }
+          >
+            {showLog && bottomTab === "chat" ? "Hide chat" : "Chat"}
           </button>
         </div>
       </header>
@@ -2160,16 +2362,138 @@ export default function EditorPage() {
             title="Drag to resize the log"
             className="absolute inset-x-0 -top-1 z-10 h-2 cursor-row-resize"
           />
-          <div
-            ref={logScrollRef}
-            onScroll={handleLogScroll}
-            className="h-full overflow-auto p-3"
-          >
-            <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-ink">
-              {(status.kind === "compiling" || status.kind === "loading"
-                ? liveLog
-                : log) || "(no log output yet)"}
-            </pre>
+          <div className="flex h-full flex-col">
+            <div className="flex shrink-0 items-center gap-1 border-b border-ink/10 px-2 pt-1">
+              {(
+                [
+                  ["log", "Log"],
+                  ["chat", "Chat"],
+                ] as const
+              ).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  data-bottom-tab={tab}
+                  onClick={() => setBottomTab(tab)}
+                  className={
+                    "rounded-t border-b-2 px-3 py-1 text-xs font-medium " +
+                    (bottomTab === tab
+                      ? "border-ink bg-white/60 text-ink"
+                      : "border-transparent text-stone hover:bg-peach/60 hover:text-ink")
+                  }
+                >
+                  {label}
+                </button>
+              ))}
+              {bottomTab === "chat" && (
+                <button
+                  data-chat-clear
+                  title="Clear the conversation"
+                  onClick={clearChat}
+                  className="ml-auto rounded px-2 py-0.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            {bottomTab === "log" ? (
+              <div
+                ref={logScrollRef}
+                onScroll={handleLogScroll}
+                className="min-h-0 flex-1 overflow-auto p-3"
+              >
+                <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-ink">
+                  {(status.kind === "compiling" || status.kind === "loading"
+                    ? liveLog
+                    : log) || "(no log output yet)"}
+                </pre>
+              </div>
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div
+                  ref={chatScrollRef}
+                  onScroll={handleChatScroll}
+                  className="min-h-0 flex-1 space-y-2 overflow-auto p-3"
+                >
+                  {chatMessages.length === 0 && !chatError && (
+                    <p className="text-xs text-stone">
+                      Ask about the document you are editing — the model can
+                      see the active file.
+                    </p>
+                  )}
+                  {chatMessages.map((m, i) => (
+                    <div
+                      key={i}
+                      data-chat-role={m.role}
+                      className={
+                        "rounded border px-2 py-1.5 " +
+                        (m.role === "user"
+                          ? "border-mint/60 bg-mint/30"
+                          : "border-stone/30 bg-white/70")
+                      }
+                    >
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-stone">
+                        {m.role === "user" ? "You" : "Assistant"}
+                      </div>
+                      <div className="whitespace-pre-wrap text-xs leading-relaxed text-ink">
+                        {m.content ||
+                          (i === chatMessages.length - 1 && chatBusy
+                            ? "…"
+                            : "")}
+                      </div>
+                    </div>
+                  ))}
+                  {chatError && (
+                    <div
+                      data-chat-error
+                      className="whitespace-pre-wrap rounded border border-red-300 bg-red-50 px-2 py-1.5 text-xs text-red-700"
+                    >
+                      {chatError}
+                    </div>
+                  )}
+                </div>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    sendChat();
+                  }}
+                  className="flex shrink-0 items-end gap-2 border-t border-ink/10 p-2"
+                >
+                  <textarea
+                    data-chat-input
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        sendChat();
+                      }
+                    }}
+                    rows={1}
+                    placeholder="Ask the assistant… (Enter to send, Shift+Enter for a new line)"
+                    className="max-h-24 min-w-0 flex-1 resize-y rounded border border-stone/40 bg-white px-2 py-1.5 text-xs text-ink outline-none focus:border-ink"
+                  />
+                  {chatBusy ? (
+                    <button
+                      type="button"
+                      data-chat-stop
+                      onClick={stopChat}
+                      className="rounded border border-stone/40 px-3 py-1.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
+                    >
+                      Stop
+                    </button>
+                  ) : (
+                    <button
+                      type="submit"
+                      data-chat-send
+                      disabled={!chatInput.trim()}
+                      className="rounded bg-ink px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-80 disabled:opacity-40 disabled:hover:opacity-40"
+                    >
+                      Send
+                    </button>
+                  )}
+                </form>
+              </div>
+            )}
           </div>
         </div>
       )}
