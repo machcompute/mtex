@@ -68,7 +68,9 @@ class BusytexBiber {
         FS.chdir(this.work_dir);
         for (const { path, contents } of files) {
             const rel = path.replace(/^\/+/, '');
-            const dir = rel.slice(0, rel.lastIndexOf('/'));
+            // Root-level files have no directory component (lastIndexOf is
+            // -1, and slice(0, -1) would "find" a directory).
+            const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
             if (dir !== '')
                 FS.mkdirTree(this.work_dir + '/' + dir);
             FS.writeFile(this.work_dir + '/' + rel, contents);

@@ -35,7 +35,7 @@ import {
 } from "@/components/icons";
 import GitHubModal, { type PullRequest, type PushRequest } from "@/components/github-modal";
 import PackagesModal from "@/components/packages-modal";
-import { BusyTexCompiler } from "@/lib/busytex";
+import { BusyTexCompiler, contentHash } from "@/lib/busytex";
 import {
   ensureDefaults,
   installWithDependencies,
@@ -49,7 +49,12 @@ import {
   decodeText,
   deleteProject,
   listProjects,
+  clearBuildCache,
+  loadBuildCache,
+  loadBuildState,
   loadProject,
+  saveBuildCache,
+  saveBuildState,
   saveProject,
   savePreview,
   type FileData,
@@ -879,6 +884,18 @@ export default function EditorPage() {
 
   // --- compile ----------------------------------------------------------
 
+  // Drop the worker AND the build cache. A worker is only dropped when
+  // the CTAN package store changed (an install/remove) — that changes
+  // what "same inputs" produces, so every cached output is stale (the
+  // unmount dispose does not clear the cache: the store is intact when
+  // the editor closes). The build STATE (aux/bcf/bbl) is kept — it is
+  // the document's own content, not a store-dependent output.
+  const disposeCompiler = () => {
+    compilerRef.current?.dispose();
+    const id = persistStateRef.current.activeProjectId;
+    if (id) void clearBuildCache(id).catch(() => {});
+  };
+
   const compile = useCallback(async () => {
     const compiler = compilerRef.current;
     if (!compiler) return;
@@ -907,11 +924,54 @@ export default function EditorPage() {
     setStatus({ kind: "compiling", line: "preparing…" });
     const started = performance.now();
     try {
+      // Incremental builds, part A — the build cache (OPFS,
+      // artifacts/<id>/build/cache/, see opfs.ts): the inputs (every file
+      // plus the main path, sha256'd by contentHash) hash to a previous
+      // successful build's output, so the engine is never touched. A
+      // package-store change clears the cache (disposeCompiler) because it
+      // changes what "same inputs" produces.
+      if (projectId) {
+        const hash = await contentHash({ ...files, "\u0000main": mainPath });
+        const cached = await loadBuildCache(projectId, hash).catch(() => null);
+        if (cached) {
+          setPdf(cached.pdf);
+          setLog(cached.log);
+          setSyncEntries(
+            cached.synctex
+              ? await decodeSynctex(cached.synctex, Object.keys(files), mainPath).catch(
+                  () => null,
+                )
+              : null,
+          );
+          setStatus({ kind: "done", ms: Math.round(performance.now() - started) });
+          return;
+        }
+      }
       await compiler.init();
       if (projectId !== persistStateRef.current.activeProjectId) return;
+      // Incremental builds, part B — seed this build with the last
+      // successful build's state (opfs.ts): the .aux/.bcf/.bbl ride in as
+      // ordinary project files (the pipeline writes them before its first
+      // pass, so labels and citations resolve in fewer passes), and the
+      // .bib hashes tell the pipeline whether the bibliography step can be
+      // skipped (biber is a separate WASM module).
+      let compileFiles: Record<string, string | Uint8Array> = files;
+      let bibHashes: Record<string, string> | null = null;
+      if (projectId) {
+        const state = await loadBuildState(projectId, mainPath).catch(() => null);
+        if (state) {
+          const base = mainPath.replace(/\.tex$/i, "");
+          const seed: Record<string, string | Uint8Array> = {};
+          if (state.aux && state.aux.byteLength > 0) seed[`${base}.aux`] = state.aux;
+          if (state.bcf && state.bcf.byteLength > 0) seed[`${base}.bcf`] = state.bcf;
+          if (state.bbl && state.bbl.byteLength > 0) seed[`${base}.bbl`] = state.bbl;
+          if (Object.keys(seed).length > 0) compileFiles = { ...files, ...seed };
+          bibHashes = state.bibHashes;
+        }
+      }
       // All files go to the worker (text as strings, binary as bytes);
       // the pipeline runs bibtex8 itself when any of them is a .bib.
-      const result = await compiler.compile(files, mainPath);
+      const result = await compiler.compile(compileFiles, mainPath, bibHashes);
       // An empty PDF is a failure (a zero-length Uint8Array is truthy).
       if (result.pdf && result.pdf.byteLength > 0) {
         setPdf(result.pdf);
@@ -985,6 +1045,32 @@ export default function EditorPage() {
       } else {
         setSyncEntries(null);
       }
+      // Incremental builds — persist this build for the next one. The
+      // cache entry (part A) lets an unchanged recompile skip the engine;
+      // the build state (part B) lets the pipeline seed the next pass and
+      // skip the bibliography step. Both are fire-and-forget: persisting
+      // is best-effort and must never change the result the reader saw.
+      // A failed build persists nothing (buildState is null on failure —
+      // a half-written state must not seed the next build).
+      if (projectId && result.pdf && result.pdf.byteLength > 0) {
+        const pdf = result.pdf;
+        const hash = await contentHash({ ...files, "\u0000main": mainPath });
+        void (async () => {
+          try {
+            await saveBuildCache(projectId, hash, {
+              pdf: Uint8Array.from(pdf),
+              log: result.log,
+              synctex: result.synctex ? Uint8Array.from(result.synctex) : null,
+            });
+          } catch {
+            // best effort
+          }
+        })();
+        if (result.buildState) {
+          const bs = result.buildState;
+          void saveBuildState(projectId, mainPath, bs).catch(() => {});
+        }
+      }
     } catch (err) {
       setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -993,8 +1079,9 @@ export default function EditorPage() {
         restartPendingRef.current = false;
         // A package changed mid-compile (see restartCompiler): drop the
         // worker so the next compile restarts it with the new package
-        // list and a fresh miss cache.
-        compilerRef.current?.dispose();
+        // list and a fresh miss cache (and clear the build cache — see
+        // disposeCompiler).
+        disposeCompiler();
       }
       if (recompileQueuedRef.current) {
         recompileQueuedRef.current = false;
@@ -1019,7 +1106,7 @@ export default function EditorPage() {
     if (busyRef.current) {
       restartPendingRef.current = true;
     } else {
-      compilerRef.current?.dispose();
+      disposeCompiler();
     }
   };
 
@@ -1278,6 +1365,7 @@ export default function EditorPage() {
     return () => {
       defaultsProgressRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const uploadFiles = (list: File[], dropped?: DroppedTree) => {

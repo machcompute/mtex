@@ -1,7 +1,7 @@
 // Vendored from the Texlyre busytex build of TeX Live 2026
 // (github.com/TeXlyre/texlyre-busytex-build, release
 // build_wasm_46ebb6216a5c1fe63dd1dc885831d1a8cef2dc86_31802832436_1 — the
-// same pinned release as the WASM assets in /api/texlive/), with six
+// same pinned release as the WASM assets in /api/texlive/), with seven
 // changes:
 //
 // remote_packages — the data-package resolver takes an optional list of
@@ -55,6 +55,18 @@
 // concatenates even an absolute second argument — PATH.normalize(l + '/' +
 // r) — so writing them would also have landed under the project dir.)
 //
+// incremental builds — the compile payload may carry a previous
+// successful build's state (see the incremental-build block in
+// compile()): the .aux/.bcf/.bbl, sent as ordinary project files, seed
+// this build's first pass (labels and citations resolve in fewer
+// passes), and bib_hashes (the sha256 of every .bib in effect then)
+// tells it whether the bibliography inputs changed. When they did not,
+// the old .bbl is still valid and the bibliography step (biber is a
+// separate WASM module) is skipped; a skipped step leaves a "(skipped)"
+// entry in logs so the page's log shows why the step did not run. The
+// result carries build_state back (the fresh .aux/.bcf/.bbl plus the
+// .bib hashes) for the page to persist for the next compile.
+//
 // Bump SCRIPT_VERSION in busytex_worker.js whenever this file changes.
 //
 // The upstream comment block below is kept as-is: it records engine log
@@ -86,6 +98,20 @@ const tex_base = p => {
     const i = p.toLowerCase().lastIndexOf('.tex');
     return i >= 0 ? p.slice(0, i) : p;
 };
+
+// (HomeHub change) sha256 hex of a file's contents (text or bytes) — the
+// incremental-build .bib comparison (see the header). crypto.subtle is
+// available in the worker.
+async function sha256_hex(contents) {
+    const bytes = typeof contents == 'string' ? new TextEncoder().encode(contents) : new Uint8Array(contents);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// (HomeHub change) exact byte equality for the incremental-build state
+// comparison (the .bcf/.aux are binary-safe — they are compared, never
+// parsed).
+const bytes_equal = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 
 class BusytexDataPackageResolver {
     constructor(data_packages_js, texmf_system = [], texmf_local = [], remap = {
@@ -662,7 +688,7 @@ class BusytexPipeline {
         Module.kpse_remote_register_misses(keys);
     }
 
-    async compile(files, main_tex_path, bibtex, biber = null, makeindex = null, rerun = null, verbose, driver, data_packages_js = [], remote_endpoint = '', shell_escape = false) {
+    async compile(files, main_tex_path, bibtex, biber = null, makeindex = null, rerun = null, verbose, driver, data_packages_js = [], remote_endpoint = '', shell_escape = false, bib_hashes = null) {
         if (!this.supported_drivers.includes(driver))
             throw new Error(`Driver [${driver}] is not supported, only [${this.supported_drivers}] are supported`);
         this.print(`New compilation started: [${main_tex_path}]`);
@@ -817,6 +843,7 @@ class BusytexPipeline {
 
         const [xdv_path, pdf_path, log_path, aux_path, blg_path, bbl_path, idx_path, ind_path, ilg_path] =
             ['.xdv', '.pdf', '.log', '.aux', '.blg', '.bbl', '.idx', '.ind', '.ilg'].map(ext => tex_base(tex_path) + ext);
+        const bcf_path = tex_base(tex_path) + '.bcf';
 
         const verbose_args_for = key => (this.verbose_args[verbose] || this.verbose_args[BusytexPipeline.VerboseSilent])[key];
         const shell_escape_args = shell_escape ? ['--shell-escape'] : ['--no-shell-escape'];
@@ -873,16 +900,80 @@ class BusytexPipeline {
         const run = (cmd, error_messages) =>
             this._run_cmd(Module, FS, cmd, error_messages, verbose, log_path, blg_path, aux_path, bbl_path, mem_header, logs);
 
+        // (HomeHub change) incremental builds. The page persists the last
+        // successful build's .aux/.bcf/.bbl (artifacts/<id>/build/, see
+        // src/lib/opfs.ts) and sends them back in the payload as ordinary
+        // project files, plus bib_hashes — the sha256 of every .bib in
+        // effect then. The project dir is remounted fresh for every
+        // compile, so without this every build starts cold: the first
+        // pass writes an empty .aux, and biber (a separate WASM module)
+        // runs again even when nothing changed. The pre-state captured
+        // here is what the payload brought in; an empty file is the same
+        // as no file (TeX treats both as "no state yet").
+        const read_state = (p) => {
+            if (!FS.analyzePath(p).exists) return null;
+            const bytes = FS.readFile(p, { encoding: 'binary' });
+            return bytes.length ? bytes : null;
+        };
+        const pre_aux = read_state(aux_path);
+        const pre_bcf = read_state(bcf_path);
+        const pre_bbl = read_state(bbl_path);
+
         let exit_code = 0;
         let last_log = '';
 
         ({ exit_code, log: last_log } = run(initial, this.error_messages_fatal));
 
         if (exit_code == 0 && bibtex) {
-            if (bib_backend == 'biber' && this.biber != null)
-                exit_code = await this._run_biber(FS, tex_path, files, verbose_args_for('biber'), logs);
-            else
+            // (HomeHub change) the bibliography step can be skipped when
+            // the bibliography inputs are unchanged: the .bcf (biber) or
+            // .aux (bibtex8) TeX just wrote equals the one from the last
+            // build, and every .bib is byte-identical to it (the hash
+            // check catches a data-source edit that leaves the control
+            // file alone — a changed entry changes the .bbl even when
+            // the cited keys and their context do not). The pre-supplied
+            // .bbl was generated from exactly those inputs, so it is
+            // still valid.
+            const project_bibs = files.filter(f => f.path.endsWith('.bib') && f.contents != null && !f.path.startsWith('/'));
+            let bibs_unchanged = false;
+            if (bib_hashes != null) {
+                bibs_unchanged = project_bibs.length === Object.keys(bib_hashes).length;
+                for (const f of project_bibs) {
+                    if (!bibs_unchanged) break;
+                    if ((await sha256_hex(f.contents)) !== bib_hashes[f.path])
+                        bibs_unchanged = false;
+                }
+            }
+            const fresh_bcf = read_state(bcf_path);
+            const fresh_aux = read_state(aux_path);
+
+            if (bib_backend == 'biber' && this.biber != null) {
+                if (pre_bcf != null && fresh_bcf == null) {
+                    // The document no longer produces a .bcf (biblatex
+                    // removed): the pre-supplied control file and .bbl
+                    // are stale — drop them, or biber would run on the
+                    // old .bcf and ship a stale bibliography.
+                    this.remove(FS, bcf_path);
+                    this.remove(FS, bbl_path);
+                    this.print('$ # no .bcf produced, dropping stale bibliography state');
+                }
+                if (pre_bcf != null && pre_bbl != null && fresh_bcf != null && bytes_equal(pre_bcf, fresh_bcf) && bibs_unchanged) {
+                    this.print('$ # bibliography unchanged, skipping biber');
+                    logs.push({ cmd: 'biber ' + bcf_path + ' (skipped)', texmflog: '', missfontlog: '', log: 'bibliography inputs unchanged since the last build, reusing the previous .bbl', aux: '', stdout: '', stderr: '', exit_code: 0 });
+                } else {
+                    // The pre-supplied .bbl (if any) is regenerated by
+                    // biber, or the build fails loudly — a stale .bbl
+                    // must not quietly survive a failed run.
+                    this.remove(FS, bbl_path);
+                    exit_code = await this._run_biber(FS, tex_path, files, verbose_args_for('biber'), logs);
+                }
+            } else if (pre_aux != null && pre_bbl != null && fresh_aux != null && bytes_equal(pre_aux, fresh_aux) && bibs_unchanged) {
+                this.print('$ # bibliography unchanged, skipping bibtex8');
+                logs.push({ cmd: 'bibtex8 ' + aux_path + ' (skipped)', texmflog: '', missfontlog: '', log: 'bibliography inputs unchanged since the last build, reusing the previous .bbl', aux: '', stdout: '', stderr: '', exit_code: 0 });
+            } else {
+                this.remove(FS, bbl_path);
                 ({ exit_code } = run(bibtex8_cmd, this.error_messages_fatal));
+            }
 
             if (exit_code == 0 && this.read_all_text(FS, bbl_path).trim() == '') {
                 this.print('$ # bibtex found no citation commands, skipping extra passes');
@@ -945,9 +1036,22 @@ class BusytexPipeline {
         const synctex = exit_code == 0 ? this.read_all_bytes(FS, tex_base(tex_path) + '.synctex.gz') : null;
         const logcat = logs.map(({ cmd, texmflog, missfontlog, log, exit_code, stdout, stderr }) => ([`$ ${cmd}`, `EXITCODE: ${exit_code}`, '', 'TEXMFLOG:', texmflog, '==', 'MISSFONTLOG:', missfontlog, '==', 'LOG:', log, '==', 'STDOUT:', stdout, '==', 'STDERR:', stderr, '======'].join('\n'))).join('\n\n');
 
+        // (HomeHub change) the state for the NEXT compile (see the
+        // incremental-build block above): the page persists it in
+        // artifacts/<id>/build/. Only successful builds set it — a failed
+        // build's half-written .aux/.bcf must not seed the next one.
+        let build_state = null;
+        if (exit_code == 0) {
+            const state_bib_hashes = {};
+            for (const f of files)
+                if (f.path.endsWith('.bib') && f.contents != null && !f.path.startsWith('/'))
+                    state_bib_hashes[f.path] = await sha256_hex(f.contents);
+            build_state = { aux: read_state(aux_path), bcf: read_state(bcf_path), bbl: read_state(bbl_path), bib_hashes: state_bib_hashes };
+        }
+
         this.Module = this.preload == false ? null : this.Module;
 
-        return { pdf: pdf, synctex: synctex, log: logcat, exit_code: exit_code, logs: logs };
+        return { pdf: pdf, synctex: synctex, log: logcat, exit_code: exit_code, logs: logs, build_state: build_state };
     }
 }
 

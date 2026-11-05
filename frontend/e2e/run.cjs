@@ -18,6 +18,12 @@ const suites = [
   // projects/<id>/) and checks the transparent migration plus the new layout
   // for fresh projects. No compiles — the engine is never needed.
   "artifacts.cjs",
+  // The incremental builds: the pipeline reuses the previous build's
+  // .aux/.bcf/.bbl and skips the bibliography step when its inputs are
+  // unchanged (both biber and bibtex8), and the page's OPFS build cache
+  // reuses an unchanged build's PDF without running the engine. Installs
+  // biblatex through the modal (the classic bibtex8 path needs no install).
+  "incremental.cjs",
   // The babel language auto-fix: a clean-store Portuguese document hits
   // "Unknown option 'portuguese'", the editor finds the babel-* tlpkg that
   // ships the .ldf, installs it, restarts the engine, and recompiles. Pulls

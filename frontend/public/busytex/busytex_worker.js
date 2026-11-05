@@ -21,6 +21,13 @@
 //    \usepackage for an installed package never triggers the "unresolved →
 //    enable ALL data packages" fallback (which would pull the ~540 MB
 //    recommended+extra trees the package does not need).
+// 5. bib_hashes: the sha256 of every project .bib from the last successful
+//    build, forwarded to the pipeline for incremental builds (its
+//    bib_hashes parameter) — with the .aux/.bcf/.bbl the payload carries
+//    as ordinary project files, it skips the bibliography step (biber is
+//    a separate WASM module) when the bibliography inputs are unchanged.
+//    The pipeline's build_state result field rides the postMessage through
+//    to the page as-is (the worker posts the result object untouched).
 //
 // The WASM assets come from the pinned release (served through
 // /api/texlive/). The biber loader is the unmodified release file,
@@ -35,7 +42,7 @@
 // browsers cache worker scripts aggressively and even a hard refresh may
 // not refetch them (the pipeline import is version-stamped with it). Keep
 // it in sync with WORKER_VERSION in src/lib/busytex.ts.
-const SCRIPT_VERSION = 25;
+const SCRIPT_VERSION = 26;
 
 function fail(prefix, e)
 {
@@ -87,7 +94,7 @@ onmessage = async (evt) =>
            preload, verbose, driver, remote_endpoint, shell_escape,
            load_shell_handler_script, read_project_files,
            write_texlive_remote_files, write_texlive_remote_misses,
-           remote_packages} = data || {};
+           remote_packages, bib_hashes} = data || {};
     try
     {
         if(busytex_wasm && busytex_js && preload_data_packages_js)
@@ -133,7 +140,7 @@ onmessage = async (evt) =>
             if(!self.pipeline)
                 fail("compile requested before the engine was initialized:", new Error("no init message processed"));
             else
-                postMessage(await self.pipeline.compile(files, main_tex_path, bibtex, biber, makeindex, rerun, verbose, driver, data_packages_js, remote_endpoint, shell_escape === true));
+                postMessage(await self.pipeline.compile(files, main_tex_path, bibtex, biber, makeindex, rerun, verbose, driver, data_packages_js, remote_endpoint, shell_escape === true, bib_hashes));
         }
         else
         {

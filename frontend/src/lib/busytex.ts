@@ -44,6 +44,7 @@
 //   events:  {ready}, {loaded}, {print: string}, {error: string}
 
 import { remotePackageNames, storeFiles } from "@/lib/ctan-store";
+import type { BuildState } from "@/lib/opfs";
 
 // Same origin: src/app/api/texlive/[name]/route.ts downloads the pinned
 // release assets on first request and serves them from a local disk cache.
@@ -68,13 +69,22 @@ const DRIVER = "xetex_bibtex8_dvipdfmx";
 // public/busytex/busytex_pipeline.js changes: browsers cache classic worker
 // scripts aggressively and may not refetch them even on a hard reload.
 // Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 25;
+const WORKER_VERSION = 26;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
   log: string;
   /** Synctex data (gzipped by xetex) for PDF<->source navigation. */
   synctex: Uint8Array | null;
+  /**
+   * The state for the NEXT compile (incremental builds): the build's
+   * .aux/.bcf/.bbl and the sha256 of every project .bib in effect. The
+   * page persists it (src/lib/opfs.ts — artifacts/<id>/build/) and sends
+   * it back with the next compile, which lets the pipeline skip the
+   * bibliography step when its inputs are unchanged. Null on failure —
+   * a half-written state must not seed the next build.
+   */
+  buildState: BuildState | null;
 };
 
 type WorkerMessage = {
@@ -85,6 +95,12 @@ type WorkerMessage = {
   pdf?: Uint8Array | null;
   log?: string | null;
   synctex?: Uint8Array | null;
+  build_state?: {
+    aux?: Uint8Array | null;
+    bcf?: Uint8Array | null;
+    bbl?: Uint8Array | null;
+    bib_hashes?: Record<string, string>;
+  } | null;
 };
 
 export class BusyTexCompiler {
@@ -236,10 +252,19 @@ export class BusyTexCompiler {
    * can be used in the document (e.g. \includegraphics). The pipeline
    * auto-runs bibtex8/biber when a .bib is present and makeindex on a
    * non-empty .idx. pdf is null when compilation failed.
+   *
+   * `files` may include the previous build's .aux/.bcf/.bbl (the page
+   * injects them from artifacts/<id>/build/ — see opfs.ts BuildState);
+   * they are ordinary project files to the pipeline, which uses them to
+   * skip the bibliography step. `bibHashes` is the sha256 of every .bib
+   * in effect at the last successful build (null = no previous state);
+   * with the control files unchanged the pipeline reuses the old .bbl
+   * instead of re-running biber.
    */
   async compile(
     files: Record<string, string | Uint8Array>,
     mainTexPath: string,
+    bibHashes: Record<string, string> | null = null,
   ): Promise<CompileResult> {
     // A disposed worker (after a load failure, a crash, or a package
     // store change) is recreated here — init() is a no-op while a worker
@@ -313,14 +338,26 @@ export class BusyTexCompiler {
         // remote endpoint for them.
         remote_endpoint: "",
         shell_escape: false,
+        // Incremental builds: the .bib hashes from the last successful
+        // build (null = first build, or no persisted state).
+        bib_hashes: bibHashes,
       });
       this.pending = (msg) => {
         // The pipeline reads the PDF back from MEMFS as a Uint8Array
         // (FS.readFile with encoding 'binary'); copy it out of the worker.
+        const st = msg.build_state;
         resolve({
           pdf: msg.pdf ? Uint8Array.from(msg.pdf) : null,
           log: msg.log ?? "",
           synctex: msg.synctex ? Uint8Array.from(msg.synctex) : null,
+          buildState: st
+            ? {
+                aux: st.aux ? Uint8Array.from(st.aux) : null,
+                bcf: st.bcf ? Uint8Array.from(st.bcf) : null,
+                bbl: st.bbl ? Uint8Array.from(st.bbl) : null,
+                bibHashes: st.bib_hashes ?? {},
+              }
+            : null,
         });
       };
     });
@@ -336,4 +373,38 @@ export class BusyTexCompiler {
     // must get the store files again.
     this.storeFilesSent = false;
   }
+}
+
+/**
+ * A content hash of a project's file map: sha256 over every (path,
+ * contents) pair, ordered by path so the result is stable. The page's
+ * build cache (incremental builds, part A) keys on it — a recompile whose
+ * inputs hash to a previous successful build reuses that build's PDF
+ * instead of running the engine at all. Paths and contents are
+ * NUL-delimited and length-prefixed so no (path, contents) pair can
+ * collide with another.
+ */
+export async function contentHash(
+  files: Record<string, string | Uint8Array>,
+): Promise<string> {
+  const enc = new TextEncoder();
+  const paths = Object.keys(files).sort();
+  const chunks: Uint8Array[] = [];
+  for (const p of paths) {
+    const c = files[p];
+    const bytes = typeof c === "string" ? enc.encode(c) : c;
+    chunks.push(enc.encode(`${p}\u0000${bytes.byteLength}\u0000`));
+    chunks.push(bytes);
+  }
+  const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+  const all = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    all.set(c, off);
+    off += c.byteLength;
+  }
+  const digest = await crypto.subtle.digest("SHA-256", all);
+  return Array.from(new Uint8Array(digest), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
 }

@@ -43,6 +43,23 @@ export type ProjectMeta = {
 
 export type ProjectSummary = ProjectMeta & { id: string };
 
+/**
+ * A successful build's state, persisted under artifacts/<id>/build/ for
+ * the NEXT compile (incremental builds, see src/lib/busytex.ts): the .aux
+ * and .bcf seed the next build's first pass (labels and citations resolve
+ * in fewer passes), the .bbl is reused when the bibliography inputs are
+ * unchanged (the pipeline then skips biber/bibtex8 — biber is a separate
+ * WASM module), and bibHashes records the sha256 of every project .bib in
+ * effect, so an edited data source is detected even when it leaves the
+ * .bcf/.aux alone.
+ */
+export type BuildState = {
+  aux: Uint8Array<ArrayBuffer> | null;
+  bcf: Uint8Array<ArrayBuffer> | null;
+  bbl: Uint8Array<ArrayBuffer> | null;
+  bibHashes: Record<string, string>;
+};
+
 const PROJECTS_DIR = "projects";
 /**
  * Per-project artifacts (settings, thumbnails, build data): the same <id>
@@ -57,6 +74,8 @@ const META_FILE = "project.json";
  * it never reaches the in-memory `files` map (file browser, compiler, counts).
  */
 export const PREVIEW_FILE = "preview.png";
+/** The per-project build state (see BuildState), under artifacts/<id>/build/. */
+const BUILD_DIR = "build";
 
 /** localStorage key of the project open in the last session. */
 export const ACTIVE_PROJECT_KEY = "homehub-active-project-v1";
@@ -416,6 +435,209 @@ export async function loadPreview(
   id: string,
 ): Promise<Uint8Array<ArrayBuffer> | null> {
   return readArtifact(id, PREVIEW_FILE);
+}
+
+/** The artifacts/<id>/build/ handle, or null when it doesn't exist. */
+async function buildDir(
+  id: string,
+): Promise<FileSystemDirectoryHandle | null> {
+  const aRoot = await artifactsRoot();
+  let aDir: FileSystemDirectoryHandle;
+  try {
+    aDir = await aRoot.getDirectoryHandle(id);
+  } catch {
+    return null;
+  }
+  try {
+    return await aDir.getDirectoryHandle(BUILD_DIR);
+  } catch {
+    return null;
+  }
+}
+
+async function readBuildFile(
+  dir: FileSystemDirectoryHandle,
+  name: string,
+): Promise<Uint8Array<ArrayBuffer> | null> {
+  try {
+    const fh = await dir.getFileHandle(name);
+    return new Uint8Array(await (await fh.getFile()).arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The project's persisted build state for `mainPath` (see BuildState), or
+ * null when the project has never built (or its main file is new or was
+ * renamed — the state is keyed by the main file's path).
+ */
+export async function loadBuildState(
+  id: string,
+  mainPath: string,
+): Promise<BuildState | null> {
+  const dir = await buildDir(id);
+  if (!dir) return null;
+  const base = mainPath.replace(/\.tex$/i, "");
+  const [aux, bcf, bbl, hashes] = await Promise.all([
+    readBuildFile(dir, `${base}.aux`),
+    readBuildFile(dir, `${base}.bcf`),
+    readBuildFile(dir, `${base}.bbl`),
+    readBuildFile(dir, "bib-hashes.json"),
+  ]);
+  if (!aux && !bcf && !bbl) return null;
+  let bibHashes: Record<string, string> = {};
+  if (hashes) {
+    const text = decodeText(hashes);
+    if (text) {
+      try {
+        bibHashes = JSON.parse(text) ?? {};
+      } catch {
+        bibHashes = {};
+      }
+    }
+  }
+  return { aux, bcf, bbl, bibHashes };
+}
+
+/**
+ * Persist a successful build's state for `mainPath`. An absent/empty
+ * entry DELETES its previous file: a document that dropped biblatex must
+ * not keep a stale .bcf/.bbl around for a future one to pick up.
+ */
+export async function saveBuildState(
+  id: string,
+  mainPath: string,
+  state: BuildState,
+): Promise<void> {
+  const dir = await (await artifactsDir(id)).getDirectoryHandle(BUILD_DIR, {
+    create: true,
+  });
+  const base = mainPath.replace(/\.tex$/i, "");
+  const put = async (
+    name: string,
+    data: Uint8Array<ArrayBuffer> | null,
+  ): Promise<void> => {
+    if (data && data.byteLength > 0) await writeFile(dir, name, data);
+    else await dir.removeEntry(name).catch(() => {});
+  };
+  await put(`${base}.aux`, state.aux);
+  await put(`${base}.bcf`, state.bcf);
+  await put(`${base}.bbl`, state.bbl);
+  await writeFile(dir, "bib-hashes.json", JSON.stringify(state.bibHashes));
+}
+
+/**
+ * The cached OUTPUT of a successful build (incremental builds, part A):
+ * the PDF the engine produced, its log, and the raw (gzipped) synctex
+ * map. Entries live in artifacts/<id>/build/cache/ keyed by the sha256
+ * of the project's inputs (contentHash, src/lib/busytex.ts) — a recompile
+ * whose inputs are unchanged reuses the cached output without running
+ * the engine at all. The cache outlives the page: like everything under
+ * artifacts/ it persists across reloads, and it is only cleared when the
+ * package store changes (which changes what "same inputs" means).
+ */
+export type BuildCacheEntry = {
+  pdf: Uint8Array<ArrayBuffer>;
+  log: string;
+  synctex: Uint8Array<ArrayBuffer> | null;
+};
+
+/** The build cache, under artifacts/<id>/build/cache/. */
+const CACHE_DIR = "cache";
+/** index.json: the cached hashes, newest first. */
+const CACHE_INDEX = "index.json";
+/** Cache the newest N outputs; older ones are evicted on the next save. */
+const CACHE_MAX = 8;
+
+async function cacheDir(
+  id: string,
+): Promise<FileSystemDirectoryHandle | null> {
+  const dir = await buildDir(id);
+  if (!dir) return null;
+  try {
+    return await dir.getDirectoryHandle(CACHE_DIR);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The cached output for a content hash (see BuildCacheEntry), or null on
+ * a miss (project never built, or its inputs changed since the last
+ * successful build).
+ */
+export async function loadBuildCache(
+  id: string,
+  hash: string,
+): Promise<BuildCacheEntry | null> {
+  const dir = await cacheDir(id);
+  if (!dir) return null;
+  const [pdf, logBytes, synctex] = await Promise.all([
+    readBuildFile(dir, `${hash}.pdf`),
+    readBuildFile(dir, `${hash}.log`),
+    readBuildFile(dir, `${hash}.synctex`),
+  ]);
+  if (!pdf || pdf.byteLength === 0) return null;
+  const log = logBytes ? (decodeTextLenient(logBytes) ?? "") : "";
+  return {
+    pdf,
+    log,
+    synctex: synctex && synctex.byteLength > 0 ? synctex : null,
+  };
+}
+
+/**
+ * Remember a successful build's output under its content hash. Keeps at
+ * most CACHE_MAX entries (index.json, newest first) and evicts the rest —
+ * an unbounded cache would grow one PDF per distinct edit.
+ */
+export async function saveBuildCache(
+  id: string,
+  hash: string,
+  entry: BuildCacheEntry,
+): Promise<void> {
+  const build = await (await artifactsDir(id)).getDirectoryHandle(BUILD_DIR, {
+    create: true,
+  });
+  const dir = await build.getDirectoryHandle(CACHE_DIR, { create: true });
+  await writeFile(dir, `${hash}.pdf`, entry.pdf);
+  await writeFile(dir, `${hash}.log`, entry.log);
+  if (entry.synctex && entry.synctex.byteLength > 0)
+    await writeFile(dir, `${hash}.synctex`, entry.synctex);
+  let index: string[] = [];
+  const idxBytes = await readBuildFile(dir, CACHE_INDEX);
+  if (idxBytes) {
+    const text = decodeText(idxBytes);
+    if (text) {
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed))
+          index = parsed.filter((h): h is string => typeof h === "string");
+      } catch {
+        // corrupt index: rebuild from this entry
+      }
+    }
+  }
+  index = [hash, ...index.filter((h) => h !== hash)];
+  for (const old of index.splice(CACHE_MAX)) {
+    await dir.removeEntry(`${old}.pdf`).catch(() => {});
+    await dir.removeEntry(`${old}.log`).catch(() => {});
+    await dir.removeEntry(`${old}.synctex`).catch(() => {});
+  }
+  await writeFile(dir, CACHE_INDEX, JSON.stringify(index));
+}
+
+/**
+ * Drop the build cache (the whole cache/ folder). Called when the CTAN
+ * package store changes: a different package set can give different
+ * output for identical project files, so every cached output is stale.
+ * The build STATE (aux/bcf/bbl) is untouched — it is content, not output.
+ */
+export async function clearBuildCache(id: string): Promise<void> {
+  const dir = await buildDir(id);
+  if (!dir) return;
+  await dir.removeEntry(CACHE_DIR, { recursive: true }).catch(() => {});
 }
 
 
