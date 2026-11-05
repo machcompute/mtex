@@ -39,6 +39,8 @@ type Props = {
   onSetMain: (path: string) => void;
   /** Read locally in the browser — files never leave the page. */
   onUpload: (files: File[]) => void;
+  /** Panel width in px (the workspace layout makes the edge draggable). */
+  width?: number;
 };
 
 /**
@@ -59,6 +61,7 @@ export default function FileBrowser({
   onDelete,
   onSetMain,
   onUpload,
+  width,
 }: Props) {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalName, setModalName] = useState("");
@@ -155,8 +158,10 @@ export default function FileBrowser({
 
   return (
     <aside
+      style={width !== undefined ? { width } : undefined}
       className={
-        "flex w-64 shrink-0 flex-col border-r border-ink/10 bg-white " +
+        "flex shrink-0 flex-col border-r border-ink/10 bg-white " +
+        (width === undefined ? "w-64 " : "") +
         (dragging > 0 ? "bg-mint/10" : "")
       }
       onDragEnter={(e) => {

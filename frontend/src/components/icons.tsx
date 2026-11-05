@@ -150,6 +150,17 @@ export function IconSync({ className }: P) {
   );
 }
 
+export function IconSwap({ className }: P) {
+  return (
+    <Svg className={className}>
+      <path d="M3 4.5h10" />
+      <path d="M10.5 2 13 4.5 10.5 7" />
+      <path d="M13 11.5H3" />
+      <path d="M5.5 9 3 11.5 5.5 14" />
+    </Svg>
+  );
+}
+
 export function IconAuto({ className }: P) {
   return (
     <Svg className={className}>

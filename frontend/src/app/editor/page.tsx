@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import Link from "next/link";
 import Editor, { type BeforeMount, type Monaco } from "@monaco-editor/react";
 import type * as monaco from "monaco-editor";
@@ -22,6 +29,7 @@ import {
   IconPlay,
   IconPlus,
   IconSpinner,
+  IconSwap,
   IconSync,
   IconTrash,
 } from "@/components/icons";
@@ -113,6 +121,80 @@ type Status =
   | { kind: "done"; ms: number }
   | { kind: "error"; message: string };
 
+// --- workspace layout ----------------------------------------------------
+// The panes are user-arrangeable: drag the files panel's right edge and
+// the log drawer's top edge to resize them, drag the handle between the
+// editor and PDF to re-split them, click the arrows on that handle to
+// swap the two panes. The arrangement persists in localStorage (like the
+// active project) and survives reloads.
+type WorkspaceLayout = {
+  filesW: number; // files panel width, px
+  split: number; // editor's share of the editor+PDF row, 0.2–0.8
+  editorFirst: boolean; // editor left of the PDF (false = swapped)
+  logH: number; // log drawer height, px
+};
+const WORKSPACE_KEY = "homehub-workspace-v1";
+const FILES_W = { min: 160, max: 480 };
+const SPLIT = { min: 0.2, max: 0.8 };
+const LOG_H = { min: 96, max: 480 };
+const DEFAULT_WORKSPACE: WorkspaceLayout = {
+  filesW: 256,
+  split: 0.5,
+  editorFirst: true,
+  logH: 224,
+};
+
+const clampN = (v: number, lo: number, hi: number) =>
+  Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : lo;
+
+function loadWorkspace(): WorkspaceLayout {
+  try {
+    const raw = localStorage.getItem(WORKSPACE_KEY);
+    if (!raw) return DEFAULT_WORKSPACE;
+    const p = JSON.parse(raw) as Partial<WorkspaceLayout>;
+    return {
+      filesW: clampN(Number(p.filesW), FILES_W.min, FILES_W.max),
+      split: clampN(Number(p.split), SPLIT.min, SPLIT.max),
+      editorFirst: typeof p.editorFirst === "boolean" ? p.editorFirst : true,
+      logH: clampN(Number(p.logH), LOG_H.min, LOG_H.max),
+    };
+  } catch {
+    return DEFAULT_WORKSPACE;
+  }
+}
+
+/**
+ * Track a pointer drag on a layout handle from the pointerdown. `onMove`
+ * gets the CUMULATIVE delta from the press point (callers combine it with
+ * the value captured at press time — never with the live state, or the
+ * delta would be re-applied on every move). While the drag is live the
+ * body's cursor and text selection are locked so the panes, not a text
+ * selection, follow the pointer.
+ */
+function startLayoutDrag(
+  e: ReactPointerEvent,
+  cursor: string,
+  onMove: (dx: number, dy: number) => void,
+) {
+  e.preventDefault();
+  const x0 = e.clientX;
+  const y0 = e.clientY;
+  const body = document.body;
+  const prevCursor = body.style.cursor;
+  const prevSelect = body.style.userSelect;
+  body.style.cursor = cursor;
+  body.style.userSelect = "none";
+  const move = (ev: PointerEvent) => onMove(ev.clientX - x0, ev.clientY - y0);
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    body.style.cursor = prevCursor;
+    body.style.userSelect = prevSelect;
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
 function mimeOf(name: string): string {
   const dot = name.lastIndexOf(".");
   const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
@@ -175,6 +257,14 @@ export default function EditorPage() {
   // auto-compile effect keys on it so a re-pull of the SAME project id
   // still re-triggers, while plain re-renders never do.
   const [projectVersion, setProjectVersion] = useState(0);
+  // The user's pane arrangement (drag edges to resize, swap the panes):
+  // the first render uses the defaults, as SSR did, so hydration never
+  // mismatches; the mount effect swaps in the saved layout.
+  const [workspace, setWorkspace] = useState<WorkspaceLayout>(DEFAULT_WORKSPACE);
+  // The saved layout has been applied; until then the persist effect must
+  // not write, or it would race the load and clobber the saved layout
+  // with the defaults.
+  const workspaceSavedRef = useRef(false);
 
   const compilerRef = useRef<BusyTexCompiler | null>(null);
   const busyRef = useRef(false);
@@ -242,6 +332,13 @@ export default function EditorPage() {
   // The PDF's scroll position before the latest compile; restored once the
   // new PDF renders (pdf.js renders async — the effect below polls).
   const pendingScrollRef = useRef<{ page: number; yTop: number } | null>(null);
+  // The editor+PDF split row: a split drag's dx is a fraction of its width.
+  const splitRef = useRef<HTMLDivElement | null>(null);
+  // The log drawer's scroll container, plus its sticky-to-bottom flag: the
+  // log follows the compile until the user scrolls up to read, and
+  // scrolling back to the bottom resumes following.
+  const logScrollRef = useRef<HTMLDivElement | null>(null);
+  const logFollowRef = useRef(true);
   // uploadFiles is redefined every render; the window-level drop handler
   // (attached once) calls it through this ref.
   const uploadFilesRef = useRef<(list: File[], dropped?: DroppedTree) => void>(
@@ -327,6 +424,40 @@ export default function EditorPage() {
     }
   };
 
+  // Persist the arrangement. Debounced: layout drags update state at
+  // pointer rate and each write would otherwise be a synchronous
+  // localStorage hit.
+  useEffect(() => {
+    if (!workspaceSavedRef.current) return;
+    const t = window.setTimeout(() => {
+      try {
+        localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspace));
+      } catch {
+        // storage can be unavailable (private mode); the layout still works
+      }
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [workspace]);
+
+  // Sticky-to-bottom log follow: while the user stays within 24 px of the
+  // tail, every new line keeps the tail in view; scrolling up pauses the
+  // follow until the user scrolls back to the bottom. A re-shown drawer
+  // starts at the tail.
+  const handleLogScroll = useCallback(() => {
+    const el = logScrollRef.current;
+    if (!el) return;
+    logFollowRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  }, []);
+
+  useEffect(() => {
+    if (!showLog) {
+      logFollowRef.current = true;
+      return;
+    }
+    const el = logScrollRef.current;
+    if (el && logFollowRef.current) el.scrollTop = el.scrollHeight;
+  }, [showLog, liveLog, log]);
+
   // --- load the active project from OPFS (client-only; defaults render
   //     first, as SSR did, so hydration never mismatches) -----------------
   useEffect(() => {
@@ -374,7 +505,14 @@ export default function EditorPage() {
           );
         }
       }
-      if (!cancelled) setLoaded(true);
+      if (!cancelled) {
+        // The saved workspace layout restores with the project (in the
+        // async continuation, like setLoaded above): the first render
+        // keeps the SSR defaults, so hydration never mismatches.
+        setWorkspace(loadWorkspace());
+        workspaceSavedRef.current = true;
+        setLoaded(true);
+      }
     })();
     return () => {
       cancelled = true;
@@ -1442,6 +1580,171 @@ export default function EditorPage() {
       ? Math.min(100, Math.round((status.progress!.loaded / status.progress!.total) * 100))
       : null;
 
+  // --- workspace panes ----------------------------------------------------
+  // The editor and PDF panes carry flex-grow ratios (zero basis), so the
+  // fixed-width divider is absorbed and the editor's share of the row is
+  // exactly `split`. The values travel WITH the panes, so a swap keeps
+  // each pane's size.
+  const editorPane = (
+    <div
+      style={{ flex: `${workspace.split} 1 0%` }}
+      className="flex min-w-0 flex-col bg-white"
+    >
+      <div className="flex h-9 shrink-0 items-end overflow-x-auto border-b border-ink/10 bg-cream">
+        {openPaths.map((p) => {
+          const active = p === activePath;
+          return (
+            <div
+              key={p}
+              data-tab={p}
+              data-active={active || undefined}
+              onClick={() => setActivePath(p)}
+              title={p}
+              className={
+                "group flex h-full max-w-52 shrink-0 cursor-pointer items-center gap-1.5 border-r border-t-2 border-r-ink/10 px-3 text-xs " +
+                (active
+                  ? "border-t-mint bg-white font-medium text-ink"
+                  : "border-t-transparent bg-transparent text-stone hover:bg-white/70 hover:text-ink")
+              }
+            >
+              <span className="shrink-0">
+                {fileIcon(p, typeof files[p] !== "string")}
+              </span>
+              <span className="truncate">{p}</span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeTab(p);
+                }}
+                title="Close tab"
+                className="shrink-0 rounded p-0.5 text-stone opacity-0 transition-opacity hover:bg-peach/60 hover:text-ink group-hover:opacity-100"
+              >
+                <IconClose className="h-3 w-3" />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      <div className="min-h-0 flex-1">
+        {activePath && activeSource !== null ? (
+          <Editor
+            height="100%"
+            path={activePath}
+            defaultLanguage="latex"
+            value={activeSource}
+            onChange={(value) => {
+              const path = activePath;
+              setFiles((f) => ({ ...f, [path]: value ?? "" }));
+              // Auto recompile (toggleable): after a short pause once
+              // you stop typing, only when the engine is ready.
+              if (autoRef.current && engineReadyRef.current) {
+                window.clearTimeout(autoTimerRef.current);
+                autoTimerRef.current = window.setTimeout(
+                  () => compileRef.current(),
+                  1200,
+                );
+              }
+            }}
+            onMount={(editor, m) => {
+              editorRef.current = editor;
+              monacoRef.current = m;
+              // Overleaf's recompile binding.
+              editor.addCommand(
+                m.KeyMod.CtrlCmd | m.KeyCode.Enter,
+                () => {
+                  compileRef.current();
+                },
+              );
+              editor.onDidScrollChange((e) => {
+                if (e.scrollTopChanged) handleEditorScroll();
+              });
+            }}
+            theme="homehub"
+            beforeMount={defineTheme}
+            options={{
+              fontSize: 14,
+              minimap: { enabled: false },
+              wordWrap: "on",
+              automaticLayout: true,
+              // Monaco 0.55.1's occurrences-highlighter schedules each
+              // highlight through an internal "delayer" whose completion
+              // promise nothing ever handles. A tab switch inside the
+              // ~100 ms highlight window cancels the pending request,
+              // and the cancellation rejects that promise with
+              // "Canceled" — an unhandled rejection Next's dev overlay
+              // reports as "Runtime Canceled". With the highlight off
+              // the promise is never created, so every cancel() is a
+              // no-op. (Monaco 0.57 rewrote the delayer; revisit on
+              // upgrade if we want the feature back.)
+              occurrencesHighlight: "off",
+            }}
+          />
+        ) : activePath ? (
+          <BinaryPreview
+            name={activePath}
+            data={files[activePath] as Uint8Array}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-stone">
+            No file selected — add one on the left.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const pdfPane = (
+    <div style={{ flex: `${1 - workspace.split} 1 0%` }} className="min-w-0">
+      <PdfViewer
+        ref={pdfRef}
+        data={pdf}
+        onPageClick={handlePageClick}
+        downloadName={
+          mainPath.toLowerCase().endsWith(".tex")
+            ? mainPath.slice(0, -4) + ".pdf"
+            : "output.pdf"
+        }
+        syncScroll={syncScroll}
+        onToggleSyncScroll={() => setSyncScroll((v) => !v)}
+        onViewportTop={handleViewportTop}
+      />
+    </div>
+  );
+
+  // Draggable divider between the panes; the arrows swap them.
+  const divider = (
+    <div
+      onPointerDown={(e) => {
+        const row = splitRef.current;
+        if (!row) return;
+        // Capture the press-time values: startLayoutDrag delivers
+        // cumulative deltas from the press point.
+        const base = workspace.split;
+        const dir = workspace.editorFirst ? 1 : -1;
+        const w = row.clientWidth;
+        startLayoutDrag(e, "col-resize", (dx) =>
+          setWorkspace((ws) => ({
+            ...ws,
+            split: clampN(base + (dir * dx) / w, SPLIT.min, SPLIT.max),
+          })),
+        );
+      }}
+      title="Drag to re-split — click the arrows to swap the panes"
+      className="relative z-10 w-1.5 shrink-0 cursor-col-resize bg-ink/10 transition-colors hover:bg-mint"
+    >
+      <button
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={() =>
+          setWorkspace((w) => ({ ...w, editorFirst: !w.editorFirst }))
+        }
+        title="Swap editor and PDF"
+        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded bg-white p-1 text-stone shadow-sm transition-colors hover:bg-mint hover:text-ink"
+      >
+        <IconSwap className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+
   return (
     <div className="relative flex h-screen flex-col bg-cream">
       {/* Top bar (Overleaf-style) */}
@@ -1640,146 +1943,87 @@ export default function EditorPage() {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <FileBrowser
-          files={entries}
-          activePath={activePath}
-          mainPath={mainPath}
-          onOpen={openPath}
-          onAdd={addFile}
-          onRename={renameFile}
-          onDelete={deleteFile}
-          onSetMain={setMainPath}
-          onUpload={uploadFiles}
-        />
-
-        {/* Editor pane: Overleaf-style tabs + editor (or binary preview) */}
-        <div className="flex min-w-0 flex-1 flex-col border-r border-ink/10 bg-white">
-          <div className="flex h-9 shrink-0 items-end overflow-x-auto border-b border-ink/10 bg-cream">
-            {openPaths.map((p) => {
-              const active = p === activePath;
-              return (
-                <div
-                  key={p}
-                  data-tab={p}
-                  data-active={active || undefined}
-                  onClick={() => setActivePath(p)}
-                  title={p}
-                  className={
-                    "group flex h-full max-w-52 shrink-0 cursor-pointer items-center gap-1.5 border-r border-t-2 border-r-ink/10 px-3 text-xs " +
-                    (active
-                      ? "border-t-mint bg-white font-medium text-ink"
-                      : "border-t-transparent bg-transparent text-stone hover:bg-white/70 hover:text-ink")
-                  }
-                >
-                  <span className="shrink-0">
-                    {fileIcon(p, typeof files[p] !== "string")}
-                  </span>
-                  <span className="truncate">{p}</span>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeTab(p);
-                    }}
-                    title="Close tab"
-                    className="shrink-0 rounded p-0.5 text-stone opacity-0 transition-opacity hover:bg-peach/60 hover:text-ink group-hover:opacity-100"
-                  >
-                    <IconClose className="h-3 w-3" />
-                  </button>
-                </div>
+        {/* Files panel: width from the workspace layout, right edge
+            draggable */}
+        <div
+          className="relative flex shrink-0"
+          style={{ width: workspace.filesW }}
+        >
+          <FileBrowser
+            files={entries}
+            activePath={activePath}
+            mainPath={mainPath}
+            onOpen={openPath}
+            onAdd={addFile}
+            onRename={renameFile}
+            onDelete={deleteFile}
+            onSetMain={setMainPath}
+            onUpload={uploadFiles}
+            width={workspace.filesW}
+          />
+          <div
+            onPointerDown={(e) => {
+              const base = workspace.filesW;
+              startLayoutDrag(e, "col-resize", (dx) =>
+                setWorkspace((w) => ({
+                  ...w,
+                  filesW: clampN(base + dx, FILES_W.min, FILES_W.max),
+                })),
               );
-            })}
-          </div>
-          <div className="min-h-0 flex-1">
-            {activePath && activeSource !== null ? (
-              <Editor
-                height="100%"
-                path={activePath}
-                defaultLanguage="latex"
-                value={activeSource}
-                onChange={(value) => {
-                  const path = activePath;
-                  setFiles((f) => ({ ...f, [path]: value ?? "" }));
-                  // Auto recompile (toggleable): after a short pause once
-                  // you stop typing, only when the engine is ready.
-                  if (autoRef.current && engineReadyRef.current) {
-                    window.clearTimeout(autoTimerRef.current);
-                    autoTimerRef.current = window.setTimeout(
-                      () => compileRef.current(),
-                      1200,
-                    );
-                  }
-                }}
-                onMount={(editor, m) => {
-                  editorRef.current = editor;
-                  monacoRef.current = m;
-                  // Overleaf's recompile binding.
-                  editor.addCommand(
-                    m.KeyMod.CtrlCmd | m.KeyCode.Enter,
-                    () => {
-                      compileRef.current();
-                    },
-                  );
-                  editor.onDidScrollChange((e) => {
-                    if (e.scrollTopChanged) handleEditorScroll();
-                  });
-                }}
-                theme="homehub"
-                beforeMount={defineTheme}
-                options={{
-                  fontSize: 14,
-                  minimap: { enabled: false },
-                  wordWrap: "on",
-                  automaticLayout: true,
-                  // Monaco 0.55.1's occurrences-highlighter schedules each
-                  // highlight through an internal "delayer" whose completion
-                  // promise nothing ever handles. A tab switch inside the
-                  // ~100 ms highlight window cancels the pending request,
-                  // and the cancellation rejects that promise with
-                  // "Canceled" — an unhandled rejection Next's dev overlay
-                  // reports as "Runtime Canceled". With the highlight off
-                  // the promise is never created, so every cancel() is a
-                  // no-op. (Monaco 0.57 rewrote the delayer; revisit on
-                  // upgrade if we want the feature back.)
-                  occurrencesHighlight: "off",
-                }}
-              />
-            ) : activePath ? (
-              <BinaryPreview
-                name={activePath}
-                data={files[activePath] as Uint8Array}
-              />
-            ) : (
-              <div className="flex h-full items-center justify-center text-sm text-stone">
-                No file selected — add one on the left.
-              </div>
-            )}
-          </div>
+            }}
+            title="Drag to resize the files panel"
+            className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize transition-colors hover:bg-mint"
+          />
         </div>
 
-        <div className="min-w-0 flex-1">
-          <PdfViewer
-            ref={pdfRef}
-            data={pdf}
-            onPageClick={handlePageClick}
-            downloadName={
-              mainPath.toLowerCase().endsWith(".tex")
-                ? mainPath.slice(0, -4) + ".pdf"
-                : "output.pdf"
-            }
-            syncScroll={syncScroll}
-            onToggleSyncScroll={() => setSyncScroll((v) => !v)}
-            onViewportTop={handleViewportTop}
-          />
+        {/* Editor + PDF: a draggable divider splits them, the arrows
+            swap the panes */}
+        <div ref={splitRef} className="flex min-w-0 flex-1">
+          {workspace.editorFirst ? (
+            <>
+              {editorPane}
+              {divider}
+              {pdfPane}
+            </>
+          ) : (
+            <>
+              {pdfPane}
+              {divider}
+              {editorPane}
+            </>
+          )}
         </div>
       </div>
 
       {showLog && (
-        <div className="max-h-56 shrink-0 overflow-auto border-t border-ink/10 bg-peach/50 p-3">
-          <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-ink">
-            {(status.kind === "compiling" || status.kind === "loading"
-              ? liveLog
-              : log) || "(no log output yet)"}
-          </pre>
+        <div
+          className="relative shrink-0 border-t border-ink/10 bg-peach/50"
+          style={{ height: workspace.logH }}
+        >
+          <div
+            onPointerDown={(e) => {
+              const base = workspace.logH;
+              startLayoutDrag(e, "row-resize", (_dx, dy) =>
+                setWorkspace((w) => ({
+                  ...w,
+                  logH: clampN(base - dy, LOG_H.min, LOG_H.max),
+                })),
+              );
+            }}
+            title="Drag to resize the log"
+            className="absolute inset-x-0 -top-1 z-10 h-2 cursor-row-resize"
+          />
+          <div
+            ref={logScrollRef}
+            onScroll={handleLogScroll}
+            className="h-full overflow-auto p-3"
+          >
+            <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-ink">
+              {(status.kind === "compiling" || status.kind === "loading"
+                ? liveLog
+                : log) || "(no log output yet)"}
+            </pre>
+          </div>
         </div>
       )}
 
