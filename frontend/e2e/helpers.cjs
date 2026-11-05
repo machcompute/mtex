@@ -17,9 +17,18 @@ const FIREFOX =
 const PNG_PATH = path.join(__dirname, "logo.png");
 
 class Runner {
-  constructor(name, browser = "chromium") {
+  /**
+   * @param {object} [opts]
+   * @param {boolean} [opts.autoDefaults=false] — visit the editor with the
+   *   first-run default package sweep ENABLED (no ?noDefaults=1). Every
+   *   suite opts out by default: the sweep pulls 17 packages from CTAN
+   *   (minutes, per fresh profile) and would break the clean-store
+   *   assertions. Only defaults.cjs opts in.
+   */
+  constructor(name, browser = "chromium", { autoDefaults = false } = {}) {
     this.name = name;
     this.browser = browser;
+    this.autoDefaults = autoDefaults;
     this.failures = 0;
     // Unique temp profile — the repo and /tmp are never touched, and a
     // previous crashed run can't leave state behind.
@@ -55,7 +64,12 @@ class Runner {
   }
 
   goto() {
-    return this.page.goto(APP_URL, { waitUntil: "load", timeout: 60000 });
+    // Suites that opted out of the first-run default package sweep (all of
+    // them except defaults.cjs) pass ?noDefaults=1 so a fresh profile's
+    // store stays clean — see the Runner constructor.
+    const url = new URL(APP_URL);
+    if (!this.autoDefaults) url.searchParams.set("noDefaults", "1");
+    return this.page.goto(url.toString(), { waitUntil: "load", timeout: 60000 });
   }
 
   // Wait until the app has settled after a load: the engine is ready AND
@@ -175,8 +189,8 @@ const ACTIVE_KEY = "homehub-active-project-v1";
 /**
  * Write a project straight into OPFS (bypassing the app) and make it the
  * active one. Call AFTER goto + waitReady so the app's load effect has
- * settled (and first-run defaults exist), then goto() again — the reload
- * picks the seeded project up via the active-project localStorage key.
+ * settled, then goto() again — the reload picks the seeded project up
+ * via the active-project localStorage key.
  *
  * files: { "rel/path": string | number[] } — strings are text files,
  * number[] are binary (e.g. Array.from(pngBytes)).

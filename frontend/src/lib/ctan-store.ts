@@ -222,7 +222,17 @@ type StoredPackage = {
   installedAt: string;
 };
 
-type Manifest = { v: 1; packages: Record<string, StoredPackage> };
+type Manifest = {
+  v: 1;
+  packages: Record<string, StoredPackage>;
+  /**
+   * The version of the default package set this store was seeded with
+   * (see DEFAULTS_VERSION). Absent until the first-run sweep ran, so an
+   * old store or a fresh one both get the defaults exactly once — and a
+   * default the user later removes stays removed.
+   */
+  defaultsVersion?: number;
+};
 
 function info(p: StoredPackage): PackageInfo {
   return {
@@ -242,7 +252,11 @@ async function readManifest(): Promise<Manifest> {
     const root = await storeRoot();
     const fh = await root.getFileHandle("manifest.json");
     const m = JSON.parse(await (await fh.getFile()).text()) as Partial<Manifest>;
-    return { v: 1, packages: m.packages ?? {} };
+    return {
+      v: 1,
+      packages: m.packages ?? {},
+      defaultsVersion: m.defaultsVersion,
+    };
   } catch {
     return { v: 1, packages: {} };
   }
@@ -316,6 +330,96 @@ export async function storeFiles(): Promise<
   }
   out.sort((a, b) => (a.path < b.path ? -1 : 1));
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// default package set (auto-installed on first run)
+// ---------------------------------------------------------------------------
+
+/**
+ * The curated set a recent document is likely to \usepackage, installed
+ * into a fresh store automatically so the first compile does not sit on
+ * an empty "Installed (0)". The base tree already covers geometry,
+ * hyperref, babel (all languages), amsmath, natbib, times.sty, … — this
+ * list is what most documents need beyond that. The font packs (times,
+ * zapfchan, symbol) are pslatex's font maps: the .sty lives in the base
+ * tree, the physical PFB glyphs come from these containers.
+ */
+export const DEFAULT_PACKAGES = [
+  "fontspec",
+  "xcolor",
+  "enumitem",
+  "booktabs",
+  "caption",
+  "mathtools",
+  "siunitx",
+  "pgfplots", // pulls in pgf (provides tikz), listings, …
+  "algorithm2e",
+  "biblatex",
+  "translations",
+  "titlesec",
+  "microtype",
+  "float",
+  "times",
+  "zapfchan",
+  "symbol",
+] as const;
+
+/**
+ * Bump when the curated set grows: a store seeded with an older version
+ * re-runs the sweep, and any default that is not in the manifest is
+ * (re)installed — including one the user removed since (the manifest
+ * does not record removals, so a curation bump deliberately re-seeds).
+ * At the CURRENT version, though, the marker is written once and the
+ * sweep is a no-op, so a removal always survives a plain reload.
+ */
+export const DEFAULTS_VERSION = 1;
+
+let defaultsPromise: Promise<string[]> | null = null;
+
+/**
+ * Install the curated default set into a store that does not have it
+ * yet (see DEFAULTS_VERSION). Resolves with the names actually
+ * installed (empty when everything is already present). Serialized on
+ * the store op chain, so it never races a modal install; on failure the
+ * marker is not written and the next call (or page load) retries.
+ */
+export function ensureDefaults(
+  onProgress?: (name: string, done: number, total: number) => void,
+): Promise<string[]> {
+  if (!defaultsPromise) {
+    defaultsPromise = opChain.then(() => doEnsureDefaults(onProgress));
+    opChain = defaultsPromise.catch(() => undefined);
+    defaultsPromise.catch(() => {
+      defaultsPromise = null; // failed → the next call retries
+    });
+  }
+  return defaultsPromise;
+}
+
+async function doEnsureDefaults(
+  onProgress?: (name: string, done: number, total: number) => void,
+): Promise<string[]> {
+  const manifest = await readManifest();
+  if ((manifest.defaultsVersion ?? 0) >= DEFAULTS_VERSION) return [];
+  const missing = DEFAULT_PACKAGES.filter((n) => !manifest.packages[n]);
+  const basic = await basicBasenameSet().catch(() => null);
+  const installed: string[] = [];
+  for (let i = 0; i < missing.length; i++) {
+    const name = missing[i];
+    onProgress?.(name, i, missing.length);
+    // doInstall directly: this task holds the chain slot, and the
+    // exported wrapper would queue behind it (deadlock).
+    await doInstall(name);
+    const deps: string[] = [];
+    const unresolved: string[] = [];
+    await resolveDeps(name, basic, deps, unresolved, 0);
+    installed.push(name);
+  }
+  const fresh = await readManifest();
+  fresh.defaultsVersion = DEFAULTS_VERSION;
+  await saveManifest(fresh);
+  return installed;
 }
 
 // ---------------------------------------------------------------------------

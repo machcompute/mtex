@@ -28,6 +28,7 @@ import {
 import GitHubModal, { type PullRequest, type PushRequest } from "@/components/github-modal";
 import PackagesModal from "@/components/packages-modal";
 import { BusyTexCompiler } from "@/lib/busytex";
+import { ensureDefaults } from "@/lib/ctan-store";
 import {
   ACTIVE_PROJECT_KEY,
   BINARY_EXT,
@@ -98,10 +99,11 @@ const IMAGE_EXT = new Set([
   "svg",
 ]);
 
-// The engine's emscripten loader reports data-asset downloads as
-// "Downloading data…" / "Downloading data… (loaded/total)" print lines.
-// The status slot renders them as a progress bar (total 0 = still unknown,
-// indeterminate) and they never reach the log drawer.
+// The status slot renders in-flight work as a progress bar (total 0 =
+// still unknown, indeterminate), never the log drawer. Two things drive
+// it: the engine's emscripten loader reporting data-asset downloads as
+// "Downloading data…" / "Downloading data… (loaded/total)" print lines,
+// and the first-run default package install (one step per package).
 type DownloadProgress = { loaded: number; total: number };
 
 type Status =
@@ -684,7 +686,9 @@ export default function EditorPage() {
           return {
             kind: "loading",
             line: lastLine(line, s.kind === "loading" ? s.line : ""),
-            progress: undefined,
+            // A plain print line does not cancel an in-flight progress bar
+            // (the first-run package install runs alongside engine load).
+            progress: s.kind === "loading" ? s.progress : undefined,
           };
         });
       },
@@ -1019,6 +1023,78 @@ export default function EditorPage() {
     noticeTimerRef.current = window.setTimeout(() => setNotice(null), ms);
   };
 
+  // --- first-run default packages --------------------------------------
+  // A fresh browser's CTAN store is empty; the curated default set (see
+  // ctan-store.ts) installs in the background so the first compile of a
+  // common document does not sit on missing packages. The sweep runs once
+  // per store (the manifest marker survives), a ?noDefaults=1 visit
+  // skips it (used by the e2e clean-store suite), and a failed sweep
+  // (network blip) simply retries on the next load. Declared after
+  // restartCompiler/showNotice so the closure never captures a
+  // not-yet-declared binding.
+  // The progress callback must not be a plain closure of this effect:
+  // dev-mode React strict mode double-mounts the page, and the FIRST
+  // effect run's ensureDefaults() call is the one that registers the
+  // callback the store holds for the sweep's whole life (see
+  // ctan-store.ts) — that first run is then immediately cleaned up.
+  // Route the callback through a ref so the store's single captured
+  // callback always reaches the effect run that is alive (or none,
+  // after a real unmount).
+  const defaultsProgressRef = useRef<
+    ((name: string, done: number, total: number) => void) | null
+  >(null);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).has("noDefaults")) return;
+    defaultsProgressRef.current = (_name, done, total) => {
+      // Take over the status slot (text line + progress bar) from idle,
+      // engine loading, and even a finished compile: the point of the bar
+      // is that the install stays visible while the sweep runs in the
+      // background. An active compile keeps its own streaming lines, and
+      // a visible error is left alone (the log drawer is open — the user
+      // is looking at it, and replacing it would hide the failure).
+      setStatus((s) =>
+        s.kind === "compiling" || s.kind === "error"
+          ? s
+          : {
+              kind: "loading",
+              line: `Installing default packages ${done + 1}/${total}…`,
+              // Drives the status progress bar: one step per package
+              // installed into the OPFS store.
+              progress: { loaded: done, total },
+            },
+      );
+    };
+    void ensureDefaults((_name, done, total) => {
+      defaultsProgressRef.current?.(_name, done, total);
+    })
+      .then((installed) => {
+        if (installed.length === 0) return;
+        // The worker that started with the empty store caches that state;
+        // drop it so the next compile re-reads the store (see
+        // restartCompiler). Nothing to do if the engine never started.
+        restartCompiler();
+        showNotice(
+          `Installed ${installed.length} default LaTeX packages — the engine restarts with the next compile`,
+          5000,
+        );
+        // The install line is done; if the status slot still shows it
+        // (no compile took it over in the meantime) hand it back to
+        // "Ready." so the bar doesn't sit at 100% forever.
+        setStatus((s) =>
+          s.kind === "loading" && s.line.startsWith("Installing default packages")
+            ? { kind: "idle" }
+            : s,
+        );
+      })
+      .catch(() => {
+        // Retried on the next load (the marker is only written on
+        // success); the Packages modal can always install by hand.
+      });
+    return () => {
+      defaultsProgressRef.current = null;
+    };
+  }, []);
+
   const uploadFiles = (list: File[], dropped?: DroppedTree) => {
     void (async () => {
       const added: Record<string, FileData> = {};
@@ -1346,7 +1422,11 @@ export default function EditorPage() {
     status.kind === "idle"
       ? "Ready."
       : status.kind === "loading"
-        ? `Loading engine… ${status.line}`
+        // The first-run package install takes over the status line; the
+        // "Loading engine…" prefix would mislabel it.
+        ? status.line.startsWith("Installing")
+          ? status.line
+          : `Loading engine… ${status.line}`
         : status.kind === "compiling"
           ? `Compiling… ${status.line}`
           : status.kind === "done"
@@ -1502,7 +1582,7 @@ export default function EditorPage() {
             ) : null}
           </span>
           {downloading ? (
-            <span className="flex w-64 shrink-0 items-center gap-2">
+            <span className="flex w-64 shrink-0 items-center gap-2" title={statusText}>
               <span className="relative h-1.5 w-44 overflow-hidden rounded-full bg-ink/10">
                 {dlPct !== null ? (
                   <span

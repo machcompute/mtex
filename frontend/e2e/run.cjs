@@ -13,6 +13,10 @@ const suites = [
   "dashboard.cjs",
   "github.cjs",
   "firefox.cjs",
+  // The first-run default package sweep (the only suite that opts in):
+  // the heaviest one — a fresh profile pulls the package database plus
+  // 17 containers from CTAN — so it runs last.
+  "defaults.cjs",
 ];
 let failed = 0;
 for (const suite of suites) {
