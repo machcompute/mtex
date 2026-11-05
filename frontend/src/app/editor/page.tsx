@@ -426,6 +426,7 @@ export default function EditorPage() {
     setProjectName(meta.name || DEFAULT_PROJECT_NAME);
     // The PDF/log/sync belong to the previous project's build.
     setPdf(null);
+    pendingScrollRef.current = null;
     setLog("");
     setLiveLog("");
     setSyncEntries(null);
@@ -918,8 +919,11 @@ export default function EditorPage() {
     const projectId = persistStateRef.current.activeProjectId;
     // Remember the PDF's scroll position so the new PDF can restore it —
     // a recompile must not yank the reader back to the top of page 1.
+    // The old PDF stays on screen while the build runs (the reader keeps
+    // reading it; the status bar shows the build is in flight). The
+    // viewport callback keeps this target fresh if they scroll it, and
+    // the restore effect applies it when the new PDF lands.
     pendingScrollRef.current = pdfRef.current?.getViewportTop() ?? null;
-    setPdf(null);
     setLiveLog("");
     setStatus({ kind: "compiling", line: "preparing…" });
     const started = performance.now();
@@ -990,7 +994,9 @@ export default function EditorPage() {
           })();
         }
       } else {
-        setPdf(null);
+        // Keep the previous PDF on screen: it is still the last successful
+        // build of this project, and the failure is visible in the status
+        // bar and the (auto-opened) log drawer.
         setStatus({ kind: "error", message: "Compilation failed — see log" });
       }
       setLog(result.log);
@@ -1124,12 +1130,14 @@ export default function EditorPage() {
 
   // Restore the PDF scroll position after a recompile. The new PDF is a
   // fresh document that pdf.js renders asynchronously, so poll until the
-  // page exists (up to ~6 s).
+  // page exists (up to ~6 s). The target was captured at build start and
+  // kept fresh while the (still-visible) old PDF was scrolled; it is
+  // cleared on a project switch, so a stale position can never be applied
+  // to another project's PDF.
   useEffect(() => {
     const target = pendingScrollRef.current;
-    // The viewer is cleared (setPdf(null)) before the new PDF arrives and
-    // this effect runs on that intermediate state — don't consume the
-    // target then, or the run with the new pdf would find it gone.
+    // No PDF means nothing to restore into (first build, project switch)
+    // — and never consume the target on that state.
     if (!pdf || !target) return;
     pendingScrollRef.current = null;
     let tries = 0;
@@ -1671,6 +1679,10 @@ export default function EditorPage() {
 
   /** PDF scrolled: the editor follows the topmost visible line. */
   const handleViewportTop = (page: number, yTopPts: number) => {
+    // While a build is in flight the old PDF is still on screen: keep the
+    // pending scroll target at wherever the reader scrolls it, so the new
+    // PDF lands where they left off, not where the build started.
+    if (busyRef.current) pendingScrollRef.current = { page, yTop: yTopPts };
     const now = Date.now();
     if (!syncScrollRef.current || lockRef.current.until > now) return;
     const entries = syncEntriesRef.current;

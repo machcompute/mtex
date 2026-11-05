@@ -19,6 +19,10 @@
 // unchanged inputs reuses the cached PDF without running the engine at
 // all, so it lands in well under a second while a real build takes many
 // seconds on a fresh profile.
+//
+// S3 — the reader's place: the old PDF stays on screen for the whole
+// build (no blank state), and a FAILED build does not destroy it — the
+// last successful PDF is what the reader is looking at.
 const {
   Runner,
   seedProject,
@@ -107,6 +111,25 @@ async function editFile(r, relPath, text) {
         .setValue(t),
     { p: relPath, t: text },
   );
+}
+
+// Wait for the status to pass through a non-terminal state and settle
+// (a terminal status alone is not enough: the previous build's terminal
+// text is still on screen until the new compile starts). Robust even
+// when the build may have finished before waiting started.
+async function waitForSettled(r) {
+  let text = "", sawNonTerminal = false;
+  for (let i = 0; i < 120; i++) {
+    text = ((await r.status.textContent().catch(() => "")) || "").trim();
+    const disabled = await r.page.evaluate(
+      () => document.querySelector('button[title^="Recompile"]')?.disabled,
+    );
+    const terminal = /^(Compiled in \d+ ms|Compilation failed)/.test(text);
+    if (!terminal) sawNonTerminal = true;
+    if (sawNonTerminal && terminal && !disabled) return text;
+    await r.page.waitForTimeout(200);
+  }
+  return text;
 }
 
 // Wait for the debounced auto-compile an edit triggers to settle; returns
@@ -281,6 +304,63 @@ const r = new Runner("incremental");
     r.ok(
       "S2 build 2 PDF is up to date (old entry + new paragraph)",
       pdf.includes("The TeXbook") && pdf.includes("harmless trailing paragraph"),
+      pdf.slice(0, 160),
+    );
+
+    // ================= S3: the reader keeps their PDF while building =====
+    // A second marker paragraph: the OLD pdf has the first marker but not
+    // this one, so the viewer's text tells the two builds apart.
+    const CLASSIC_KEEPPDF = CLASSIC_EDITED.replace(
+      "\\end{document}",
+      "A second paragraph for the keep-PDF test.\n\\end{document}",
+    );
+    await editFile(r, "main.tex", CLASSIC_KEEPPDF);
+    // Sample the viewer WHILE the debounced auto-compile runs (the button
+    // is disabled while a build is in flight): the old PDF must stay on
+    // screen, not be blanked.
+    let sawOldDuringBuild = false;
+    for (let i = 0; i < 150; i++) {
+      const [disabled, text] = await r.page.evaluate(() => [
+        document.querySelector('button[title^="Recompile"]')?.disabled,
+        Array.from(
+          document.querySelectorAll("[data-pdf-viewer] span[data-baseline]"),
+        )
+          .map((s) => s.textContent)
+          .join(" "),
+      ]);
+      if (
+        disabled &&
+        text.includes("harmless trailing paragraph") &&
+        !text.includes("keep-PDF test")
+      ) {
+        sawOldDuringBuild = true;
+        break;
+      }
+      if (text.includes("keep-PDF test")) break; // already landed
+      await r.page.waitForTimeout(100);
+    }
+    r.ok("S3 the old PDF stays on screen while the build runs", sawOldDuringBuild);
+    const st6 = await waitForSettled(r);
+    r.ok("S3 build 3 compiled", /^Compiled in \d+ ms/.test(st6), st6);
+    pdf = await r.pdfText();
+    r.ok(
+      "S3 the new PDF shows both paragraphs",
+      pdf.includes("harmless trailing paragraph") && pdf.includes("keep-PDF test"),
+      pdf.slice(0, 160),
+    );
+
+    // A failed build must not destroy the previous PDF either.
+    const CLASSIC_BROKEN = CLASSIC_KEEPPDF.replace(
+      "\\documentclass{article}",
+      "\\documentclass{article}\n\\usepackage{nonexistent-pkg-xyz}",
+    );
+    await editFile(r, "main.tex", CLASSIC_BROKEN);
+    const st7 = await waitForSettled(r);
+    r.ok("S3 the broken build failed", /^Compilation failed/.test(st7), st7);
+    pdf = await r.pdfText();
+    r.ok(
+      "S3 a failed build keeps the previous PDF",
+      pdf.includes("harmless trailing paragraph") && pdf.includes("keep-PDF test"),
       pdf.slice(0, 160),
     );
   } finally {
