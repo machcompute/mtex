@@ -1156,8 +1156,7 @@ export default function EditorPage() {
 
   // One agentic turn: the model ends with either a text answer (done) or
   // tool_calls (execute them, feed the results back as tool messages, and
-  // go again — bounded, so a chatty model can't loop forever).
-  const MAX_TOOL_ROUNDS = 8;
+  // go again until it does).
   const sendChat = async () => {
     const text = chatInput.trim();
     if (!text || chatBusy) return;
@@ -1186,7 +1185,7 @@ export default function EditorPage() {
       });
     };
     try {
-      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      for (;;) {
         // Rebuild the system context: an accepted edit may have changed
         // the active file since the previous round.
         history[0] = { role: "system", content: buildChatSystemPrompt() };
@@ -1265,9 +1264,6 @@ export default function EditorPage() {
         }
         return;
       }
-      setChatError(
-        `Stopped after ${MAX_TOOL_ROUNDS} tool rounds without a final answer. Ask again to continue.`,
-      );
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         setChatError((err as Error).message || "chat request failed");
