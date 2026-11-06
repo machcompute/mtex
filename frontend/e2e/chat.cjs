@@ -13,6 +13,7 @@
 //      shows its result.
 //   7. Agentic tool: apply_edit — gated by a diff card; accepting lands
 //      the edit in the editor.
+//   8. The system prompt carries the cursor position of the active file.
 const { Runner, seedProject } = require("./helpers.cjs");
 
 (async () => {
@@ -59,9 +60,12 @@ const { Runner, seedProject } = require("./helpers.cjs");
     // 4b. The page's /api/chat request must carry no Authorization header
     // (the route adds it upstream).
     let chatReqAuth = "unset";
+    let chatReqBody = "";
     page.on("request", (req) => {
-      if (req.url().includes("/api/chat"))
+      if (req.url().includes("/api/chat")) {
         chatReqAuth = req.headers()["authorization"] ?? null;
+        chatReqBody = req.postData() ?? "";
+      }
     });
 
     // 2. A deterministic reply, streamed.
@@ -104,6 +108,22 @@ const { Runner, seedProject } = require("./helpers.cjs");
       "the model sees the active file (marker command)",
       reply2.includes("huhubmarker"),
       reply2.slice(0, 120),
+    );
+
+    // 8. The system prompt carries the cursor position. Click into line 4
+    //    ("Hello, chat."), then the next /api/chat body must mention it.
+    await page.locator(".view-lines .view-line").nth(3).click();
+    chatReqBody = "";
+    await input.fill("Reply with exactly: OK");
+    await page.locator("[data-chat-send]").click();
+    await page.waitForFunction(
+      () => !!document.querySelector("[data-chat-send]"),
+      { timeout: 60_000 },
+    );
+    r.ok(
+      "the system prompt carries the cursor line",
+      chatReqBody.includes("line 4, column"),
+      chatReqBody.slice(0, 200),
     );
 
     // 6. Agentic tool: list_files. The /api/chat loop hands the model the

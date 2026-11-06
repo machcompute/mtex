@@ -882,9 +882,25 @@ export default function EditorPage() {
             : "(binary file)"
         }\n</file>`
       : "";
+    // The cursor/selection is read live from the editor at send time (this
+    // prompt is rebuilt every round), so it describes where the user is
+    // looking when they ask — a selection is quoted so "fix this" has a
+    // target without a read_file round trip.
+    const editor = editorRef.current;
+    const selection = active ? editor?.getSelection() : undefined;
+    const model = active ? editor?.getModel() : undefined;
+    const cursorPart =
+      active && selection && model
+        ? !selection.isEmpty()
+          ? `\n\nThe user's selection in "${active}", lines ${selection.startLineNumber}-${selection.endLineNumber}:\n<selection>\n${model
+              .getValueInRange(selection)
+              .slice(0, 4_000)}\n</selection>`
+          : ` The cursor in "${active}" is at line ${selection.startLineNumber}, column ${selection.startColumn}.`
+        : "";
     return (
       "You are a helpful LaTeX assistant inside HomeHub, a browser-based TeX Live editor (XeLaTeX, TeX Live 2026)." +
       filePart +
+      cursorPart +
       "\n\nYou can act on the project with tools:" +
       "\n- list_files: list the project's files (and the main file)" +
       "\n- read_file(path): read a text file" +
