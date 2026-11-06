@@ -9,6 +9,10 @@
 //      and the page's /api/chat request carries no Authorization header.
 //   5. Clear empties the conversation, and the Log tab still shows the
 //      build log.
+//   6. Agentic tool: list_files — the model calls a tool and a tool row
+//      shows its result.
+//   7. Agentic tool: apply_edit — gated by a diff card; accepting lands
+//      the edit in the editor.
 const { Runner, seedProject } = require("./helpers.cjs");
 
 (async () => {
@@ -100,6 +104,72 @@ const { Runner, seedProject } = require("./helpers.cjs");
       "the model sees the active file (marker command)",
       reply2.includes("huhubmarker"),
       reply2.slice(0, 120),
+    );
+
+    // 6. Agentic tool: list_files. The /api/chat loop hands the model the
+    //    tools; this turn must call one, and a tool row shows the name
+    //    and result.
+    await input.fill(
+      "Use the list_files tool to list the files in the project, then report what it returned. You must call the tool.",
+    );
+    await page.locator("[data-chat-send]").click();
+    await page.waitForFunction(
+      () =>
+        Array.from(document.querySelectorAll('[data-chat-role="tool"]')).some(
+          (el) =>
+            el.textContent.includes("list_files") &&
+            el.textContent.includes("main.tex"),
+        ),
+      { timeout: 120_000 },
+    );
+    r.ok("the list_files tool ran and a tool row shows its result", true);
+    // The loop ends with a final answer; wait for the stream to settle.
+    await page.waitForFunction(
+      () => !!document.querySelector("[data-chat-send]"),
+      { timeout: 120_000 },
+    );
+
+    // 7. Agentic tool: apply_edit. Gated by a diff card: nothing is
+    //    written until the user accepts.
+    await input.fill(
+      'Use the apply_edit tool to replace the exact text "Hello, chat." with "Hello, world." in the file main.tex. You must call the tool.',
+    );
+    await page.locator("[data-chat-send]").click();
+    await page.waitForFunction(
+      () => document.querySelector("[data-chat-pending-edit]") !== null,
+      { timeout: 120_000 },
+    );
+    const card =
+      (await page.evaluate(
+        () =>
+          document.querySelector("[data-chat-pending-edit]")?.textContent ??
+          "",
+      )) || "";
+    r.ok(
+      "the pending edit card shows the old and new text",
+      card.includes("Hello, chat.") && card.includes("Hello, world."),
+      card.slice(0, 160),
+    );
+    await page.locator("[data-chat-edit-accept]").click();
+    // Monaco's text layer renders some spaces as U+00A0 (and U+202F in
+    // some locales), so normalize before matching.
+    await page.waitForFunction(
+      () =>
+        (document.querySelector(".view-lines")?.textContent ?? "")
+          .replace(/[\u00a0\u202f]/g, " ")
+          .includes("Hello, world."),
+      { timeout: 30_000 },
+    );
+    r.ok("the accepted edit landed in the editor", true);
+    await page.waitForFunction(
+      () => document.querySelector("[data-chat-pending-edit]") === null,
+      { timeout: 30_000 },
+    );
+    r.ok("the pending edit card is gone after the decision", true);
+    // The loop continues with the tool result and settles.
+    await page.waitForFunction(
+      () => !!document.querySelector("[data-chat-send]"),
+      { timeout: 120_000 },
     );
 
     // 5. Clear empties the conversation; the Log tab still shows the log.

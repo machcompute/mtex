@@ -3,11 +3,21 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type Dispatch,
   type PointerEvent as ReactPointerEvent,
+  type SetStateAction,
 } from "react";
+
+// Timestamp for the scroll-sync lock. Kept at module scope: the React
+// compiler lint treats Date.now as impure and flags it in functions it
+// cannot prove run outside of render.
+function now() {
+  return Date.now();
+}
 import Link from "next/link";
 import type { BeforeMount, Monaco } from "@monaco-editor/react";
 import type * as monaco from "monaco-editor";
@@ -41,6 +51,7 @@ import {
   ensureDefaults,
   installWithDependencies,
   packageForFile,
+  searchPackages,
 } from "@/lib/ctan-store";
 import {
   ACTIVE_PROJECT_KEY,
@@ -132,8 +143,304 @@ type Status =
   | { kind: "error"; message: string };
 
 // One message in the chat drawer's conversation (the system context is
-// built per request and never stored here).
-type ChatMessage = { role: "user" | "assistant"; content: string };
+// built per request and never stored here). Assistant messages may carry
+// the tool calls they made (rendered as chips); tool messages record a
+// tool's result back into the transcript.
+type ChatToolCallInfo = { id: string; name: string; args: string };
+type ChatMessage =
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: string; toolCalls?: ChatToolCallInfo[] }
+  | { role: "tool"; toolCallId: string; toolName: string; content: string };
+
+// The wire shapes for /api/chat (OpenAI format). Assistant messages may
+// carry tool_calls (content can then be empty); tool messages answer
+// exactly one call by id.
+type ApiToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+type ApiChatMessage =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: string; tool_calls?: ApiToolCall[] }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+// A file change the assistant proposed and the user has not decided yet.
+// The tool loop BLOCKS on it: the model's turn already ended, no stream
+// is open, so waiting between turns is safe.
+type PendingEdit = {
+  id: string; // the tool_call id
+  path: string;
+  old: string;
+  new: string;
+  line: number; // 1-based line of the match
+};
+
+// The snapshot the chat tools execute against (chatCtxRef, reassigned
+// every render — the loop outlives renders and must never see stale files
+// or log).
+type ChatToolCtx = {
+  files: Record<string, FileData>;
+  activePath: string | null;
+  mainPath: string;
+  log: string;
+  entries: FileEntry[];
+  setFiles: Dispatch<SetStateAction<Record<string, FileData>>>;
+  handlePackagesChanged: (msg: string) => void;
+};
+
+// The seven tools the assistant can call on the project (OpenAI function
+// format). The page executes them against in-memory state; the model only
+// ever sees the results. `apply_edit` is gated on the user's accept.
+const CHAT_TOOLS: Array<{
+  type: "function";
+  function: { name: string; description: string; parameters: object };
+}> = [
+  {
+    type: "function",
+    function: {
+      name: "list_files",
+      description:
+        "List all files in the current project (path and whether each is binary), and which file is the main file.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_file",
+      description: "Read the text content of one file in the project.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path, e.g. main.tex" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "compile",
+      description:
+        "Compile the project with XeLaTeX and wait for the build to finish. Returns the outcome (success/failure) and a tail of the build log.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_build_log",
+      description: "Return the log of the last completed build.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "apply_edit",
+      description:
+        "Replace one exact occurrence of `old` in a project file with `new`. The user must accept the change in the UI; the result reports whether it was accepted. `old` must occur exactly once in the file — if it does not, the result is an error and you should read_file and retry with the exact text.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path, e.g. main.tex" },
+          old: {
+            type: "string",
+            description:
+              "The exact existing text to replace (must occur exactly once)",
+          },
+          new: { type: "string", description: "The replacement text" },
+        },
+        required: ["path", "old", "new"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "install_package",
+      description:
+        "Install a LaTeX package (plus its dependencies) from CTAN into the browser's package store. The engine restarts and the package is available on the next compile.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "The tlpkg package name, e.g. tikz or biblatex",
+          },
+        },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_packages",
+      description:
+        "Search CTAN for LaTeX packages by name or description. Returns matches with a one-line description and whether each is already installed.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Search text, e.g. \"tikz\" or \"bibliography\"",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+];
+
+// Minimal line diff (LCS) for the apply_edit approval card. Snippets are
+// small; the DP grid is fine.
+type DiffLine = { t: "same" | "del" | "add"; text: string };
+function diffSnippet(oldText: string, newText: string): DiffLine[] {
+  const a = oldText.split("\n");
+  const b = newText.split("\n");
+  const n = a.length;
+  const m = b.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () =>
+    new Array<number>(m + 1).fill(0),
+  );
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] =
+        a[i] === b[j]
+          ? dp[i + 1][j + 1] + 1
+          : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const out: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      out.push({ t: "same", text: a[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      out.push({ t: "del", text: a[i] });
+      i++;
+    } else {
+      out.push({ t: "add", text: b[j] });
+      j++;
+    }
+  }
+  while (i < n) out.push({ t: "del", text: a[i++] });
+  while (j < m) out.push({ t: "add", text: b[j++] });
+  return out;
+}
+
+/**
+ * One streaming completion against /api/chat. Accumulates the assistant's
+ * content and its tool_calls (the upstream streams them as per-index
+ * fragments: function.name and function.arguments arrive in pieces and
+ * are concatenated here before the caller JSON.parses them). onDelta
+ * fires per content piece so the transcript can stream live.
+ */
+async function streamChatCompletion(
+  messages: ApiChatMessage[],
+  tools: object[],
+  signal: AbortSignal,
+  onDelta: (delta: string) => void,
+): Promise<{
+  content: string;
+  toolCalls: ApiToolCall[];
+  finishReason: string | null;
+}> {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages, tools }),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    let detail = "";
+    try {
+      detail = String((await res.json())?.error ?? "");
+    } catch {
+      detail = `HTTP ${res.status}`;
+    }
+    throw new Error(detail || `HTTP ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let content = "";
+  let finishReason: string | null = null;
+  const calls = new Map<number, { id: string; name: string; arguments: string }>();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    // The upstream is SSE: "data: {…}\n" lines, "\n\n" between events,
+    // and a final "data: [DONE]".
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).replace(/\r$/, "").trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      let ev: {
+        choices?: {
+          delta?: {
+            content?: unknown;
+            tool_calls?: Array<{
+              index?: unknown;
+              id?: unknown;
+              function?: { name?: unknown; arguments?: unknown };
+            }>;
+          };
+          finish_reason?: unknown;
+        }[];
+      };
+      try {
+        ev = JSON.parse(payload);
+      } catch {
+        // A partial or malformed line is skipped; the stream ends with
+        // [DONE] regardless.
+        continue;
+      }
+      const choice = ev.choices?.[0];
+      if (!choice) continue;
+      if (typeof choice.finish_reason === "string")
+        finishReason = choice.finish_reason;
+      const d = choice.delta;
+      if (!d) continue;
+      if (typeof d.content === "string" && d.content) {
+        content += d.content;
+        onDelta(d.content);
+      }
+      if (Array.isArray(d.tool_calls)) {
+        for (const tc of d.tool_calls) {
+          const idx = typeof tc.index === "number" ? tc.index : 0;
+          const cur = calls.get(idx) ?? { id: "", name: "", arguments: "" };
+          if (typeof tc.id === "string") cur.id += tc.id;
+          if (typeof tc.function?.name === "string")
+            cur.name += tc.function.name;
+          if (typeof tc.function?.arguments === "string")
+            cur.arguments += tc.function.arguments;
+          calls.set(idx, cur);
+        }
+      }
+    }
+  }
+  return {
+    content,
+    toolCalls: [...calls.values()]
+      .filter((c) => c.id || c.name)
+      .map((c) => ({
+        id: c.id,
+        type: "function" as const,
+        function: { name: c.name, arguments: c.arguments },
+      })),
+    finishReason,
+  };
+}
 
 // --- workspace layout ----------------------------------------------------
 // The panes are user-arrangeable: drag the files panel's right edge and
@@ -238,7 +545,6 @@ export default function EditorPage() {
   // Always-current view of `files` for async handlers (uploads read it while
   // awaiting file bytes, where the render-time closure would be stale).
   const filesRef = useRef(files);
-  filesRef.current = files;
   const [activePath, setActivePath] = useState(DEFAULT_MAIN);
   const [openPaths, setOpenPaths] = useState<string[]>([DEFAULT_MAIN]);
   const [mainPath, setMainPath] = useState(DEFAULT_MAIN);
@@ -266,6 +572,9 @@ export default function EditorPage() {
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
+  // apply_edit calls awaiting the user's decision (the diff card in the
+  // drawer). The tool loop blocks on the matching resolver below.
+  const [pendingEdits, setPendingEdits] = useState<PendingEdit[]>([]);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   // Decoded synctex data for the current PDF (null = no navigation yet).
   const [syncEntries, setSyncEntries] = useState<SyncEntry[] | null>(null);
@@ -290,6 +599,10 @@ export default function EditorPage() {
 
   const compilerRef = useRef<BusyTexCompiler | null>(null);
   const busyRef = useRef(false);
+  // Mirror of `status` for the chat's compile tool: it polls for the build
+  // to settle from an async loop, where the state value in the closure
+  // would be stale.
+  const statusRef = useRef<Status>({ kind: "idle" });
   // Flips once the worker reports {loaded}; stray engine print lines after
   // that must not drag the status back to "Loading engine…".
   const engineReadyRef = useRef(false);
@@ -331,15 +644,6 @@ export default function EditorPage() {
     activeProjectId,
     loaded,
   });
-  persistStateRef.current = {
-    files,
-    mainPath,
-    openPaths,
-    activePath,
-    projectName,
-    activeProjectId,
-    loaded,
-  };
   // True while a project switch/new/delete is in flight; keeps a second
   // one from starting.
   const switchingRef = useRef(false);
@@ -372,6 +676,29 @@ export default function EditorPage() {
   const chatFollowRef = useRef(true);
   // In-flight chat stream; Stop (and unmount) abort it.
   const chatAbortRef = useRef<AbortController | null>(null);
+  // Resolvers for the pending apply_edit cards, keyed by tool_call id.
+  // The tool loop awaits the promise; deciding (or stopping) resolves it,
+  // which unblocks the loop.
+  const pendingEditResolveRef = useRef(
+    new Map<string, (result: string) => void>(),
+  );
+  // Snapshot the chat tools execute against, reassigned every render. The
+  // agentic loop is one long-running async function that outlives renders;
+  // reading state through this ref (not the closure) keeps every tool call
+  // — read_file after an accepted apply_edit, list_files after an install —
+  // on the latest values.
+  // setFiles is the stable useState setter, captured once here so the
+  // mirror effect below never references it (a setState reference in a
+  // dependency-less effect trips react-hooks/exhaustive-deps).
+  const chatCtxRef = useRef<ChatToolCtx>({
+    files: {},
+    activePath: null,
+    mainPath: "",
+    log: "",
+    entries: [],
+    setFiles,
+    handlePackagesChanged: () => {},
+  });
   // uploadFiles is redefined every render; the window-level drop handler
   // (attached once) calls it through this ref.
   const uploadFilesRef = useRef<(list: File[], dropped?: DroppedTree) => void>(
@@ -380,14 +707,10 @@ export default function EditorPage() {
   // Refs mirroring state so handlers attached once (Monaco onMount, the
   // PDF viewer's scroll callback) never see stale values.
   const syncEntriesRef = useRef<SyncEntry[] | null>(null);
-  syncEntriesRef.current = syncEntries;
   const activePathRef = useRef(activePath);
-  activePathRef.current = activePath;
   const syncScrollRef = useRef(syncScroll);
-  syncScrollRef.current = syncScroll;
   const autoRef = useRef(autoRecompile);
-  autoRef.current = autoRecompile;
-  const compileRef = useRef<() => void>(() => {});
+  const compileRef = useRef<() => Promise<void>>(async () => {});
 
   /**
    * Point the editor at a freshly loaded project: files, the meta-derived
@@ -507,131 +830,433 @@ export default function EditorPage() {
     if (el && chatFollowRef.current) el.scrollTop = el.scrollHeight;
   }, [showLog, bottomTab, chatMessages, chatError]);
 
-  // A stream that outlives the page (unmount) is aborted.
-  useEffect(
-    () => () => {
-      chatAbortRef.current?.abort();
-    },
-    [],
-  );
+  // Resolves a pending apply_edit (the user's button, or a stop/clear/
+  // unmount) and drops its card. Idempotent: a double settle is a no-op.
+  const settlePendingEdit = useCallback((id: string, result: string) => {
+    const resolve = pendingEditResolveRef.current.get(id);
+    if (!resolve) return;
+    pendingEditResolveRef.current.delete(id);
+    setPendingEdits((prev) => prev.filter((p) => p.id !== id));
+    resolve(result);
+  }, []);
+
+  // Aborts the in-flight stream AND settles any pending apply_edit: the
+  // loop blocks on that promise with no fetch in flight to reject, so
+  // without the settle it would wait forever after Stop.
+  const abortChat = useCallback(() => {
+    chatAbortRef.current?.abort();
+    for (const id of [...pendingEditResolveRef.current.keys()])
+      settlePendingEdit(
+        id,
+        "The user stopped the conversation; the edit was not applied.",
+      );
+  }, [settlePendingEdit]);
+
+  // A stream (or a blocked tool) that outlives the page (unmount) is
+  // aborted.
+  useEffect(() => abortChat, [abortChat]);
 
   const stopChat = () => {
-    chatAbortRef.current?.abort();
+    abortChat();
   };
 
   const clearChat = () => {
-    chatAbortRef.current?.abort();
+    abortChat();
     setChatMessages([]);
     setChatError(null);
   };
 
+  // The system context is rebuilt every round (not just at send time): an
+  // accepted edit changes the active file mid-conversation, and the model
+  // must not keep quoting the pre-edit text.
+  const buildChatSystemPrompt = () => {
+    const ctx = chatCtxRef.current;
+    const active =
+      ctx.activePath && Object.hasOwn(ctx.files, ctx.activePath)
+        ? ctx.activePath
+        : null;
+    const filePart = active
+      ? ` The user is editing "${active}" in the editor right now:\n\n<file path="${active}">\n${
+          typeof ctx.files[active] === "string"
+            ? (ctx.files[active] as string).slice(0, 24_000)
+            : "(binary file)"
+        }\n</file>`
+      : "";
+    return (
+      "You are a helpful LaTeX assistant inside HomeHub, a browser-based TeX Live editor (XeLaTeX, TeX Live 2026)." +
+      filePart +
+      "\n\nYou can act on the project with tools:" +
+      "\n- list_files: list the project's files (and the main file)" +
+      "\n- read_file(path): read a text file" +
+      "\n- compile: compile the project and report the outcome with a log tail" +
+      "\n- get_build_log: read the last build's log" +
+      "\n- apply_edit(path, old, new): change a file — the user must accept the diff shown in the UI; the result tells you whether they did" +
+      "\n- search_packages(query) / install_package(name): find and install CTAN packages" +
+      "\n\nRules: inspect the real project (list_files, read_file, compile, get_build_log) before diagnosing or changing anything. To change a file, call apply_edit with the EXACT existing text as \"old\" (it must occur exactly once — copy it from read_file). Never claim an edit was made unless the result says the user accepted it; if an edit is rejected, say so and do not retry the same change. Answer concisely, in the user's language, and use ```tex code fences for code."
+    );
+  };
+
+  // The transcript (state) in the wire shapes /api/chat expects.
+  const toApiMessages = (msgs: ChatMessage[]): ApiChatMessage[] => {
+    const out: ApiChatMessage[] = [];
+    for (const m of msgs) {
+      if (m.role === "tool") {
+        out.push({
+          role: "tool",
+          tool_call_id: m.toolCallId,
+          content: m.content.slice(0, 16_000),
+        });
+      } else if (m.role === "assistant") {
+        if (m.toolCalls && m.toolCalls.length > 0) {
+          out.push({
+            role: "assistant",
+            content: m.content,
+            tool_calls: m.toolCalls.map((t) => ({
+              id: t.id,
+              type: "function",
+              function: { name: t.name, arguments: t.args },
+            })),
+          });
+        } else {
+          out.push({ role: "assistant", content: m.content });
+        }
+      } else {
+        out.push({ role: "user", content: m.content });
+      }
+    }
+    return out;
+  };
+
+  // Wait until no build is in flight and the last one reached a terminal
+  // status (done/error), then give a REQUEUED build a beat to start and
+  // wait for it too: compile() requeues itself (through a setTimeout(0)
+  // that fires AFTER the compile promise resolves) when a package install
+  // — the babel auto-fix — lands mid-build.
+  const COMPILE_SETTLE_TIMEOUT = 180_000;
+  const waitForCompileSettle = async () => {
+    const terminal = () => {
+      const s = statusRef.current;
+      return !busyRef.current && (s.kind === "done" || s.kind === "error");
+    };
+    const wait = () =>
+      new Promise<void>((resolve, reject) => {
+        const t0 = now();
+        const tick = () => {
+          if (terminal()) return resolve();
+          if (now() - t0 > COMPILE_SETTLE_TIMEOUT)
+            return reject(
+              new Error("the build did not finish within 3 minutes"),
+            );
+          window.setTimeout(tick, 200);
+        };
+        tick();
+      });
+    await wait();
+    await new Promise((r) => window.setTimeout(r, 80));
+    if (!terminal()) await wait();
+  };
+
+  // The apply_edit tool: validate the match, then BLOCK on the user's
+  // decision. The model's turn already ended (finish_reason tool_calls),
+  // no stream is open — the diff card waits in the drawer while the loop
+  // holds this promise. Stop/Clear/unmount settles it with an abort.
+  const applyEditTool = (
+    callId: string,
+    path: string,
+    oldText: string,
+    newText: string,
+  ): Promise<string> => {
+    const c = chatCtxRef.current;
+    const cur = c.files[path];
+    if (cur === undefined)
+      return Promise.resolve(
+        `ERROR: no file "${path}" in the project. Files: ${c.entries
+          .map((e) => e.path)
+          .join(", ")}`,
+      );
+    if (typeof cur !== "string")
+      return Promise.resolve(
+        `ERROR: "${path}" is a binary file; apply_edit works on text files only.`,
+      );
+    if (oldText === "")
+      return Promise.resolve('ERROR: "old" must not be empty.');
+    if (!cur.includes(oldText))
+      return Promise.resolve(
+        `ERROR: the text given as "old" was not found in "${path}". Read the file with read_file and copy the exact text.`,
+      );
+    const count = cur.split(oldText).length - 1;
+    if (count > 1)
+      return Promise.resolve(
+        `ERROR: the text given as "old" occurs ${count} times in "${path}". Include more surrounding context so it matches exactly once.`,
+      );
+    const line = cur.slice(0, cur.indexOf(oldText)).split("\n").length;
+    return new Promise<string>((resolve) => {
+      pendingEditResolveRef.current.set(callId, resolve);
+      setPendingEdits((prev) =>
+        prev.some((p) => p.id === callId)
+          ? prev
+          : [...prev, { id: callId, path, old: oldText, new: newText, line }],
+      );
+    });
+  };
+
+  // Execute one of the assistant's tool calls. Everything reads state
+  // through chatCtxRef (the loop outlives renders). Errors come back as
+  // "ERROR: …" text the model can react to, not as thrown exceptions.
+  const executeChatTool = async (
+    callId: string,
+    name: string,
+    argsRaw: string,
+  ): Promise<string> => {
+    let args: Record<string, unknown> = {};
+    try {
+      args = argsRaw ? (JSON.parse(argsRaw) as Record<string, unknown>) : {};
+    } catch {
+      return `ERROR: the tool arguments were not valid JSON: ${argsRaw.slice(0, 200)}`;
+    }
+    switch (name) {
+      case "list_files": {
+        const c = chatCtxRef.current;
+        const lines = c.entries.map((e) => `${e.path}${e.isBinary ? " (binary)" : ""}`);
+        return `Main file: ${c.mainPath || "(none)"}\nFiles:\n${lines.join("\n")}`;
+      }
+      case "read_file": {
+        const path = String(args.path ?? "");
+        const c = chatCtxRef.current;
+        const v = c.files[path];
+        if (v === undefined)
+          return `ERROR: no file "${path}" in the project. Files: ${c.entries
+            .map((e) => e.path)
+            .join(", ")}`;
+        if (typeof v !== "string")
+          return `(binary file, ${v.byteLength} bytes — content not shown)`;
+        const CAP = 24_000;
+        return v.length > CAP
+          ? `${v.slice(0, CAP)}\n… (truncated — ${v.length} characters total)`
+          : v;
+      }
+      case "compile": {
+        try {
+          if (busyRef.current) await waitForCompileSettle();
+          await compileRef.current();
+          await waitForCompileSettle();
+          const s = statusRef.current;
+          const logText = chatCtxRef.current.log;
+          const tail =
+            logText.length > 4_000
+              ? `…\n${logText.slice(-4_000)}`
+              : logText || "(no log output)";
+          if (s.kind === "done")
+            return `Compilation succeeded in ${s.ms} ms.\n\nLog tail:\n${tail}`;
+          if (s.kind === "error")
+            return `Compilation FAILED: ${s.message}\n\nLog tail:\n${tail}`;
+          return `The build is still running (status: ${s.kind}); call compile again to wait for it.`;
+        } catch (err) {
+          return `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      }
+      case "get_build_log": {
+        const l = chatCtxRef.current.log;
+        if (!l) return "(no build has completed yet)";
+        return l.length > 16_000 ? `…\n${l.slice(-16_000)}` : l;
+      }
+      case "apply_edit":
+        return applyEditTool(
+          callId,
+          String(args.path ?? ""),
+          String(args.old ?? ""),
+          String(args.new ?? ""),
+        );
+      case "install_package": {
+        const pkgName = String(args.name ?? "").trim();
+        if (!/^[a-z0-9][a-z0-9-]*$/i.test(pkgName))
+          return `ERROR: "${pkgName}" is not a valid package name (letters, digits, hyphens; e.g. tikz, biblatex).`;
+        try {
+          const result = await installWithDependencies(pkgName);
+          let msg = `Installed "${result.package.name}"`;
+          if (result.installedDependencies.length > 0)
+            msg += ` (pulled in: ${result.installedDependencies.join(", ")})`;
+          if (result.unresolved.length > 0)
+            msg += ` — could not auto-install: ${result.unresolved.join(", ")}`;
+          // Same path as the Packages modal: a notice, and the engine
+          // restarts so the new files are visible on the next compile.
+          chatCtxRef.current.handlePackagesChanged(msg);
+          return `${msg}. The package is available on the next compile.`;
+        } catch (e) {
+          return `ERROR: install failed: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+      case "search_packages": {
+        const query = String(args.query ?? "").trim();
+        if (!query) return "ERROR: query must not be empty.";
+        try {
+          const results = await searchPackages(query, 15);
+          if (results.length === 0) return `No packages match "${query}".`;
+          return results
+            .map((r) => `${r.name}${r.installed ? " (installed)" : ""} — ${r.shortdesc}`)
+            .join("\n");
+        } catch (e) {
+          return `ERROR: search failed (the first search downloads the ~20 MB package database): ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+      default:
+        return `ERROR: unknown tool "${name}".`;
+    }
+  };
+
+  // The Accept/Reject buttons on a pending edit card. Accept writes the
+  // file through one setFiles (one undo step); for the ACTIVE file an
+  // undo stop is pushed first so Ctrl+Z reverts the whole change in one
+  // step instead of fighting the model's earlier content.
+  const decideEdit = (id: string, accepted: boolean) => {
+    const edit = pendingEdits.find((p) => p.id === id);
+    if (!edit) return;
+    if (accepted) {
+      const c = chatCtxRef.current;
+      const cur = c.files[edit.path];
+      const stillMatches = typeof cur === "string" && cur.includes(edit.old);
+      if (stillMatches) {
+        if (c.activePath === edit.path) editorRef.current?.pushUndoStop();
+        c.setFiles((f) => {
+          const v = f[edit.path];
+          return typeof v === "string"
+            ? { ...f, [edit.path]: v.replace(edit.old, edit.new) }
+            : f;
+        });
+      }
+      settlePendingEdit(
+        id,
+        stillMatches
+          ? `The user ACCEPTED the edit; it was applied to ${edit.path}.`
+          : `The user ACCEPTED the edit, but ${edit.path} changed in the meantime and the edit could not be applied. Read the file again if a change is still wanted.`,
+      );
+    } else {
+      settlePendingEdit(
+        id,
+        `The user REJECTED the edit; ${edit.path} is unchanged. Tell the user, and do not retry the same change.`,
+      );
+    }
+  };
+
+  // One agentic turn: the model ends with either a text answer (done) or
+  // tool_calls (execute them, feed the results back as tool messages, and
+  // go again — bounded, so a chatty model can't loop forever).
+  const MAX_TOOL_ROUNDS = 8;
   const sendChat = async () => {
     const text = chatInput.trim();
     if (!text || chatBusy) return;
-    // The model answers about the file the user is actually looking at.
-    // Binary files can't be inlined; the name is enough for the model to
-    // ask about.
-    const active =
-      activePath && Object.hasOwn(files, activePath) ? activePath : null;
-    const systemContent = active
-      ? `You are a helpful LaTeX assistant inside HomeHub, a browser-based TeX Live editor (XeLaTeX, TeX Live 2026). The user is editing "${active}" in the editor right now:\n\n<file path="${active}">\n${
-          typeof files[active] === "string"
-            ? files[active].slice(0, 24_000)
-            : "(binary file)"
-        }\n</file>\n\nAnswer concisely, in the user's language, and use \`\`\`tex code fences for code.`
-      : "You are a helpful LaTeX assistant inside HomeHub, a browser-based TeX Live editor (XeLaTeX, TeX Live 2026). Answer concisely, in the user's language, and use ```tex code fences for code.";
     setChatError(null);
     setChatInput("");
     setChatBusy(true);
     chatFollowRef.current = true;
     const controller = new AbortController();
     chatAbortRef.current = controller;
-    setChatMessages((prev) => [
-      ...prev,
+    // The conversation so far (state) + this user message, in wire shape.
+    const history: ApiChatMessage[] = [
+      { role: "system", content: buildChatSystemPrompt() },
+      ...toApiMessages(chatMessages),
       { role: "user", content: text },
-      { role: "assistant", content: "" },
-    ]);
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          messages: [
-            { role: "system", content: systemContent },
-            ...chatMessages,
-            { role: "user", content: text },
-          ],
-        }),
-        signal: controller.signal,
+    ];
+    setChatMessages((prev) => [...prev, { role: "user", content: text }]);
+    // Stream the reply into the LAST assistant bubble (the stub added per
+    // round); tool rounds add no deltas, so the stub is always the target.
+    const appendAssistantDelta = (delta: string) => {
+      setChatMessages((prev) => {
+        const next = prev.slice();
+        const last = next[next.length - 1];
+        if (!last || last.role !== "assistant") return prev;
+        next[next.length - 1] = { ...last, content: last.content + delta };
+        return next;
       });
-      if (!res.ok || !res.body) {
-        let detail = "";
-        try {
-          detail = String((await res.json())?.error ?? "");
-        } catch {
-          detail = `HTTP ${res.status}`;
-        }
-        throw new Error(detail || `HTTP ${res.status}`);
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let nl: number;
-        // The upstream is SSE: "data: {…}\n" lines, "\n\n" between
-        // events, and a final "data: [DONE]".
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).replace(/\r$/, "").trim();
-          buf = buf.slice(nl + 1);
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (!payload || payload === "[DONE]") continue;
-          let delta = "";
-          try {
-            const d = (
-              JSON.parse(payload) as {
-                choices?: { delta?: { content?: unknown } }[];
-              }
-            ).choices?.[0]?.delta?.content;
-            if (typeof d === "string") delta = d;
-          } catch {
-            // A partial or malformed line is skipped; the stream ends
-            // with [DONE] regardless.
-          }
-          if (delta) {
-            setChatMessages((prev) => {
-              const next = prev.slice();
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
+    };
+    try {
+      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        // Rebuild the system context: an accepted edit may have changed
+        // the active file since the previous round.
+        history[0] = { role: "system", content: buildChatSystemPrompt() };
+        setChatMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "" },
+        ]);
+        const turn = await streamChatCompletion(
+          history,
+          CHAT_TOOLS,
+          controller.signal,
+          appendAssistantDelta,
+        );
+        if (turn.toolCalls.length > 0) {
+          // Record the assistant message WITH its tool calls (the wire
+          // shape the next request needs) and execute each call.
+          setChatMessages((prev) => {
+            const next = prev.slice();
+            const last = next[next.length - 1];
+            if (last && last.role === "assistant")
               next[next.length - 1] = {
                 ...last,
-                content: last.content + delta,
+                toolCalls: turn.toolCalls.map((t) => ({
+                  id: t.id,
+                  name: t.function.name,
+                  args: t.function.arguments,
+                })),
               };
-              return next;
-            });
-          }
-        }
-      }
-      // A stream that ended with an empty assistant message means the
-      // model produced nothing — say so instead of a blank bubble.
-      setChatMessages((prev) => {
-        const last = prev[prev.length - 1];
-        if (last && last.role === "assistant" && last.content === "") {
-          return prev.slice(0, -1).concat({
+            return next;
+          });
+          history.push({
             role: "assistant",
-            content: "(no response from the model)",
+            content: turn.content,
+            tool_calls: turn.toolCalls,
+          });
+          for (const tc of turn.toolCalls) {
+            const result = await executeChatTool(
+              tc.id,
+              tc.function.name,
+              tc.function.arguments,
+            );
+            // Stop was clicked while a tool (apply_edit) held the loop.
+            if (controller.signal.aborted) {
+              const e = new Error("aborted");
+              e.name = "AbortError";
+              throw e;
+            }
+            history.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: result,
+            });
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                role: "tool",
+                toolCallId: tc.id,
+                toolName: tc.function.name,
+                content: result,
+              },
+            ]);
+          }
+          continue;
+        }
+        // Final text turn: the streamed content is already in the stub.
+        if (turn.content === "") {
+          setChatMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && last.role === "assistant" && last.content === "")
+              return prev.slice(0, -1).concat({
+                role: "assistant",
+                content: "(no response from the model)",
+              });
+            return prev;
           });
         }
-        return prev;
-      });
+        return;
+      }
+      setChatError(
+        `Stopped after ${MAX_TOOL_ROUNDS} tool rounds without a final answer. Ask again to continue.`,
+      );
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         setChatError((err as Error).message || "chat request failed");
       }
-      // Drop the empty assistant stub so the transcript stays clean.
+      // Drop an empty assistant stub so the transcript stays clean.
       setChatMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last && last.role === "assistant" && last.content === "")
@@ -653,7 +1278,7 @@ export default function EditorPage() {
         let list = await listProjects();
         if (list.length === 0) {
           // First run: the default project IS the starting point.
-          const now = Date.now();
+          const t = now();
           const id = await createDefaultProjectOnce();
           list = [
             {
@@ -662,8 +1287,8 @@ export default function EditorPage() {
               mainPath: DEFAULT_MAIN,
               openPaths: [DEFAULT_MAIN],
               activePath: DEFAULT_MAIN,
-              createdAt: now,
-              updatedAt: now,
+              createdAt: t,
+              updatedAt: t,
               id,
             },
           ];
@@ -736,7 +1361,7 @@ export default function EditorPage() {
     try {
       await saveProject(s.activeProjectId, nextMeta, s.files, savedRefsRef.current);
       savedRefsRef.current = new Map(Object.entries(s.files));
-      metaRef.current = { ...nextMeta, updatedAt: Date.now() };
+      metaRef.current = { ...nextMeta, updatedAt: now() };
       saveFailedRef.current = false;
       setProjects((prev) =>
         prev.map((p) =>
@@ -1068,6 +1693,23 @@ export default function EditorPage() {
     if (id) void clearBuildCache(id).catch(() => {});
   };
 
+  // The engine caches file-lookup misses for its worker's lifetime, so a
+  // package install or remove only takes effect after the worker restarts.
+  // A compile in flight must not be torn down (its promise would never
+  // settle), so the restart is deferred to that compile's finally block.
+  // Declared before the `compile` useCallback that captures this ref: the
+  // React compiler treats values passed to a hook as frozen from the call
+  // site on, so a later mutation (in restartCompiler) would be an
+  // immutability error.
+  const restartPendingRef = useRef(false);
+  const restartCompiler = () => {
+    if (busyRef.current) {
+      restartPendingRef.current = true;
+    } else {
+      disposeCompiler();
+    }
+  };
+
   const compile = useCallback(async () => {
     const compiler = compilerRef.current;
     if (!compiler) return;
@@ -1272,21 +1914,6 @@ export default function EditorPage() {
       }
     }
   }, [files, mainPath]);
-  compileRef.current = compile;
-
-  // The engine caches file-lookup misses for its worker's lifetime, so a
-  // package install or remove only takes effect after the worker restarts.
-  // A compile in flight must not be torn down (its promise would never
-  // settle), so the restart is deferred to that compile's finally block.
-  const restartPendingRef = useRef(false);
-  const restartCompiler = () => {
-    if (busyRef.current) {
-      restartPendingRef.current = true;
-    } else {
-      disposeCompiler();
-    }
-  };
-
   // Called by the packages modal after a successful install/remove: the
   // engine must restart to pick the package up (see above).
   const handlePackagesChanged = (msg: string) => {
@@ -1320,7 +1947,7 @@ export default function EditorPage() {
           instant: true,
         })
       ) {
-        lockRef.current.until = Date.now() + 500;
+        lockRef.current.until = now() + 500;
         return;
       }
       if (++tries >= 60) return;
@@ -1671,8 +2298,6 @@ export default function EditorPage() {
       }
     })();
   };
-  uploadFilesRef.current = uploadFiles;
-
   // Window-level drop guard (capture phase): files dropped ANYWHERE must
   // not navigate the page away (a file:// Security Error) — and real drops
   // are imported through the same path as the Files panel. The panel's own
@@ -1775,7 +2400,7 @@ export default function EditorPage() {
     }
     // A programmatic editor scroll follows; stop it from bouncing the
     // PDF back (sync-scroll feedback loop).
-    lockRef.current.until = Date.now() + 500;
+    lockRef.current.until = now() + 500;
     if (file === activePath) {
       revealLine(line, { flash: !quiet, select: !quiet });
     } else {
@@ -1792,7 +2417,7 @@ export default function EditorPage() {
     const pending = pendingJumpRef.current;
     if (!pending || pending.file !== activePath) return;
     pendingJumpRef.current = null;
-    lockRef.current.until = Date.now() + 500;
+    lockRef.current.until = now() + 500;
     revealLine(pending.line, {
       flash: !pending.quiet,
       select: !pending.quiet,
@@ -1820,7 +2445,7 @@ export default function EditorPage() {
     if (!line) return;
     const entry = findOutputForSource(syncEntries, activePath, line);
     if (!entry) return;
-    lockRef.current.until = Date.now() + 500;
+    lockRef.current.until = now() + 500;
     pdfRef.current?.scrollToPosition(entry.page, entry.yTop, {
       select: true,
       instant: false,
@@ -1831,8 +2456,8 @@ export default function EditorPage() {
 
   /** Editor scrolled: the PDF follows the editor's top visible line. */
   const handleEditorScroll = () => {
-    const now = Date.now();
-    if (!syncScrollRef.current || lockRef.current.until > now) return;
+    const t = now();
+    if (!syncScrollRef.current || lockRef.current.until > t) return;
     const editor = editorRef.current;
     const entries = syncEntriesRef.current;
     if (!editor || !entries) return;
@@ -1841,7 +2466,7 @@ export default function EditorPage() {
     const line = ranges[0].startLineNumber;
     const entry = findOutputForSource(entries, activePathRef.current, line);
     if (!entry) return;
-    lockRef.current.until = now + 500;
+    lockRef.current.until = t + 500;
     pdfRef.current?.scrollToPosition(entry.page, entry.yTop, {
       select: false,
       instant: true,
@@ -1854,15 +2479,15 @@ export default function EditorPage() {
     // pending scroll target at wherever the reader scrolls it, so the new
     // PDF lands where they left off, not where the build started.
     if (busyRef.current) pendingScrollRef.current = { page, yTop: yTopPts };
-    const now = Date.now();
-    if (!syncScrollRef.current || lockRef.current.until > now) return;
+    const t = now();
+    if (!syncScrollRef.current || lockRef.current.until > t) return;
     const entries = syncEntriesRef.current;
     if (!entries) return;
     // x = 0: for scroll-following the leftmost line of the physical line
     // is the right one (single-column documents).
     const entry = findSourceForPoint(entries, page, 0, yTopPts);
     if (!entry) return;
-    lockRef.current.until = now + 500;
+    lockRef.current.until = t + 500;
     jumpToSource(entry, true);
   };
 
@@ -1873,6 +2498,43 @@ export default function EditorPage() {
         .map((p) => ({ path: p, isBinary: typeof files[p] !== "string" })),
     [files],
   );
+
+  // Keep the mirror refs fresh after every render. They exist because the
+  // handlers attached once (Monaco onMount, the window drop guard, the PDF
+  // scroll callback) and the long-lived chat tool loop outlive renders,
+  // where a render-time closure would be stale. Written in a layout
+  // effect rather than during render (the React compiler forbids updating
+  // refs while rendering); it runs before passive effects and before
+  // paint, so the auto-compile effect and every event handler read
+  // current values — including the chat tools' context (chatCtxRef).
+  useLayoutEffect(() => {
+    filesRef.current = files;
+    statusRef.current = status;
+    persistStateRef.current = {
+      files,
+      mainPath,
+      openPaths,
+      activePath,
+      projectName,
+      activeProjectId,
+      loaded,
+    };
+    syncEntriesRef.current = syncEntries;
+    activePathRef.current = activePath;
+    syncScrollRef.current = syncScroll;
+    autoRef.current = autoRecompile;
+    compileRef.current = compile;
+    uploadFilesRef.current = uploadFiles;
+    chatCtxRef.current = {
+      ...chatCtxRef.current,
+      files,
+      activePath,
+      mainPath,
+      log,
+      entries,
+      handlePackagesChanged,
+    };
+  });
 
   const statusText =
     status.kind === "idle"
@@ -2417,29 +3079,108 @@ export default function EditorPage() {
                 >
                   {chatMessages.length === 0 && !chatError && (
                     <p className="text-xs text-stone">
-                      Ask about the document you are editing — the model can
-                      see the active file.
+                      Ask about the document you are editing — or have the
+                      assistant read files, compile, fix code (you approve each
+                      change), or install packages.
                     </p>
                   )}
-                  {chatMessages.map((m, i) => (
-                    <div
-                      key={i}
-                      data-chat-role={m.role}
-                      className={
-                        "rounded border px-2 py-1.5 " +
-                        (m.role === "user"
-                          ? "border-mint/60 bg-mint/30"
-                          : "border-stone/30 bg-white/70")
-                      }
-                    >
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-stone">
-                        {m.role === "user" ? "You" : "Assistant"}
+                  {chatMessages.map((m, i) =>
+                    m.role === "tool" ? (
+                      <div
+                        key={i}
+                        data-chat-role="tool"
+                        className="rounded border border-stone/30 bg-peach/30 px-2 py-1.5"
+                      >
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-stone">
+                          Tool · {m.toolName}
+                        </div>
+                        <div className="max-h-28 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-ink">
+                          {m.content}
+                        </div>
                       </div>
-                      <div className="whitespace-pre-wrap text-xs leading-relaxed text-ink">
-                        {m.content ||
-                          (i === chatMessages.length - 1 && chatBusy
-                            ? "…"
-                            : "")}
+                    ) : (
+                      <div
+                        key={i}
+                        data-chat-role={m.role}
+                        className={
+                          "rounded border px-2 py-1.5 " +
+                          (m.role === "user"
+                            ? "border-mint/60 bg-mint/30"
+                            : "border-stone/30 bg-white/70")
+                        }
+                      >
+                        <div className="text-[10px] font-semibold uppercase tracking-wide text-stone">
+                          {m.role === "user" ? "You" : "Assistant"}
+                        </div>
+                        <div className="whitespace-pre-wrap text-xs leading-relaxed text-ink">
+                          {m.content ||
+                            (i === chatMessages.length - 1 && chatBusy
+                              ? "…"
+                              : "")}
+                        </div>
+                        {m.role === "assistant" &&
+                          m.toolCalls &&
+                          m.toolCalls.length > 0 && (
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {m.toolCalls.map((t) => (
+                                <span
+                                  key={t.id}
+                                  className="rounded bg-peach/60 px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink"
+                                >
+                                  ⚙ {t.name}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                      </div>
+                    ),
+                  )}
+                  {pendingEdits.map((p) => (
+                    <div
+                      key={p.id}
+                      data-chat-pending-edit
+                      className="rounded border border-ink/20 bg-white/80 p-2 shadow-sm"
+                    >
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-ink">
+                          Apply edit
+                        </span>
+                        <span className="truncate font-mono text-[11px] text-stone">
+                          {p.path}:{p.line}
+                        </span>
+                      </div>
+                      <pre className="mt-1 max-h-40 overflow-auto rounded bg-cream p-1.5 font-mono text-[11px] leading-relaxed">
+                        {diffSnippet(p.old, p.new).map((d, li) => (
+                          <div
+                            key={li}
+                            className={
+                              d.t === "del"
+                                ? "bg-red-100 text-red-800"
+                                : d.t === "add"
+                                  ? "bg-green-100 text-green-800"
+                                  : "text-stone"
+                            }
+                          >
+                            {d.t === "del" ? "- " : d.t === "add" ? "+ " : "  "}
+                            {d.text || " "}
+                          </div>
+                        ))}
+                      </pre>
+                      <div className="mt-1.5 flex gap-2">
+                        <button
+                          data-chat-edit-accept
+                          onClick={() => decideEdit(p.id, true)}
+                          className="rounded bg-mint px-2.5 py-1 text-xs font-semibold text-ink transition-colors hover:bg-ink hover:text-mint"
+                        >
+                          Accept
+                        </button>
+                        <button
+                          data-chat-edit-reject
+                          onClick={() => decideEdit(p.id, false)}
+                          className="rounded border border-stone/40 px-2.5 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
+                        >
+                          Reject
+                        </button>
                       </div>
                     </div>
                   ))}
