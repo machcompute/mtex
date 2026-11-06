@@ -1,7 +1,7 @@
 // Vendored from the Texlyre busytex build of TeX Live 2026
 // (github.com/TeXlyre/texlyre-busytex-build, release
 // build_wasm_46ebb6216a5c1fe63dd1dc885831d1a8cef2dc86_31802832436_1 — the
-// same pinned release as the WASM assets in /api/texlive/), with seven
+// same pinned release as the WASM assets in /api/texlive/), with eight
 // changes:
 //
 // remote_packages — the data-package resolver takes an optional list of
@@ -66,6 +66,14 @@
 // entry in logs so the page's log shows why the step did not run. The
 // result carries build_state back (the fresh .aux/.bcf/.bbl plus the
 // .bib hashes) for the page to persist for the next compile.
+//
+// URL-stamped locateFile — the client stamps every /api/texlive/* URL with
+// the release tag (?v=<tag>, src/lib/texlive-release.ts) so a repin changes
+// the URL and bypasses the route's 1-year immutable browser cache. The
+// upstream locateFile matched the .data URL built from the .js URL with
+// endsWith(basename), which a query string breaks (fetch(undefined) → 404
+// "…/busytex/undefined" at engine init). It now matches the un-stamped
+// prefix; the returned .data URL keeps the query.
 //
 // Bump SCRIPT_VERSION in busytex_worker.js whenever this file changes.
 //
@@ -285,7 +293,12 @@ class BusytexPipeline {
     static calledRun = false;
     static data_packages = [];
     static locateFile(remote_package_name) {
-        return BusytexPipeline.data_packages.map(data_package_js => data_package_js.replace('.js', '.data')).find(data_file => data_file.endsWith(remote_package_name));
+        // PATCH: the client stamps every /api/texlive/* URL with the release
+        // tag (src/lib/texlive-release.ts — ?v=<tag>) so a repin changes the
+        // URL and bypasses the route's 1-year immutable browser cache. The
+        // .data URL the engine fetches must KEEP the query (the browser
+        // cache key includes it), so match on the un-stamped prefix.
+        return BusytexPipeline.data_packages.map(data_package_js => data_package_js.replace('.js', '.data')).find(data_file => data_file.split('?')[0].endsWith(remote_package_name));
     }
     //FIXME end
 

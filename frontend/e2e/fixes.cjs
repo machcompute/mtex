@@ -620,8 +620,10 @@ async function seed(r, p) {
   // (error arrives outside a compile) or "Compilation failed" (it arrives
   // while the first compile is in flight) — both mean the promise settled
   // and the worker was disposed, which is what the fix guarantees.
+  // Trailing *: asset URLs carry a ?v=<release> stamp
+  // (src/lib/texlive-release.ts) and the glob must match the full URL.
   await r6.page.route(
-    "**/api/texlive/texlive-basic.data",
+    "**/api/texlive/texlive-basic.data*",
     (route) => route.abort(),
   );
   await r6.goto();
@@ -639,7 +641,7 @@ async function seed(r, p) {
     /Engine failed to load|Compilation failed/i.test(eng),
     eng,
   );
-  await r6.page.unroute("**/api/texlive/texlive-basic.data");
+  await r6.page.unroute("**/api/texlive/texlive-basic.data*");
   const stR = await r6.recompile();
   r6.ok(
     "#2/#3 the next compile recreates the worker and succeeds",

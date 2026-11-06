@@ -44,11 +44,23 @@
 //   events:  {ready}, {loaded}, {print: string}, {error: string}
 
 import { remotePackageNames, storeFiles } from "@/lib/ctan-store";
+import { RELEASE_ID } from "@/lib/texlive-release";
 import type { BuildState } from "@/lib/opfs";
 
 // Same origin: src/app/api/texlive/[name]/route.ts downloads the pinned
 // release assets on first request and serves them from a local disk cache.
 const TEXLIVE_BASE = "/api/texlive";
+
+// Every asset URL is stamped with the release tag (texlive-release.ts).
+// The route serves /api/texlive/* with `cache-control: immutable,
+// max-age=1y`, so un-stamped URLs would keep serving the PREVIOUS pin's
+// assets after a repin — a stale mixed-version set that crashed the
+// data-package preload on 2026-11-04, when the pin moved on unchanged
+// URLs. Bumping the pin changes RELEASE_ID and therefore every URL, so
+// the browser refetches a consistent set. The route ignores the query,
+// and it survives the pipeline's `.js` → `.data` rewrite (BusytexPipeline
+// .locateFile builds the .data URLs from these).
+const asset = (name: string) => `${TEXLIVE_BASE}/${name}?v=${RELEASE_ID}`;
 
 // The engine's three data packages (their .js scripts are the catalog the
 // resolver scans for \ProvidesPackage; the .data files are the trees the
@@ -56,11 +68,11 @@ const TEXLIVE_BASE = "/api/texlive";
 // most packages, and the fonts; recommended and extra load on demand when
 // a compiled document actually uses a package from them.
 const DATA_PACKAGES_JS = [
-  `${TEXLIVE_BASE}/texlive-basic.js`,
-  `${TEXLIVE_BASE}/texlive-recommended.js`,
-  `${TEXLIVE_BASE}/texlive-extra.js`,
+  asset("texlive-basic.js"),
+  asset("texlive-recommended.js"),
+  asset("texlive-extra.js"),
 ];
-const PRELOAD_DATA_PACKAGES_JS = [`${TEXLIVE_BASE}/texlive-basic.js`];
+const PRELOAD_DATA_PACKAGES_JS = [asset("texlive-basic.js")];
 
 // The only driver that produces a PDF in this build (xelatex → xdvipdfmx).
 const DRIVER = "xetex_bibtex8_dvipdfmx";
@@ -69,7 +81,7 @@ const DRIVER = "xetex_bibtex8_dvipdfmx";
 // public/busytex/busytex_pipeline.js changes: browsers cache classic worker
 // scripts aggressively and may not refetch them even on a hard reload.
 // Keep in sync with SCRIPT_VERSION in busytex_worker.js.
-const WORKER_VERSION = 26;
+const WORKER_VERSION = 27;
 
 export type CompileResult = {
   pdf: Uint8Array | null;
@@ -221,14 +233,14 @@ export class BusyTexCompiler {
       // The worker reads evt.data and expects the fields at the top level
       // (the release protocol posts plain message objects, no wrapper).
       worker.postMessage({
-        busytex_js: `${TEXLIVE_BASE}/busytex.js`,
-        busytex_wasm: `${TEXLIVE_BASE}/busytex.wasm`,
+        busytex_js: asset("busytex.js"),
+        busytex_wasm: asset("busytex.wasm"),
         // The biber module is lazy in the pipeline (constructor only stores
         // the URLs); the assets load on the first biber run, so passing
         // them now costs nothing.
-        biber_js: `${TEXLIVE_BASE}/biber.js`,
-        biber_wasm: `${TEXLIVE_BASE}/biber.wasm`,
-        biber_data: `${TEXLIVE_BASE}/biber.data`,
+        biber_js: asset("biber.js"),
+        biber_wasm: asset("biber.wasm"),
+        biber_data: asset("biber.data"),
         // The data-package catalog (the resolver fetches each .js for the
         // \ProvidesPackage scan) and the set to preload now (basic only —
         // the other two are hundreds of MB and load on demand).

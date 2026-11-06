@@ -18,6 +18,10 @@
 // long-lived Cache-Control, so the ~93 MB basic .data package is downloaded
 // once — from the web on first request, from the local cache after.
 // Range requests are supported the way the previous Go backend did.
+//
+// Because that Cache-Control is a 1-year immutable, the clients stamp every
+// URL with ?v=<release tag> (texlive-release.ts) so a repin changes the URL
+// and forces a refetch of a consistent set; this route ignores the query.
 
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";

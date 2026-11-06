@@ -1,16 +1,18 @@
 // Disk cache for the pinned busytex WASM release assets (see
 // /api/texlive/[name]). The assets are immutable (pinned release tag), so
-// once downloaded they are served from .texlive-cache forever.
+// once downloaded they are served from .texlive-cache forever — for the
+// current release. Bumping the pin (RELEASE_BASE in texlive-release.ts)
+// invalidates the whole directory: a .release marker file holds the base
+// URL, and on a mismatch the cache is wiped and re-downloaded, so a new
+// pin can never serve a mixed-version asset set.
 //
 // The cache lives here (not in the route) so the package store can reuse it
 // to read the engine's basic-tree file list (texlive-basic.js embeds it)
 // without duplicating the download logic.
 
-import { mkdir, open, rename, stat } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-
-export const RELEASE_BASE =
-  "https://github.com/TeXlyre/texlyre-busytex-build/releases/download/build_wasm_46ebb6216a5c1fe63dd1dc885831d1a8cef2dc86_31802832436_1";
+import { RELEASE_BASE } from "./texlive-release";
 
 // The fixed asset set the worker may load; anything else is rejected.
 export const ASSETS: Record<string, string> = {
@@ -40,12 +42,48 @@ export function cacheDir(): string {
   );
 }
 
+// The cache is keyed by the pinned release, not by the individual assets:
+// the engine needs all of them from the SAME build (a .js from one pin and
+// a .data from another is exactly the mixed set that crashed the
+// data-package preload on 2026-11-04, when the pin moved while the browser
+// held the old URLs under a 1-year immutable cache). The .release marker
+// holds the base URL of the release the files in the cache came from; a
+// mismatch wipes the directory. ensureAsset() awaits this before anything
+// else, so no download can start before the cache is known consistent.
+let releaseCheck: Promise<void> | null = null;
+function ensureRelease(): Promise<void> {
+  if (!releaseCheck) {
+    releaseCheck = (async () => {
+      const dir = cacheDir();
+      const marker = path.join(dir, ".release");
+      let current: string | null = null;
+      try {
+        current = await readFile(marker, "utf8");
+      } catch {
+        // no marker yet — either a first run or a cache predating the
+        // marker; trust the files already there and just stamp them
+      }
+      if (current === RELEASE_BASE) return;
+      if (current !== null) {
+        console.log(
+          `[texlive] release changed to ${RELEASE_BASE}; wiping cache ${dir}`,
+        );
+        await rm(dir, { recursive: true, force: true });
+        await mkdir(dir, { recursive: true });
+      }
+      await writeFile(marker, RELEASE_BASE);
+    })();
+  }
+  return releaseCheck;
+}
+
 // One in-flight download per asset: concurrent first requests await the
 // same promise instead of racing on the same temp file.
 const downloads = new Map<string, Promise<string>>();
 
 /** Resolve the local path of a cached asset, downloading it on first use. */
 export async function ensureAsset(name: string): Promise<string> {
+  await ensureRelease();
   const dir = cacheDir();
   const dest = path.join(dir, name);
   try {

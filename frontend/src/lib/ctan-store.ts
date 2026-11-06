@@ -38,6 +38,7 @@ import {
   writeFile,
 } from "@/lib/opfs";
 import { parseTar } from "@/lib/tar";
+import { RELEASE_ID } from "@/lib/texlive-release";
 import { XzReadableStream } from "xz-decompress";
 
 // ---------------------------------------------------------------------------
@@ -785,7 +786,11 @@ let basicNames: Promise<Set<string>> | null = null;
 function basicBasenameSet(): Promise<Set<string>> {
   if (!basicNames) {
     basicNames = (async () => {
-      const res = await fetch("/api/texlive/texlive-basic.js");
+      // ?v= keeps this fetch on the current pin (see texlive-release.ts —
+      // the route's 1-year immutable cache makes un-stamped URLs sticky).
+      const res = await fetch(
+        `/api/texlive/texlive-basic.js?v=${RELEASE_ID}`,
+      );
       if (!res.ok)
         throw new Error(`texlive-basic.js -> HTTP ${res.status}`);
       const src = await res.text();
