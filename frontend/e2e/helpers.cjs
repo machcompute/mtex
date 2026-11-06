@@ -100,13 +100,30 @@ class Runner {
   // it the wait would be indistinguishable from "nothing happened".
   // Polls are 200 ms apart: a warm rebuild of a small project can finish
   // in well under a second, and a 1 s poll could miss the whole busy
-  // window when the before-text already equals the terminal text.
+  // window when the before-text already equals the terminal text. The
+  // busy state is therefore also watched IN-PAGE (requestAnimationFrame):
+  // a ~30 ms rebuild can complete between two CDP polls, and when its
+  // terminal text is the same as the pre-click text ("Compiled in 30 ms"
+  // twice), the CDP-only poll sees neither the busy window nor a text
+  // change and times out. The rAF flag is set the frame the button first
+  // disables, so the window cannot be missed.
   // Button state and status text are read in ONE page evaluate: separate
   // CDP reads can straddle the terminal commit (text read just before the
   // done state renders, button read just after), which would return a
   // stale "Compiling…" line for a build that has already finished.
   async recompile() {
     const btn = this.page.locator('button[title^="Recompile"]').first();
+    await this.page.evaluate(() => {
+      window.__hhBusy = false;
+      window.__hhBusyStop = false;
+      const b = () => document.querySelector('button[title^="Recompile"]');
+      const tick = () => {
+        if (window.__hhBusyStop) return;
+        if (b()?.disabled) window.__hhBusy = true;
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
     const snap = () =>
       this.page.evaluate(() => {
         const b = document.querySelector('button[title^="Recompile"]');
@@ -114,6 +131,7 @@ class Runner {
         return {
           disabled: b ? b.disabled : true,
           text: (s?.textContent || "").trim(),
+          busy: !!window.__hhBusy,
         };
       });
     const before = (await snap()).text;
@@ -121,10 +139,14 @@ class Runner {
     let sawBusy = false;
     for (let i = 0; i < 450; i++) {
       await this.page.waitForTimeout(200);
-      const { disabled, text } = await snap();
-      if (disabled) sawBusy = true;
-      if ((sawBusy || text !== before) && !disabled) return text;
+      const { disabled, text, busy } = await snap();
+      if (disabled || busy) sawBusy = true;
+      if ((sawBusy || text !== before) && !disabled) {
+        await this.page.evaluate(() => (window.__hhBusyStop = true));
+        return text;
+      }
     }
+    await this.page.evaluate(() => (window.__hhBusyStop = true));
     return "";
   }
 
