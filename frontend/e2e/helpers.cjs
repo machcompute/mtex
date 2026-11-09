@@ -330,7 +330,7 @@ async function readProject(r) {
 // so dependency-resolution assertions run against a clean store — no
 // cleanup pass is needed.
 
-/** Open the editor's Packages modal (always in the top bar). */
+/** Open the editor's Packages modal (the icon rail's bottom button). */
 async function openPackagesModal(r) {
   await r.page.click('button[data-action="packages"]');
   await r.page.waitForSelector('[data-modal="packages"]', { timeout: 10000 });

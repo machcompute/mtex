@@ -35,7 +35,6 @@ import {
   IconChart,
   IconChat,
   IconCheck,
-  IconChevronDown,
   IconClose,
   IconCode,
   IconClock,
@@ -45,12 +44,10 @@ import {
   IconImage,
   IconLink,
   IconPlay,
-  IconPlus,
   IconSpinner,
   IconSwap,
   IconSync,
   IconTable,
-  IconTrash,
 } from "@/components/icons";
 import GitHubModal, { type PullRequest, type PushRequest } from "@/components/github-modal";
 import PackagesModal from "@/components/packages-modal";
@@ -67,7 +64,6 @@ import {
   RESERVED_NAMES,
   createProject,
   decodeText,
-  deleteProject,
   listProjects,
   clearBuildCache,
   loadBuildCache,
@@ -87,7 +83,6 @@ import {
   DEFAULT_FILES,
   DEFAULT_MAIN,
   DEFAULT_PROJECT_NAME,
-  nextProjectName,
 } from "@/lib/defaults";
 import { renderFirstPagePng } from "@/lib/preview";
 import {
@@ -564,7 +559,6 @@ export default function EditorPage() {
   // resolves, or forever when storage is unavailable).
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [projectsMenuOpen, setProjectsMenuOpen] = useState(false);
   const [ghModalOpen, setGhModalOpen] = useState(false);
   const [pkgModalOpen, setPkgModalOpen] = useState(false);
   // True once a project has been loaded from OPFS (or the attempt failed);
@@ -1455,91 +1449,6 @@ export default function EditorPage() {
 
   // --- project operations -------------------------------------------------
 
-  const switchProject = (id: string) => {
-    if (id === activeProjectId || switchingRef.current) return;
-    setProjectsMenuOpen(false);
-    switchingRef.current = true;
-    void (async () => {
-      try {
-        // Flush the outgoing project's pending edits first.
-        await persistNow();
-        const list = await listProjects();
-        const { meta, files: loadedFiles } = await loadProject(id);
-        applyProject(id, meta, loadedFiles, list);
-      } catch {
-        showNotice("Couldn't open that project");
-      } finally {
-        switchingRef.current = false;
-      }
-    })();
-  };
-
-  const newProject = () => {
-    if (switchingRef.current) return;
-    setProjectsMenuOpen(false);
-    switchingRef.current = true;
-    void (async () => {
-      try {
-        await persistNow();
-        const name = nextProjectName(projects.map((p) => p.name));
-        const id = await createProject(
-          name,
-          DEFAULT_FILES,
-          {
-            mainPath: DEFAULT_MAIN,
-            openPaths: [DEFAULT_MAIN],
-            activePath: DEFAULT_MAIN,
-          },
-        );
-        const list = await listProjects();
-        const { meta, files: loadedFiles } = await loadProject(id);
-        applyProject(id, meta, loadedFiles, list);
-      } catch {
-        showNotice("Couldn't create the project");
-      } finally {
-        switchingRef.current = false;
-      }
-    })();
-  };
-
-  const deleteProjectById = (id: string) => {
-    if (switchingRef.current) return;
-    const target = projects.find((p) => p.id === id);
-    const name =
-      id === activeProjectId
-        ? projectName
-        : (target?.name ?? "the project");
-    if (!window.confirm(`Delete “${name}” and all its files?`)) return;
-    setProjectsMenuOpen(false);
-    switchingRef.current = true;
-    void (async () => {
-      try {
-        await deleteProject(id);
-        let list = await listProjects();
-        if (id === activeProjectId) {
-          try {
-            localStorage.removeItem(ACTIVE_PROJECT_KEY);
-          } catch {
-            // best effort
-          }
-          if (list.length === 0) {
-            // Deleting down to empty: start from a fresh default project.
-            await createDefaultProjectOnce();
-            list = await listProjects();
-          }
-          const { meta, files: loadedFiles } = await loadProject(list[0].id);
-          applyProject(list[0].id, meta, loadedFiles, list);
-        } else {
-          setProjects(list);
-        }
-      } catch {
-        showNotice("Couldn't delete that project");
-      } finally {
-        switchingRef.current = false;
-      }
-    })();
-  };
-
   // Pull a GitHub repo into a project. The files arrive already fetched (the
   // modal does the network work); here we only touch OPFS. A fresh repo
   // creates a new project named for it; re-pulling the same repo (any branch)
@@ -1639,21 +1548,6 @@ export default function EditorPage() {
         `${req.owner}/${req.repo} @ ${req.branch} (${req.sha.slice(0, 7)})`,
     );
   };
-
-  // The Projects menu closes on any click outside of it.
-  useEffect(() => {
-    if (!projectsMenuOpen) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (
-        e.target instanceof Element &&
-        !e.target.closest('[data-menu="projects"]')
-      ) {
-        setProjectsMenuOpen(false);
-      }
-    };
-    document.addEventListener("click", onDocClick);
-    return () => document.removeEventListener("click", onDocClick);
-  }, [projectsMenuOpen]);
 
   // Same outside-click dismissal for the toolbar popovers (compile
   // history, project notes, project stats).
@@ -3197,7 +3091,10 @@ export default function EditorPage() {
     </div>
   );
 
-  // Draggable divider between the panes; the arrows swap them.
+  // Draggable divider between the panes. The swap button only appears on
+  // hover: the divider is 6 px wide but the button is not, so an always-
+  // visible button sits on top of the editor's scrollbar and eats its
+  // clicks. At rest it is invisible and click-through.
   const divider = (
     <div
       onPointerDown={(e) => {
@@ -3215,8 +3112,8 @@ export default function EditorPage() {
           })),
         );
       }}
-      title="Drag to re-split — click the arrows to swap the panes"
-      className="relative z-10 w-1.5 shrink-0 cursor-col-resize bg-ink/10 transition-colors hover:bg-mint"
+      title="Drag to re-split — hover for the swap button"
+      className="group relative z-10 w-1.5 shrink-0 cursor-col-resize bg-ink/10 transition-colors hover:bg-mint"
     >
       <button
         onPointerDown={(e) => e.stopPropagation()}
@@ -3224,9 +3121,9 @@ export default function EditorPage() {
           setWorkspace((w) => ({ ...w, editorFirst: !w.editorFirst }))
         }
         title="Swap editor and PDF"
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded bg-white p-1 text-stone shadow-sm transition-colors hover:bg-mint hover:text-ink"
+        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded bg-white p-0.5 text-stone opacity-0 shadow-sm transition-opacity pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 hover:bg-mint hover:text-ink"
       >
-        <IconSwap className="h-3.5 w-3.5" />
+        <IconSwap className="h-3 w-3" />
       </button>
     </div>
   );
@@ -3243,86 +3140,9 @@ export default function EditorPage() {
           <span className="h-3 w-3 rounded-sm bg-mint" />
           HomeHub
         </Link>
-        {/* Projects menu: switch between the OPFS projects, or create and
-            delete them. The active row shows the live name (the input in
-            the files header edits it before the next debounced save). */}
-        <div className="relative shrink-0" data-menu="projects">
-          <button
-            data-action="projects"
-            onClick={() => setProjectsMenuOpen((v) => !v)}
-            title="Open, create or delete projects (kept in your browser)"
-            className={
-              "flex items-center gap-1 rounded border px-2.5 py-1 text-xs transition-colors " +
-              (projectsMenuOpen
-                ? "border-mint bg-peach/50 text-ink"
-                : "border-stone/40 text-stone hover:bg-peach hover:text-ink")
-            }
-          >
-            Projects
-            <IconChevronDown className="h-3 w-3" />
-          </button>
-          {projectsMenuOpen && (
-            <div className="absolute left-0 top-full z-30 mt-1 w-64 rounded-md border border-ink/10 bg-white py-1 shadow-lg">
-              {projects.map((p) => {
-                const active = p.id === activeProjectId;
-                return (
-                  <div
-                    key={p.id}
-                    data-project={p.id}
-                    data-active={active || undefined}
-                    className="group flex items-center gap-1 px-2 py-0.5"
-                  >
-                    <button
-                      onClick={() => switchProject(p.id)}
-                      title={active ? "Current project" : `Open ${p.name}`}
-                      className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs text-ink hover:bg-peach/60"
-                    >
-                      <span className="truncate">
-                        {active ? projectName : p.name}
-                      </span>
-                      {active && (
-                        <IconCheck className="h-3 w-3 shrink-0 text-mint" />
-                      )}
-                    </button>
-                    <button
-                      onClick={() => deleteProjectById(p.id)}
-                      title="Delete project"
-                      className="shrink-0 rounded p-1 text-stone opacity-0 transition-opacity hover:bg-peach/60 hover:text-ink group-hover:opacity-100"
-                    >
-                      <IconTrash className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                );
-              })}
-              <div className="my-1 h-px bg-ink/10" />
-              <button
-                onClick={newProject}
-                className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs font-medium text-ink hover:bg-peach/60"
-              >
-                <IconPlus className="h-3.5 w-3.5 text-mint" />
-                New project
-              </button>
-            </div>
-          )}
-        </div>
-        <button
-          data-action="github"
-          onClick={() => setGhModalOpen(true)}
-          title="Import a project from GitHub (your token stays in this browser)"
-          className="flex shrink-0 items-center gap-1.5 rounded border border-stone/40 px-2.5 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
-        >
-          <IconGitHub className="h-3.5 w-3.5" />
-          GitHub
-        </button>
-        <button
-          data-action="packages"
-          onClick={() => setPkgModalOpen(true)}
-          title="Pull or remove LaTeX packages from CTAN"
-          className="flex shrink-0 items-center gap-1.5 rounded border border-stone/40 px-2.5 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
-        >
-          <IconSync className="h-3.5 w-3.5" />
-          Packages
-        </button>
+        {/* Project switching, creating and deleting live on the dashboard
+            (the wordmark goes there); GitHub and Packages live in the
+            left panel's icon rail. */}
         {/* Recompile now sits in the PDF pane's header; the log and chat
             moved to the left panel's icon rail. The build status stays in
             the header — e2e reads it from `header span.truncate`. */}
@@ -3422,6 +3242,25 @@ export default function EditorPage() {
               <Icon className="h-4 w-4" />
             </button>
           ))}
+          {/* GitHub and Packages anchor the bottom of the rail (moved out
+              of the top bar); data-action keeps the e2e selectors. */}
+          <div className="flex-1" />
+          <button
+            data-action="github"
+            onClick={() => setGhModalOpen(true)}
+            title="Import a project from GitHub (your token stays in this browser)"
+            className="rounded p-1.5 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+          >
+            <IconGitHub className="h-4 w-4" />
+          </button>
+          <button
+            data-action="packages"
+            onClick={() => setPkgModalOpen(true)}
+            title="Pull or remove LaTeX packages from CTAN"
+            className="rounded p-1.5 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+          >
+            <IconSync className="h-4 w-4" />
+          </button>
         </nav>
 
         {/* Left panel: width from the workspace layout, right edge

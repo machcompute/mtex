@@ -2,10 +2,16 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { IconFile, IconPlus } from "@/components/icons";
+import {
+  IconFile,
+  IconPlus,
+  IconSpinner,
+  IconTrash,
+} from "@/components/icons";
 import {
   ACTIVE_PROJECT_KEY,
   createProject,
+  deleteProject,
   listProjects,
   loadPreview,
   type ProjectSummary,
@@ -39,6 +45,8 @@ export default function Home() {
   const [cards, setCards] = useState<Card[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // The project id currently being deleted (its card shows the busy trash).
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,6 +108,25 @@ export default function Home() {
     }
   };
 
+  // Delete a project and all its files. The card's preview URL is
+  // revoked right away; the effect cleanup's double revoke is a no-op.
+  const removeProject = async (id: string) => {
+    const card = cards?.find((c) => c.project.id === id);
+    if (deleting || !card) return;
+    if (!window.confirm(`Delete “${card.project.name}” and all its files?`))
+      return;
+    setDeleting(id);
+    try {
+      await deleteProject(id);
+      if (card.previewUrl) URL.revokeObjectURL(card.previewUrl);
+      setCards((cs) => (cs ? cs.filter((c) => c.project.id !== id) : cs));
+    } catch {
+      setError("Couldn't delete that project");
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   return (
     <div className="min-h-full bg-cream">
       <header className="mx-auto flex w-full max-w-5xl items-center justify-between px-6 pt-8">
@@ -157,37 +184,52 @@ export default function Home() {
         {cards !== null && cards.length > 0 && (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-5">
             {cards.map(({ project, previewUrl }) => (
-              <button
-                key={project.id}
-                onClick={() => openProject(project.id)}
-                title={`Open ${project.name}`}
-                className="group overflow-hidden rounded-lg border border-ink/10 bg-white text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-mint hover:shadow-md"
-              >
-                <div className="relative aspect-square w-full overflow-hidden border-b border-ink/10 bg-white">
-                  {previewUrl ? (
-                    <div
-                      className="absolute inset-0 bg-cover"
-                      style={{ backgroundImage: `url(${previewUrl})` }}
-                      aria-hidden
-                    />
+              // The delete button is a sibling of the card button, not a
+              // child: a nested <button> is invalid HTML.
+              <div key={project.id} className="group/card relative">
+                <button
+                  onClick={() => openProject(project.id)}
+                  title={`Open ${project.name}`}
+                  className="block w-full overflow-hidden rounded-lg border border-ink/10 bg-white text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-mint hover:shadow-md"
+                >
+                  <div className="relative aspect-square w-full overflow-hidden border-b border-ink/10 bg-white">
+                    {previewUrl ? (
+                      <div
+                        className="absolute inset-0 bg-cover"
+                        style={{ backgroundImage: `url(${previewUrl})` }}
+                        aria-hidden
+                      />
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center bg-cream">
+                        <IconFile className="h-10 w-10 text-stone/30" />
+                      </div>
+                    )}
+                  </div>
+                  <div className="px-3 py-2.5">
+                    <p
+                      className="truncate text-sm font-medium text-ink"
+                      title={project.name}
+                    >
+                      {project.name}
+                    </p>
+                    <p className="mt-0.5 text-xs text-stone">
+                      {relativeTime(project.updatedAt)}
+                    </p>
+                  </div>
+                </button>
+                <button
+                  onClick={() => removeProject(project.id)}
+                  disabled={deleting === project.id}
+                  title={`Delete ${project.name}`}
+                  className="absolute right-1.5 top-1.5 rounded bg-white/90 p-1.5 text-stone opacity-0 shadow-sm transition-opacity hover:bg-peach hover:text-ink disabled:cursor-wait disabled:opacity-50 group-hover/card:opacity-100"
+                >
+                  {deleting === project.id ? (
+                    <IconSpinner className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <div className="absolute inset-0 flex items-center justify-center bg-cream">
-                      <IconFile className="h-10 w-10 text-stone/30" />
-                    </div>
+                    <IconTrash className="h-3.5 w-3.5" />
                   )}
-                </div>
-                <div className="px-3 py-2.5">
-                  <p
-                    className="truncate text-sm font-medium text-ink"
-                    title={project.name}
-                  >
-                    {project.name}
-                  </p>
-                  <p className="mt-0.5 text-xs text-stone">
-                    {relativeTime(project.updatedAt)}
-                  </p>
-                </div>
-              </button>
+                </button>
+              </div>
             ))}
           </div>
         )}

@@ -267,12 +267,6 @@ const NAME_INPUT = 'input[title="Project name (saved in your browser)"]';
 const PAT_KEY = "homehub-github-pat-v1";
 const nameValue = (r) =>
   r.page.evaluate((sel) => document.querySelector(sel)?.value ?? "", NAME_INPUT);
-const openMenu = async (r) => {
-  await r.page.locator('button[data-action="projects"]').click();
-  await r.page.waitForSelector('[data-menu="projects"] div[data-project]', {
-    timeout: 10000,
-  });
-};
 // Wait until the branch select offers `dev` (it shows "Loading…" first).
 const waitBranches = async (r, sel) => {
   for (let i = 0; i < 40; i++) {
@@ -509,21 +503,36 @@ const r = new Runner("github");
     p2 ? JSON.stringify(p2.meta.source) : "(null)",
   );
 
-  // Exactly one "latex-repo" row in the Projects menu (and the default
-  // project is untouched next to it).
-  await openMenu(r);
-  const rowNames = await r.page
-    .locator('[data-menu="projects"] div[data-project] span.truncate')
-    .allTextContents();
+  // Exactly one "latex-repo" project in storage (and the default project
+  // is untouched next to it) — re-pulling must never create a duplicate.
+  const projectNames = await r.page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const projects = await root.getDirectoryHandle("projects");
+    const artifacts = await root.getDirectoryHandle("artifacts");
+    const names = [];
+    for await (const entry of projects.values()) {
+      if (entry.kind !== "directory") continue;
+      try {
+        const dir = await artifacts.getDirectoryHandle(entry.name);
+        const meta = JSON.parse(
+          await (await (await dir.getFileHandle("project.json")).getFile()).text(),
+        );
+        names.push(meta.name);
+      } catch {
+        names.push("(unreadable)");
+      }
+    }
+    return names;
+  });
   r.ok(
-    "menu: a single latex-repo row (no duplicate)",
-    rowNames.filter((n) => n === "latex-repo").length === 1,
-    JSON.stringify(rowNames),
+    "storage: a single latex-repo project (no duplicate)",
+    projectNames.filter((n) => n === "latex-repo").length === 1,
+    JSON.stringify(projectNames),
   );
   r.ok(
-    "menu: default project untouched",
-    rowNames.includes("LaTeX project"),
-    JSON.stringify(rowNames),
+    "storage: default project untouched",
+    projectNames.includes("LaTeX project"),
+    JSON.stringify(projectNames),
   );
 
   // --- push: the project's files go back as ONE new commit ---------------------

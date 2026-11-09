@@ -1,8 +1,9 @@
 // Project management: first-run defaults, create/switch/delete from the
-// Projects menu, rename persistence across reloads, delete-to-empty, and
-// the menu's outside-click close. The P1MARK marker edit trips the
-// auto-compile (bare text, so it fails and auto-opens the Log panel) —
-// ensureFilesPane restores the Files panel where the name input now lives.
+// dashboard (the editor's Projects menu is gone — the wordmark goes there),
+// rename persistence across reloads, and delete-to-empty. The P1MARK
+// marker edit trips the auto-compile (bare text, so it fails and
+// auto-opens the Log panel) — ensureFilesPane restores the Files panel
+// where the name input now lives.
 const { Runner, readProject } = require("./helpers.cjs");
 
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -18,8 +19,6 @@ const waitDialog = async (before) => {
 
 const NAME_INPUT = 'input[title="Project name (saved in your browser)"]';
 const nameInput = (r) => r.page.locator(NAME_INPUT);
-const projectsBtn = (r) => r.page.locator('button[data-action="projects"]');
-const menuRows = (r) => r.page.locator('[data-menu="projects"] div[data-project]');
 const nameValue = (r) =>
   r.page.evaluate(
     (sel) => document.querySelector(sel)?.value ?? "",
@@ -35,60 +34,80 @@ const ensureFilesPane = async (r) => {
     await sleep(200);
   }
 };
-const openMenu = async (r) => {
-  await projectsBtn(r).click();
-  await r.page.waitForSelector('[data-menu="projects"] div[data-project]', {
-    timeout: 10000,
-  });
-};
-// Rows render in updatedAt order (not creation order), so always pick by
-// exact name — "LaTeX project" must not match "LaTeX project 2".
-const rowByName = (r, name) =>
-  r.page
-    .locator('[data-menu="projects"] div[data-project]', {
-      has: r.page.locator("span.truncate", {
-        hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
-      }),
-    })
-    .first();
-// Click the row's open button and wait for the name input to reach `name`
-// — applyProject flips it in one commit, so this means the operation landed.
-const openRow = async (r, name) => {
-  const t0 = Date.now();
-  await rowByName(r, name).locator("button").first().click();
-  console.error(`openRow(${JSON.stringify(name)}): click resolved t+${Date.now() - t0}ms`);
-  // Timeline: log every change of the name input for up to 30 s. The
-  // switch chain is normally <1 s; the long window absorbs the engine's
-  // main-thread wasm init, which can starve it on a loaded machine.
-  let last = "";
-  for (let i = 0; i < 150; i++) {
-    await sleep(200);
-    const v = await r.page.evaluate(
-      (sel) => document.querySelector(sel)?.value ?? "",
-      NAME_INPUT,
-    );
-    if (v !== last) {
-      console.error(`openRow: t+${Date.now() - t0}ms input=${JSON.stringify(v)}`);
-      last = v;
-    }
-    if (v === name) return;
+
+// --- dashboard navigation (project create/switch/delete live there) ------
+const NEW_PROJECT_BTN = 'button[title="Create a new project and open it"]';
+const goDashboard = async (r) => {
+  // Idempotent: when the dashboard is already up, the editor's wordmark
+  // anchor can linger in the DOM (hidden) and `header a[href="/"]` would
+  // match it instead of navigating.
+  if (!(await r.page.locator(NEW_PROJECT_BTN).isVisible())) {
+    await r.page.locator('header a[href="/"]').click();
   }
-  const diag = await r.page.evaluate(() => ({
-    input:
-      document.querySelector(
-        'input[title="Project name (saved in your browser)"]',
-      )?.value ?? "(no input)",
-    rows: Array.from(
-      document.querySelectorAll('[data-menu="projects"] div[data-project]'),
-    ).map((d) => ({
-      name: d.querySelector("span.truncate")?.textContent,
-      active: d.hasAttribute("data-active"),
-    })),
-    notice: document.body.innerText.match(/Couldn[^\n]*|Storage[^\n]*/g) ?? [],
-  }));
-  console.error("openRow DIAG:", JSON.stringify(diag), "dialogs:", JSON.stringify(dialogs));
-  throw new Error(`openRow(${JSON.stringify(name)}): name never reached ${JSON.stringify(name)}`);
+  await r.page.waitForSelector(NEW_PROJECT_BTN, { timeout: 15000 });
+  // The card grid fills in asynchronously from OPFS (each card also reads
+  // its preview thumbnail) — wait until it settles (cards OR the empty
+  // state), not just for the header button.
+  for (let i = 0; i < 60; i++) {
+    const settled =
+      (await r.page.locator('button[title^="Open "]').count()) > 0 ||
+      (await r.page.locator("text=No projects yet").count()) > 0;
+    if (settled) break;
+    await sleep(250);
+  }
 };
+const cardBy = (r, name) =>
+  r.page.locator(`button[title="Open ${name}"]`);
+const cardCount = (r) => r.page.locator('button[title^="Open "]');
+// Click a card and wait for the editor to load that project — the name
+// input flips to it in one commit, so this means the switch landed.
+const openCard = async (r, name) => {
+  await cardBy(r, name).click();
+  await r.page.waitForFunction(
+    // waitForFunction takes ONE argument — destructure, don't spread.
+    ([sel, n]) => document.querySelector(sel)?.value === n,
+    [NAME_INPUT, name],
+    { timeout: 20000 },
+  );
+};
+// Create through the dashboard button; it navigates straight to the editor.
+const createFromDashboard = async (r, expectedName) => {
+  await r.page.locator(NEW_PROJECT_BTN).click();
+  await r.page.waitForFunction(
+    ([sel, n]) => document.querySelector(sel)?.value === n,
+    [NAME_INPUT, expectedName],
+    { timeout: 20000 },
+  );
+};
+// Delete a card: the sibling trash button (a nested button would be
+// invalid HTML), confirmed through the accept-policy dialog handler.
+// The OPFS delete is async — the card leaves the DOM only when it
+// settles, so wait for the detach; assertions after this call must see
+// the settled state.
+const deleteCard = async (r, name) => {
+  const before = dialogs.length;
+  dialogPolicy = "accept";
+  await cardBy(r, name).hover();
+  await r.page.locator(`button[title="Delete ${name}"]`).click();
+  const msg = await waitDialog(before);
+  dialogPolicy = "dismiss";
+  if (!msg)
+    throw new Error(
+      `deleteCard(${name}): no confirm dialog — the trash click missed`,
+    );
+  await cardBy(r, name).waitFor({ state: "detached", timeout: 20000 });
+  return msg;
+};
+// Project directories straight from OPFS (the app keeps one per project).
+const projectCount = async (r) =>
+  r.page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const projects = await root.getDirectoryHandle("projects");
+    let n = 0;
+    for await (const entry of projects.values())
+      if (entry.kind === "directory") n++;
+    return n;
+  });
 // The active project's files, straight from OPFS.
 const activeFiles = async (r) => {
   const p = await readProject(r);
@@ -133,38 +152,37 @@ const mainValue = async (r) => {
     (await r.page.locator("li", { hasText: "main.tex" }).count()) > 0 &&
       (await r.page.locator("li", { hasText: "refs.bib" }).count()) > 0,
   );
-  await openMenu(r);
-  r.ok("first run: one project row", (await menuRows(r).count()) === 1);
   r.ok(
-    "first run: the row is active",
-    (await menuRows(r).first().getAttribute("data-active")) !== null,
+    "first run: one project in storage",
+    (await projectCount(r)) === 1,
+    await projectCount(r),
+  );
+  await goDashboard(r);
+  r.ok(
+    "first run: the dashboard lists it",
+    (await cardCount(r).count()) === 1 &&
+      (await cardBy(r, "LaTeX project").count()) === 1,
+    await cardCount(r).count(),
   );
 
-  // --- create two more projects via the menu ------------------------------
-  await r.page.locator("button", { hasText: "New project" }).click();
-  await r.page.waitForFunction(
-    (sel) => document.querySelector(sel)?.value === "LaTeX project 2",
-    NAME_INPUT,
-    { timeout: 15000 },
-  );
+  // --- create two more projects via the dashboard -------------------------
+  await goDashboard(r);
+  await createFromDashboard(r, "LaTeX project 2");
   r.ok("create: numbered name", (await nameValue(r)) === "LaTeX project 2");
+  await goDashboard(r);
+  await createFromDashboard(r, "LaTeX project 3");
+  await goDashboard(r);
+  r.ok("create: three cards now", (await cardCount(r).count()) === 3);
   r.ok(
-    "create: menu closed",
-    (await r.page.locator('[data-menu="projects"] div[data-project]').count()) === 0,
+    "create: three projects in storage",
+    (await projectCount(r)) === 3,
+    await projectCount(r),
   );
-  await openMenu(r);
-  await r.page.locator("button", { hasText: "New project" }).click();
-  await r.page.waitForFunction(
-    (sel) => document.querySelector(sel)?.value === "LaTeX project 3",
-    NAME_INPUT,
-    { timeout: 15000 },
-  );
-  await openMenu(r);
-  r.ok("create: three rows now", (await menuRows(r).count()) === 3);
 
   // --- switch isolation: each project keeps its own files -----------------
-  // Back to project 1.
-  await openRow(r, "LaTeX project");
+  // Back to project 1 through its card.
+  await goDashboard(r);
+  await openCard(r, "LaTeX project");
   // A marker edit in project 1.
   await r.page.evaluate(
     () =>
@@ -174,8 +192,8 @@ const mainValue = async (r) => {
         .setValue("P1MARK"),
   );
   await sleep(1500); // let the debounced save land
-  await openMenu(r);
-  await openRow(r, "LaTeX project 3");
+  await goDashboard(r);
+  await openCard(r, "LaTeX project 3");
   r.ok(
     "switch: new project shows its own content",
     !(await mainValue(r)).includes("P1MARK"),
@@ -186,8 +204,8 @@ const mainValue = async (r) => {
     (await mainValue(r)).includes("full TeX Live"),
   );
   // Back to project 1 — the marker survived the round trip.
-  await openMenu(r);
-  await openRow(r, "LaTeX project");
+  await goDashboard(r);
+  await openCard(r, "LaTeX project");
   r.ok(
     "switch back: the marker survived",
     (await mainValue(r)) === "P1MARK",
@@ -221,83 +239,103 @@ const mainValue = async (r) => {
   });
   r.ok("rename: meta.name persisted", savedMeta?.name === "Renamed proj", savedMeta?.name);
 
-  // --- delete a NON-active project (confirm dialog) ------------------------
-  await openMenu(r);
-  let dialogMsg = "";
-  {
-    const before = dialogs.length;
-    dialogPolicy = "accept";
-    await rowByName(r, "LaTeX project 3").hover();
-    await rowByName(r, "LaTeX project 3").locator('button[title="Delete project"]').click();
-    dialogMsg = await waitDialog(before);
-    dialogPolicy = "dismiss";
-  }
+  // --- delete a NON-active project (dashboard trash + confirm) ------------
+  await goDashboard(r);
+  let dialogMsg = await deleteCard(r, "LaTeX project 3");
   r.ok(
     "delete: confirm dialog names the project",
     dialogMsg.includes("LaTeX project 3"),
     dialogMsg,
   );
-  await openMenu(r);
-  r.ok("delete: row gone, two left", (await menuRows(r).count()) === 2);
+  r.ok(
+    "delete: card gone, two left",
+    (await cardCount(r).count()) === 2 &&
+      (await cardBy(r, "LaTeX project 3").count()) === 0,
+    await cardCount(r).count(),
+  );
+  r.ok(
+    "delete: two projects in storage",
+    (await projectCount(r)) === 2,
+    await projectCount(r),
+  );
 
-  // --- delete the ACTIVE project: the editor falls back to a remaining one -
-  {
-    const before = dialogs.length;
-    dialogPolicy = "accept";
-    await rowByName(r, "Renamed proj").hover();
-    await rowByName(r, "Renamed proj").locator('button[title="Delete project"]').click();
-    dialogMsg = await waitDialog(before);
-    dialogPolicy = "dismiss";
-  }
+  // --- delete the ACTIVE project: the editor falls back on next open ------
+  dialogMsg = await deleteCard(r, "Renamed proj");
   r.ok(
     "delete active: confirm dialog names the project",
     dialogMsg.includes("Renamed proj"),
     dialogMsg,
   );
+  r.ok(
+    "delete active: its card is gone",
+    (await cardBy(r, "Renamed proj").count()) === 0,
+  );
+  // The dashboard's active-project key still points at the deleted project;
+  // opening the editor directly must fall back to a remaining one. The
+  // name input's SSR default is "LaTeX project" — accepting that value
+  // would match the initial render before the real project applies, so
+  // wait for the sole survivor's exact name.
+  await r.goto();
+  await r.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
   await r.page.waitForFunction(
     (sel) => document.querySelector(sel)?.value === "LaTeX project 2",
     NAME_INPUT,
-    { timeout: 15000 },
+    { timeout: 20000 },
   );
+  const fellBack = await nameValue(r);
   r.ok(
-    "delete active: a remaining project loads",
-    (await nameValue(r)) === "LaTeX project 2",
+    "delete active: the remaining project loads",
+    fellBack === "LaTeX project 2",
+    fellBack,
   );
 
   // --- delete down to empty: a fresh default project appears ---------------
-  {
-    const before = dialogs.length;
-    dialogPolicy = "accept";
-    await openMenu(r);
-    await rowByName(r, "LaTeX project 2").hover();
-    await rowByName(r, "LaTeX project 2").locator('button[title="Delete project"]').click();
-    dialogMsg = await waitDialog(before);
-    dialogPolicy = "dismiss";
+  // Deleting the active project does NOT spawn a new one — the fallback
+  // picked the most recently updated REMAINING project — so exactly one
+  // card is left. Delete whatever remains, however many.
+  await goDashboard(r);
+  while ((await cardCount(r).count()) > 0) {
+    const title = await cardCount(r).first().getAttribute("title");
+    await deleteCard(r, title.replace(/^Open /, ""));
   }
-  await r.page.waitForFunction(
-    (sel) => document.querySelector(sel)?.value === "LaTeX project",
-    NAME_INPUT,
-    { timeout: 15000 },
+  r.ok(
+    "delete-to-empty: the dashboard shows its empty state",
+    (await cardCount(r).count()) === 0 &&
+      (await r.page.locator("text=No projects yet").count()) === 1,
+    await cardCount(r).count(),
   );
-  await openMenu(r);
-  r.ok("delete-to-empty: one fresh default row", (await menuRows(r).count()) === 1);
-  const freshF = await activeFiles(r);
+  r.ok(
+    "delete-to-empty: storage is empty",
+    (await projectCount(r)) === 0,
+    await projectCount(r),
+  );
+  await r.goto();
+  await r.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
+  // The ACTIVE key still points at a deleted project until the editor
+  // applies the fresh default (readProject rejects meanwhile), and the
+  // name input's SSR default is "LaTeX project" too — so the key itself
+  // resolving in OPFS is the readiness signal.
+  let fresh = null;
+  for (let i = 0; i < 60; i++) {
+    try {
+      fresh = await readProject(r);
+    } catch {
+      fresh = null;
+    }
+    if (fresh) break;
+    await sleep(500);
+  }
+  r.ok(
+    "delete-to-empty: one fresh default",
+    fresh?.meta?.name === "LaTeX project" && (await nameValue(r)) === "LaTeX project",
+    fresh?.meta?.name ?? "(ACTIVE key never resolved)",
+  );
+  const freshF = fresh?.files ?? {};
   r.ok(
     "delete-to-empty: default files restored",
     typeof freshF["main.tex"] === "string" &&
       freshF["main.tex"].includes("full TeX Live") &&
       freshF["refs.bib"] !== undefined,
-  );
-
-  // --- outside click closes the menu ---------------------------------------
-  // The status text at the header's right edge: outside the dropdown, and
-  // (unlike the name input, which now sits in the files header UNDER the
-  // dropdown) clicking it triggers nothing but the document close handler.
-  await r.page.locator("header span.w-64.truncate").first().click();
-  await sleep(300);
-  r.ok(
-    "menu: outside click closes it",
-    (await r.page.locator('[data-menu="projects"] div[data-project]').count()) === 0,
   );
 
   console.log(
