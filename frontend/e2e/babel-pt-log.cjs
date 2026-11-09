@@ -28,9 +28,9 @@ const r = new Runner("babelptlog");
   await r.page.reload({ waitUntil: "load" });
   await r.waitReady();
   await r.recompile();
-  // open log drawer
-  const viewLog = r.page.locator("button", { hasText: "View log" });
-  if (await viewLog.count()) { await viewLog.first().click(); await r.page.waitForTimeout(400); }
+  // open the log panel (icon rail)
+  await r.page.locator('[data-rail="log"]').click();
+  await r.page.waitForTimeout(400);
   const full = await r.page.evaluate(() => document.querySelector("pre")?.textContent || "");
   const out = path.join(os.tmpdir(), "babel-pt-full.log");
   require("fs").writeFileSync(out, full);

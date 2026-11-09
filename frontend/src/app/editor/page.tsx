@@ -32,16 +32,22 @@ import FileBrowser, {
 } from "@/components/file-browser";
 import {
   IconAuto,
+  IconChat,
   IconCheck,
   IconChevronDown,
   IconClose,
+  IconCode,
+  IconClock,
   IconFile,
   IconGitHub,
+  IconImage,
+  IconLink,
   IconPlay,
   IconPlus,
   IconSpinner,
   IconSwap,
   IconSync,
+  IconTable,
   IconTrash,
 } from "@/components/icons";
 import GitHubModal, { type PullRequest, type PushRequest } from "@/components/github-modal";
@@ -443,26 +449,22 @@ async function streamChatCompletion(
 }
 
 // --- workspace layout ----------------------------------------------------
-// The panes are user-arrangeable: drag the files panel's right edge and
-// the log drawer's top edge to resize them, drag the handle between the
-// editor and PDF to re-split them, click the arrows on that handle to
-// swap the two panes. The arrangement persists in localStorage (like the
-// active project) and survives reloads.
+// The panes are user-arrangeable: drag the files panel's right edge to
+// resize it, drag the handle between the editor and PDF to re-split them,
+// click the arrows on that handle to swap the two panes. The arrangement
+// persists in localStorage (like the active project) and survives reloads.
 type WorkspaceLayout = {
   filesW: number; // files panel width, px
   split: number; // editor's share of the editor+PDF row, 0.2–0.8
   editorFirst: boolean; // editor left of the PDF (false = swapped)
-  logH: number; // log drawer height, px
 };
 const WORKSPACE_KEY = "homehub-workspace-v1";
 const FILES_W = { min: 160, max: 480 };
 const SPLIT = { min: 0.2, max: 0.8 };
-const LOG_H = { min: 96, max: 480 };
 const DEFAULT_WORKSPACE: WorkspaceLayout = {
   filesW: 256,
   split: 0.5,
   editorFirst: true,
-  logH: 224,
 };
 
 const clampN = (v: number, lo: number, hi: number) =>
@@ -477,7 +479,6 @@ function loadWorkspace(): WorkspaceLayout {
       filesW: clampN(Number(p.filesW), FILES_W.min, FILES_W.max),
       split: clampN(Number(p.split), SPLIT.min, SPLIT.max),
       editorFirst: typeof p.editorFirst === "boolean" ? p.editorFirst : true,
-      logH: clampN(Number(p.logH), LOG_H.min, LOG_H.max),
     };
   } catch {
     return DEFAULT_WORKSPACE;
@@ -563,9 +564,12 @@ export default function EditorPage() {
   const [pdf, setPdf] = useState<Uint8Array | null>(null);
   const [log, setLog] = useState("");
   const [liveLog, setLiveLog] = useState("");
-  const [showLog, setShowLog] = useState(false);
-  // Which pane the bottom drawer shows: the build log or the chat.
-  const [bottomTab, setBottomTab] = useState<"log" | "chat">("log");
+  // What the left panel shows (picked from the icon rail): the file
+  // tree, the search view, the chat or the build log. (The log and chat
+  // used to share a bottom drawer with tabs; the rail replaces it.)
+  const [leftPane, setLeftPane] = useState<
+    "files" | "search" | "chat" | "log"
+  >("files");
   // The chat conversation (in-memory; it lives with this page's session,
   // like the log — it is not part of the project).
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -581,6 +585,9 @@ export default function EditorPage() {
   const [autoRecompile, setAutoRecompile] = useState(true);
   const [syncScroll, setSyncScroll] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
+  // True while the debounced OPFS persist is pending — the "Saving…"
+  // indicator in the editor toolbar.
+  const [savePending, setSavePending] = useState(false);
   // Reactive twin of engineReadyRef: the auto-compile-on-open effect needs
   // a state update, not just the ref, to know when the engine settles.
   const [engineReady, setEngineReady] = useState(false);
@@ -773,6 +780,10 @@ export default function EditorPage() {
     setLiveLog("");
     setSyncEntries(null);
     setStatus({ kind: "idle" });
+    // The left panel shows the new project's files — never inherit the
+    // outgoing project's auto-opened log pane (its failed build's error
+    // state would otherwise survive the switch).
+    setLeftPane("files");
     window.clearTimeout(autoTimerRef.current);
     try {
       localStorage.setItem(ACTIVE_PROJECT_KEY, id);
@@ -798,7 +809,7 @@ export default function EditorPage() {
 
   // Sticky-to-bottom log follow: while the user stays within 24 px of the
   // tail, every new line keeps the tail in view; scrolling up pauses the
-  // follow until the user scrolls back to the bottom. A re-shown drawer
+  // follow until the user scrolls back to the bottom. A re-shown panel
   // starts at the tail.
   const handleLogScroll = useCallback(() => {
     const el = logScrollRef.current;
@@ -807,13 +818,13 @@ export default function EditorPage() {
   }, []);
 
   useEffect(() => {
-    if (!showLog) {
+    if (leftPane !== "log") {
       logFollowRef.current = true;
       return;
     }
     const el = logScrollRef.current;
     if (el && logFollowRef.current) el.scrollTop = el.scrollHeight;
-  }, [showLog, liveLog, log]);
+  }, [leftPane, liveLog, log]);
 
   // --- chat (bottom drawer, proxied through /api/chat — the router's key
   //     never reaches the browser) ----------------------------------------
@@ -825,10 +836,10 @@ export default function EditorPage() {
 
   // Follow the streaming reply until the user scrolls up to read.
   useEffect(() => {
-    if (!showLog || bottomTab !== "chat") return;
+    if (leftPane !== "chat") return;
     const el = chatScrollRef.current;
     if (el && chatFollowRef.current) el.scrollTop = el.scrollHeight;
-  }, [showLog, bottomTab, chatMessages, chatError]);
+  }, [leftPane, chatMessages, chatError]);
 
   // Resolves a pending apply_edit (the user's button, or a stop/clear/
   // unmount) and drops its card. Idempotent: a double settle is a no-op.
@@ -1398,7 +1409,8 @@ export default function EditorPage() {
   useEffect(() => {
     if (!loaded || !activeProjectId) return;
     const t = window.setTimeout(() => {
-      void persistNow();
+      setSavePending(true);
+      void persistNow().then(() => setSavePending(false));
     }, 600);
     return () => window.clearTimeout(t);
   }, [files, mainPath, openPaths, activePath, projectName, loaded, activeProjectId, persistNow]);
@@ -1763,6 +1775,7 @@ export default function EditorPage() {
         const hash = await contentHash({ ...files, "\u0000main": mainPath });
         const cached = await loadBuildCache(projectId, hash).catch(() => null);
         if (cached) {
+          if (projectId !== persistStateRef.current.activeProjectId) return;
           setPdf(cached.pdf);
           setLog(cached.log);
           setSyncEntries(
@@ -1801,6 +1814,10 @@ export default function EditorPage() {
       // All files go to the worker (text as strings, binary as bytes);
       // the pipeline runs bibtex8 itself when any of them is a .bib.
       const result = await compiler.compile(compileFiles, mainPath, bibHashes);
+      // The build ran for seconds: a project switch in that window must not
+      // land the old project's result — or its auto-shown log panel — on the
+      // new project (the init() check above only covers that short window).
+      if (projectId !== persistStateRef.current.activeProjectId) return;
       // An empty PDF is a failure (a zero-length Uint8Array is truthy).
       if (result.pdf && result.pdf.byteLength > 0) {
         setPdf(result.pdf);
@@ -1821,8 +1838,9 @@ export default function EditorPage() {
       } else {
         // Keep the previous PDF on screen: it is still the last successful
         // build of this project, and the failure is visible in the status
-        // bar and the (auto-opened) log drawer.
+        // bar and the (auto-shown) log panel.
         setStatus({ kind: "error", message: "Compilation failed — see log" });
+        setLeftPane("log");
       }
       setLog(result.log);
       // A missing babel language (\usepackage[portuguese]{babel}): recent TeX
@@ -1903,7 +1921,12 @@ export default function EditorPage() {
         }
       }
     } catch (err) {
-      setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+      // Same stale-switch guard as after the compile call: a build of the
+      // outgoing project must not flag the incoming one as failed.
+      if (projectId === persistStateRef.current.activeProjectId) {
+        setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+        setLeftPane("log");
+      }
     } finally {
       busyRef.current = false;
       if (restartPendingRef.current) {
@@ -1932,11 +1955,6 @@ export default function EditorPage() {
     showNotice(`${msg} — the engine restarts with the next compile`, 5000);
     restartCompiler();
   };
-
-  // Errors open the log drawer automatically.
-  useEffect(() => {
-    if (status.kind === "error") setShowLog(true);
-  }, [status]);
 
   // Restore the PDF scroll position after a recompile. The new PDF is a
   // fresh document that pdf.js renders asynchronously, so poll until the
@@ -2464,6 +2482,154 @@ export default function EditorPage() {
     });
   };
 
+  // --- formatting toolbar (inscribe.io style) -----------------------------
+  // All inserts go through editor.executeEdits, so the normal
+  // onChange → setFiles pipeline handles the file state, the debounced OPFS
+  // save and the auto-recompile. With no selection, a placeholder is
+  // inserted pre-selected so typing overwrites it.
+
+  const formatWrap = (prefix: string, suffix: string, placeholder: string) => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco) return;
+    const sel = editor.getSelection();
+    const pos = editor.getPosition();
+    if (!sel || !pos) return;
+    if (!sel.isEmpty()) {
+      const range = new monaco.Selection(
+        sel.startLineNumber,
+        sel.startColumn,
+        sel.endLineNumber,
+        sel.endColumn,
+      );
+      const inner = editor.getModel()?.getValueInRange(range) ?? "";
+      editor.executeEdits("format-toolbar", [
+        { range, text: prefix + inner + suffix },
+      ]);
+      editor.setSelection(
+        new monaco.Selection(
+          sel.startLineNumber,
+          sel.startColumn + prefix.length,
+          sel.endLineNumber,
+          sel.endColumn + suffix.length,
+        ),
+      );
+    } else {
+      editor.executeEdits("format-toolbar", [
+        {
+          range: new monaco.Selection(pos.lineNumber, pos.column, pos.lineNumber, pos.column),
+          text: placeholder,
+        },
+      ]);
+      editor.setSelection(
+        new monaco.Selection(
+          pos.lineNumber,
+          pos.column + 1,
+          pos.lineNumber,
+          pos.column + 1 + placeholder.length,
+        ),
+      );
+    }
+    editor.focus();
+  };
+
+  const applyBlock = (
+    kind:
+      | "normal"
+      | "section"
+      | "subsection"
+      | "subsubsection"
+      | "itemize"
+      | "enumerate",
+  ) => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    const model = editor?.getModel();
+    const pos = editor?.getPosition();
+    if (!editor || !monaco || !model || !pos) return;
+    const line = pos.lineNumber;
+    const lineEnd = model.getLineMaxColumn(line);
+    const lineRange = new monaco.Range(line, 1, line, lineEnd);
+    const content = model.getLineContent(line).trim();
+    if (kind === "normal") {
+      // Turn a \section{…} back into plain text.
+      const m = content.match(/^\\(?:section|subsection|subsubsection)\{([\s\S]*)\}$/);
+      if (!m) return;
+      editor.executeEdits("format-toolbar", [{ range: lineRange, text: m[1] }]);
+    } else if (kind === "itemize" || kind === "enumerate") {
+      const item = content || "Item";
+      const snippet = `\\begin{${kind}}\n  \\item ${item}\n\\end{${kind}}`;
+      editor.executeEdits("format-toolbar", [{ range: lineRange, text: snippet }]);
+      editor.setSelection(
+        new monaco.Selection(line + 1, 8, line + 1, 8 + item.length),
+      );
+    } else {
+      const cmd = `\\${kind}`;
+      // If the line is already a heading, re-wrap its title.
+      const m = content.match(/^\\(?:section|subsection|subsubsection)\{([\s\S]*)\}$/);
+      const inner = m ? m[1] : content || "Section";
+      editor.executeEdits("format-toolbar", [
+        { range: lineRange, text: `${cmd}{${inner}}` },
+      ]);
+      editor.setSelection(
+        new monaco.Selection(line, cmd.length + 2, line, cmd.length + 2 + inner.length),
+      );
+    }
+    editor.focus();
+  };
+
+  const insertSnippet = (text: string, selOffset?: { col: number; len: number }) => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    const pos = editor?.getPosition();
+    if (!editor || !monaco || !pos) return;
+    editor.executeEdits("format-toolbar", [
+      {
+        range: new monaco.Selection(pos.lineNumber, pos.column, pos.lineNumber, pos.column),
+        text,
+      },
+    ]);
+    editor.setSelection(
+      selOffset
+        ? new monaco.Selection(
+            pos.lineNumber,
+            pos.column + selOffset.col,
+            pos.lineNumber,
+            pos.column + selOffset.col + selOffset.len,
+          )
+        : new monaco.Selection(
+            pos.lineNumber,
+            pos.column + text.length,
+            pos.lineNumber,
+            pos.column + text.length,
+          ),
+    );
+    editor.focus();
+  };
+
+  // \sout needs the ulem package; the default project doesn't load it, so
+  // insert it right after \documentclass in the active file once.
+  const ensureUlem = () => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    const model = editor?.getModel();
+    if (!editor || !monaco || !model) return;
+    const pkg = "\\usepackage[normalem]{ulem}";
+    if (model.getValue().includes(pkg)) return;
+    const count = model.getLineCount();
+    for (let l = 1; l <= count; l++) {
+      if (model.getLineContent(l).includes("\\documentclass")) {
+        editor.executeEdits("format-toolbar", [
+          {
+            range: new monaco.Range(l, model.getLineMaxColumn(l), l + 1, 1),
+            text: "\n" + pkg,
+          },
+        ]);
+        return;
+      }
+    }
+  };
+
   // --- scroll sync (two-way, guarded by lockRef) --------------------------
 
   /** Editor scrolled: the PDF follows the editor's top visible line. */
@@ -2617,6 +2783,117 @@ export default function EditorPage() {
           );
         })}
       </div>
+      {/* Formatting toolbar (inscribe.io style): block type, inline
+          formatting, snippets; the right side reports the debounced OPFS
+          persist. */}
+      <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-ink/10 bg-white px-2">
+        <select
+          data-format-block
+          value="normal"
+          onChange={(e) => {
+            if (e.target.value !== "normal")
+              applyBlock(
+                e.target.value as
+                  | "section"
+                  | "subsection"
+                  | "subsubsection"
+                  | "itemize"
+                  | "enumerate",
+              );
+          }}
+          title="Block type (applies to the line at the cursor)"
+          className="h-6 shrink-0 rounded border border-stone/40 bg-white px-1 text-xs text-stone outline-none focus:border-ink"
+        >
+          <option value="normal">Normal text</option>
+          <option value="section">Section</option>
+          <option value="subsection">Subsection</option>
+          <option value="subsubsection">Subsubsection</option>
+          <option value="itemize">Itemize</option>
+          <option value="enumerate">Enumerate</option>
+        </select>
+        <span className="mx-1 h-4 w-px shrink-0 bg-ink/10" />
+        {(
+          [
+            ["emph", "Italic — \\emph{…}", "\\emph{", "}", "\\emph{Text}", "I"],
+            ["strong", "Bold — \\textbf{…}", "\\textbf{", "}", "\\textbf{Text}", "B"],
+            ["underline", "Underline — \\underline{…}", "\\underline{", "}", "\\underline{Text}", "U"],
+            ["strikethrough", "Strikethrough — \\sout{…} (adds ulem)", "\\sout{", "}", "\\sout{Text}", "S"],
+          ] as const
+        ).map(([id, title, prefix, suffix, placeholder, label]) => (
+          <button
+            key={id}
+            data-format={id}
+            title={title}
+            onClick={() => {
+              if (id === "strikethrough") ensureUlem();
+              formatWrap(prefix, suffix, placeholder);
+            }}
+            className={
+              "shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold text-stone transition-colors hover:bg-peach hover:text-ink " +
+              (id === "emph" ? "italic" : id === "underline" ? "underline" : "")
+            }
+          >
+            {label}
+          </button>
+        ))}
+        <span className="mx-1 h-4 w-px shrink-0 bg-ink/10" />
+        <button
+          data-format="link"
+          title="Link — \\href{…}{…}"
+          onClick={() =>
+            formatWrap(
+              "\\href{https://example.com/}{",
+              "}",
+              "\\href{https://example.com/}{Text}",
+            )
+          }
+          className="shrink-0 rounded p-1 text-stone transition-colors hover:bg-peach hover:text-ink"
+        >
+          <IconLink className="h-3.5 w-3.5" />
+        </button>
+        <button
+          data-format="code"
+          title="Code — \\texttt{…}"
+          onClick={() => formatWrap("\\texttt{", "}", "\\texttt{code}")}
+          className="shrink-0 rounded p-1 text-stone transition-colors hover:bg-peach hover:text-ink"
+        >
+          <IconCode className="h-3.5 w-3.5" />
+        </button>
+        <button
+          data-format="image"
+          title="Image — \\includegraphics{…}"
+          onClick={() =>
+            insertSnippet("\\includegraphics{figure.png}", { col: 17, len: 10 })
+          }
+          className="shrink-0 rounded p-1 text-stone transition-colors hover:bg-peach hover:text-ink"
+        >
+          <IconImage className="h-3.5 w-3.5" />
+        </button>
+        <button
+          data-format="table"
+          title="Table — tabular skeleton"
+          onClick={() =>
+            insertSnippet(
+              "\\begin{tabular}{ll}\n  A & B \\\\\n  C & D \\\\\n\\end{tabular}",
+            )
+          }
+          className="shrink-0 rounded p-1 text-stone transition-colors hover:bg-peach hover:text-ink"
+        >
+          <IconTable className="h-3.5 w-3.5" />
+        </button>
+        <span
+          data-save-state={savePending ? "saving" : "saved"}
+          className="ml-auto flex shrink-0 items-center gap-1 text-xs text-stone"
+        >
+          {savePending ? (
+            "Saving…"
+          ) : (
+            <>
+              <IconCheck className="h-3 w-3 text-mint" /> Saved
+            </>
+          )}
+        </span>
+      </div>
       <div className="min-h-0 flex-1">
         {activePath && activeSource !== null ? (
           <MonacoEditor
@@ -2686,7 +2963,10 @@ export default function EditorPage() {
   );
 
   const pdfPane = (
-    <div style={{ flex: `${1 - workspace.split} 1 0%` }} className="min-w-0">
+    <div
+      style={{ flex: `${1 - workspace.split} 1 0%` }}
+      className="flex min-w-0 flex-col"
+    >
       <PdfViewer
         ref={pdfRef}
         data={pdf}
@@ -2699,6 +2979,38 @@ export default function EditorPage() {
         syncScroll={syncScroll}
         onToggleSyncScroll={() => setSyncScroll((v) => !v)}
         onViewportTop={handleViewportTop}
+        // The pane's top is one row (inscribe.io style): the build button
+        // lives with the output, left of the viewer controls. The title
+        // keeps the "Recompile" prefix — e2e's busy-watcher selects on it.
+        leading={
+          <>
+            <button
+              onClick={() => compileRef.current()}
+              disabled={status.kind === "compiling"}
+              title="Recompile (Ctrl/Cmd+Enter)"
+              className="flex shrink-0 items-center gap-1.5 rounded-full bg-mint px-4 py-1.5 text-sm font-semibold text-ink transition-colors hover:bg-ink hover:text-mint disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {status.kind === "compiling" ? (
+                <IconSpinner className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <IconPlay className="h-3.5 w-3.5" />
+              )}
+              Compile
+            </button>
+            <button
+              onClick={gotoPdf}
+              disabled={!syncEntries}
+              title={
+                syncEntries
+                  ? "Jump the PDF to the line under the editor cursor"
+                  : "Compile first to build the PDF<->source map"
+              }
+              className="shrink-0 rounded border border-stone/40 px-2.5 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Go to PDF
+            </button>
+          </>
+        }
       />
     </div>
   );
@@ -2749,16 +3061,9 @@ export default function EditorPage() {
           <span className="h-3 w-3 rounded-sm bg-mint" />
           HomeHub
         </Link>
-        <span className="h-4 w-px shrink-0 bg-ink/10" />
-        <input
-          value={projectName}
-          onChange={(e) => setProjectName(e.target.value)}
-          title="Project name (saved in your browser)"
-          className="w-44 shrink rounded border border-transparent bg-transparent px-1.5 py-0.5 text-sm font-medium text-ink transition-colors hover:border-ink/15 focus:border-mint focus:outline-none"
-        />
         {/* Projects menu: switch between the OPFS projects, or create and
-            delete them. The active row shows the live name (the input
-            above edits it before the next debounced save). */}
+            delete them. The active row shows the live name (the input in
+            the files header edits it before the next debounced save). */}
         <div className="relative shrink-0" data-menu="projects">
           <button
             data-action="projects"
@@ -2836,37 +3141,13 @@ export default function EditorPage() {
           <IconSync className="h-3.5 w-3.5" />
           Packages
         </button>
-        <div className="flex min-w-0 flex-1 justify-center">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => compileRef.current()}
-              disabled={status.kind === "compiling"}
-              title="Recompile (Ctrl/Cmd+Enter)"
-              className="flex items-center gap-1.5 rounded-full bg-mint px-4 py-1.5 text-sm font-semibold text-ink transition-colors hover:bg-ink hover:text-mint disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <IconPlay className="h-3.5 w-3.5" />
-              Recompile
-            </button>
-            <button
-              onClick={gotoPdf}
-              disabled={!syncEntries}
-              title={
-                syncEntries
-                  ? "Jump the PDF to the line under the editor cursor"
-                  : "Compile first to build the PDF<->source map"
-              }
-              className="rounded border border-stone/40 px-3 py-1.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Go to PDF
-            </button>
-          </div>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-2">
+        {/* Recompile now sits in the PDF pane's header; the log and chat
+            moved to the left panel's icon rail. The build status stays in
+            the header — e2e reads it from `header span.truncate`. */}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
           {/* Fixed-width slots: the icon and the status text swap content
               (spinner/check/dot/none, streaming compile lines) — variable
-              widths would push the centered buttons left and right on
-              every update. */}
+              widths would jitter the whole right cluster on every update. */}
           <span className="flex w-3.5 shrink-0 items-center justify-center">
             {status.kind === "compiling" || status.kind === "loading" ? (
               <IconSpinner className="h-3.5 w-3.5 animate-spin text-mint" />
@@ -2925,164 +3206,63 @@ export default function EditorPage() {
           >
             <IconAuto className="h-4 w-4" />
           </button>
-          <button
-            title="Toggle the log drawer"
-            onClick={() => {
-              if (!showLog || bottomTab !== "log") {
-                setBottomTab("log");
-                setShowLog(true);
-              } else {
-                setShowLog(false);
-              }
-            }}
-            className={
-              "rounded border border-stone/40 px-3 py-1.5 text-xs transition-colors hover:bg-peach hover:text-ink " +
-              (showLog && bottomTab === "log"
-                ? "bg-peach text-ink"
-                : "text-stone")
-            }
-          >
-            {showLog && bottomTab === "log" ? "Hide log" : "View log"}
-          </button>
-          <button
-            title="Toggle the chat drawer"
-            onClick={() => {
-              if (!showLog || bottomTab !== "chat") {
-                setBottomTab("chat");
-                setShowLog(true);
-              } else {
-                setShowLog(false);
-              }
-            }}
-            className={
-              "rounded border border-stone/40 px-3 py-1.5 text-xs transition-colors hover:bg-peach hover:text-ink " +
-              (showLog && bottomTab === "chat"
-                ? "bg-peach text-ink"
-                : "text-stone")
-            }
-          >
-            {showLog && bottomTab === "chat" ? "Hide chat" : "Chat"}
-          </button>
         </div>
       </header>
 
       <div className="flex min-h-0 flex-1">
-        {/* Files panel: width from the workspace layout, right edge
+        {/* Icon rail: switches the left panel's content (inscribe.io's
+            vertical tab strip). Files for now; Search joins with the
+            search view. */}
+        <nav
+          aria-label="Left panel"
+          className="flex w-10 shrink-0 flex-col items-center gap-1 border-r border-ink/10 bg-cream py-2"
+        >
+          {(
+            [
+              ["files", "Files", IconFile],
+              ["chat", "Chat", IconChat],
+              ["log", "Log", IconClock],
+            ] as const
+          ).map(([id, label, Icon]) => (
+            <button
+              key={id}
+              data-rail={id}
+              data-active={leftPane === id || undefined}
+              title={label}
+              onClick={() => setLeftPane(id)}
+              className={
+                "rounded p-1.5 transition-colors " +
+                (leftPane === id
+                  ? "bg-mint/40 text-ink"
+                  : "text-stone hover:bg-peach/40 hover:text-ink")
+              }
+            >
+              <Icon className="h-4 w-4" />
+            </button>
+          ))}
+        </nav>
+
+        {/* Left panel: width from the workspace layout, right edge
             draggable */}
         <div
           className="relative flex shrink-0"
           style={{ width: workspace.filesW }}
         >
-          <FileBrowser
-            files={entries}
-            activePath={activePath}
-            mainPath={mainPath}
-            onOpen={openPath}
-            onAdd={addFile}
-            onRename={renameFile}
-            onDelete={deleteFile}
-            onSetMain={setMainPath}
-            onUpload={uploadFiles}
-            width={workspace.filesW}
-          />
-          <div
-            onPointerDown={(e) => {
-              const base = workspace.filesW;
-              startLayoutDrag(e, "col-resize", (dx) =>
-                setWorkspace((w) => ({
-                  ...w,
-                  filesW: clampN(base + dx, FILES_W.min, FILES_W.max),
-                })),
-              );
-            }}
-            title="Drag to resize the files panel"
-            className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize transition-colors hover:bg-mint"
-          />
-        </div>
-
-        {/* Editor + PDF: a draggable divider splits them, the arrows
-            swap the panes */}
-        <div ref={splitRef} className="flex min-w-0 flex-1">
-          {workspace.editorFirst ? (
-            <>
-              {editorPane}
-              {divider}
-              {pdfPane}
-            </>
-          ) : (
-            <>
-              {pdfPane}
-              {divider}
-              {editorPane}
-            </>
-          )}
-        </div>
-      </div>
-
-      {showLog && (
-        <div
-          className="relative shrink-0 border-t border-ink/10 bg-peach/50"
-          style={{ height: workspace.logH }}
-        >
-          <div
-            onPointerDown={(e) => {
-              const base = workspace.logH;
-              startLayoutDrag(e, "row-resize", (_dx, dy) =>
-                setWorkspace((w) => ({
-                  ...w,
-                  logH: clampN(base - dy, LOG_H.min, LOG_H.max),
-                })),
-              );
-            }}
-            title="Drag to resize the log"
-            className="absolute inset-x-0 -top-1 z-10 h-2 cursor-row-resize"
-          />
-          <div className="flex h-full flex-col">
-            <div className="flex shrink-0 items-center gap-1 border-b border-ink/10 px-2 pt-1">
-              {(
-                [
-                  ["log", "Log"],
-                  ["chat", "Chat"],
-                ] as const
-              ).map(([tab, label]) => (
-                <button
-                  key={tab}
-                  data-bottom-tab={tab}
-                  onClick={() => setBottomTab(tab)}
-                  className={
-                    "rounded-t border-b-2 px-3 py-1 text-xs font-medium " +
-                    (bottomTab === tab
-                      ? "border-ink bg-white/60 text-ink"
-                      : "border-transparent text-stone hover:bg-peach/60 hover:text-ink")
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-              {bottomTab === "chat" && (
+          {leftPane === "chat" ? (
+            <div className="flex min-w-0 flex-1 flex-col bg-white">
+              <div className="flex h-9 shrink-0 items-center justify-between border-b border-ink/10 px-3">
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
+                  Chat
+                </h2>
                 <button
                   data-chat-clear
                   title="Clear the conversation"
                   onClick={clearChat}
-                  className="ml-auto rounded px-2 py-0.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
+                  className="rounded px-2 py-0.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
                 >
                   Clear
                 </button>
-              )}
-            </div>
-            {bottomTab === "log" ? (
-              <div
-                ref={logScrollRef}
-                onScroll={handleLogScroll}
-                className="min-h-0 flex-1 overflow-auto p-3"
-              >
-                <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-ink">
-                  {(status.kind === "compiling" || status.kind === "loading"
-                    ? liveLog
-                    : log) || "(no log output yet)"}
-                </pre>
               </div>
-            ) : (
               <div className="flex min-h-0 flex-1 flex-col">
                 <div
                   ref={chatScrollRef}
@@ -3247,10 +3427,84 @@ export default function EditorPage() {
                   )}
                 </form>
               </div>
-            )}
-          </div>
+            </div>
+          ) : leftPane === "log" ? (
+            <div className="flex min-w-0 flex-1 flex-col bg-white">
+              <div className="flex h-9 shrink-0 items-center border-b border-ink/10 px-3">
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
+                  Log
+                </h2>
+              </div>
+              <div
+                ref={logScrollRef}
+                onScroll={handleLogScroll}
+                className="min-h-0 flex-1 overflow-auto p-3"
+              >
+                <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-ink">
+                  {(status.kind === "compiling" || status.kind === "loading"
+                    ? liveLog
+                    : log) || "(no log output yet)"}
+                </pre>
+              </div>
+            </div>
+          ) : (
+            <FileBrowser
+              files={entries}
+              activePath={activePath}
+              mainPath={mainPath}
+              onOpen={openPath}
+              onAdd={addFile}
+              onRename={renameFile}
+              onDelete={deleteFile}
+              onSetMain={setMainPath}
+              onUpload={uploadFiles}
+              width={workspace.filesW}
+              // The project name sits above the tree (inscribe.io position),
+              // not in the app bar.
+              title={
+                <input
+                  value={projectName}
+                  onChange={(e) => setProjectName(e.target.value)}
+                  title="Project name (saved in your browser)"
+                  className="w-full min-w-0 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-sm font-medium text-ink transition-colors hover:border-ink/15 focus:border-mint focus:outline-none"
+                />
+              }
+            />
+          )}
+          <div
+            onPointerDown={(e) => {
+              const base = workspace.filesW;
+              startLayoutDrag(e, "col-resize", (dx) =>
+                setWorkspace((w) => ({
+                  ...w,
+                  filesW: clampN(base + dx, FILES_W.min, FILES_W.max),
+                })),
+              );
+            }}
+            title="Drag to resize the files panel"
+            className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize transition-colors hover:bg-mint"
+          />
         </div>
-      )}
+
+        {/* Editor + PDF: a draggable divider splits them, the arrows
+            swap the panes */}
+        <div ref={splitRef} className="flex min-w-0 flex-1">
+          {workspace.editorFirst ? (
+            <>
+              {editorPane}
+              {divider}
+              {pdfPane}
+            </>
+          ) : (
+            <>
+              {pdfPane}
+              {divider}
+              {editorPane}
+            </>
+          )}
+        </div>
+      </div>
+
 
       {notice && (
         <div

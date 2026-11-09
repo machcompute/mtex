@@ -169,19 +169,18 @@ class Runner {
     return "";
   }
 
-  // Open the log drawer if it's closed, read the log, close it again.
+  // Show the log panel (icon rail), read the log, restore the files panel
+  // (the old drawer closed itself again; the panel must not keep covering
+  // the tree for the steps that follow).
   async logText() {
-    const viewLog = this.page.locator("button", { hasText: "View log" });
-    if (await viewLog.count()) {
-      await viewLog.first().click();
-      await this.page.waitForTimeout(300);
-    }
+    await this.page.locator('[data-rail="log"]').click();
+    await this.page.waitForTimeout(300);
     const log =
       (await this.page.evaluate(
         () => document.querySelector("pre")?.textContent || "",
       )) || "";
-    const hideLog = this.page.locator("button", { hasText: "Hide log" });
-    if (await hideLog.count()) await hideLog.first().click();
+    await this.page.locator('[data-rail="files"]').click();
+    await this.page.waitForTimeout(200);
     return log;
   }
 

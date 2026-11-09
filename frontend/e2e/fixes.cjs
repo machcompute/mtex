@@ -83,7 +83,9 @@ async function seed(r, p) {
   await r1.page.keyboard.press("Control+End");
   await r1.page.keyboard.type("ED");
   const renamed = r1.page.locator(
-    "aside input:not([type=file])",
+    // :not([title]) — the files header's project-name input also matches
+    // "aside input" (inscribe.io layout), but it carries a title attr.
+    "aside input:not([type=file]):not([title])",
   );
   await r1.page
     .locator("li", { hasText: "main.tex" })
@@ -114,6 +116,13 @@ async function seed(r, p) {
 
   // #22/#18/#13 name validation notices (new-file modal).
   const newFile = async (name) => {
+    // The seeded doc is bare text, so the builds above failed by design and
+    // the Log panel is auto-open (it unmounts the file tree, where the
+    // new-file button lives). Restore the Files panel first.
+    if ((await r1.page.locator('[data-rail="log"][data-active]').count()) > 0) {
+      await r1.page.locator('[data-rail="files"]').click();
+      await sleep(200);
+    }
     await r1.page.locator('button[data-action="new-file"]').click();
     await r1.page.waitForSelector('[data-modal="new-file"]', { timeout: 5000 });
     const input = r1.page.locator('input[placeholder="chapter.tex"]');
@@ -123,13 +132,12 @@ async function seed(r, p) {
   };
   // The seeded main.tex is bare text, not LaTeX: the open-time auto-compile
   // and the debounced rebuild of the #1 edit above both FAIL, and a failed
-  // build opens the log drawer by design. Settle any in-flight build and
-  // close the drawer so the check below isolates the validation notice
-  // (before auto-compile-on-open this passed by luck: the FIRST compile in
-  // a session is slow enough to still be running at check time).
+  // build opens the Log panel by design. Settle any in-flight build; the
+  // newFile helper below restores the Files panel so the checks isolate
+  // the validation notice (before auto-compile-on-open this passed by luck:
+  // the FIRST compile in a session is slow enough to still be running at
+  // check time).
   await r1.waitReady();
-  const hideLog = r1.page.locator("button", { hasText: "Hide log" });
-  if (await hideLog.count()) await hideLog.first().click();
 
   await newFile("b.tex");
   r1.ok(
@@ -137,11 +145,11 @@ async function seed(r, p) {
     /already exists/.test(await notice(r1)),
     await notice(r1),
   );
-  // The "View log" toggle is always rendered; the DRAWER ({showLog && …})
-  // must stay closed for a validation notice.
+  // The left panel starts on the Files tab; a validation notice must not
+  // switch it to the Log panel (only compile errors do).
   r1.ok(
-    "#22 log drawer stays closed for a validation error",
-    (await r1.page.locator("button", { hasText: "Hide log" }).count()) === 0,
+    "#22 log panel stays closed for a validation error",
+    (await r1.page.locator('[data-rail="log"][data-active]').count()) === 0,
   );
   // A rejected create keeps the modal open — Escape, then a legal name.
   await r1.page.keyboard.press("Escape");
@@ -203,7 +211,7 @@ async function seed(r, p) {
     .first()
     .click();
   await sleep(300);
-  await r1.page.locator("button", { hasText: "Recompile" }).first().click();
+  await r1.page.locator('button[title^="Recompile"]').first().click();
   await sleep(1500);
   const st14c = ((await r1.status.textContent().catch(() => "")) || "").trim();
   r1.ok(
@@ -629,7 +637,7 @@ async function seed(r, p) {
   await r6.goto();
   await r6.page.waitForSelector('button[data-action="new-file"]', { timeout: 30000 });
   // Nothing compiles on load — trigger the first build manually.
-  await r6.page.locator("button", { hasText: "Recompile" }).first().click();
+  await r6.page.locator('button[title^="Recompile"]').first().click();
   let eng = "";
   for (let i = 0; i < 60; i++) {
     await sleep(1000);

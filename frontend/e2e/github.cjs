@@ -401,7 +401,10 @@ const r = new Runner("github");
   r.ok(
     "main.tex opened as the active tab",
     (await r.page.evaluate(
-      () => document.querySelector("[data-active]")?.getAttribute("data-tab"),
+      () =>
+        document.querySelector("[data-tab][data-active]")?.getAttribute(
+          "data-tab",
+        ),
     )) === "main.tex",
   );
 

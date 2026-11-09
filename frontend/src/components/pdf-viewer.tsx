@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import {
@@ -83,6 +84,12 @@ type Props = {
    * The editor uses this to follow the PDF's scroll when sync is on.
    */
   onViewportTop?: (page: number, yTopPts: number) => void;
+  /**
+   * Rendered at the left end of the toolbar row (the page puts the Compile
+   * and Go-to-PDF buttons there, so the pane's whole top is ONE row —
+   * inscribe.io's layout: build button left, viewer controls right).
+   */
+  leading?: ReactNode;
 };
 
 export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
@@ -94,6 +101,7 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
     syncScroll = false,
     onToggleSyncScroll,
     onViewportTop,
+    leading,
   },
   ref,
 ) {
@@ -453,8 +461,16 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
 
   return (
     <div className={"flex h-full min-w-0 flex-col " + (className ?? "")}>
-      {/* Toolbar: zoom | fit | page | sync-scroll | download */}
+      {/* Toolbar: [page's leading slot] | zoom | fit | page | sync-scroll |
+          download — one row for the whole pane top (inscribe.io places the
+          Compile button and the viewer controls in the same strip). */}
       <div className="flex h-9 shrink-0 items-center gap-0.5 border-b border-ink/10 bg-cream px-2">
+        {leading && (
+          <>
+            {leading}
+            <span className="mx-1 h-4 w-px shrink-0 bg-ink/10" />
+          </>
+        )}
         <button title="Zoom out" disabled={!hasPdf} onClick={() => zoomBy(1 / 1.25)} className={tBtn}>
           <IconZoomOut className="h-4 w-4" />
         </button>

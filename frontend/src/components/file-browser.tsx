@@ -41,6 +41,10 @@ type Props = {
   onUpload: (files: File[]) => void;
   /** Panel width in px (the workspace layout makes the edge draggable). */
   width?: number;
+  /** The panel header's left slot — the page puts the project-name input
+   * there (inscribe.io places the project name above the tree, not in the
+   * app bar). */
+  title?: ReactNode;
 };
 
 /**
@@ -62,6 +66,7 @@ export default function FileBrowser({
   onSetMain,
   onUpload,
   width,
+  title,
 }: Props) {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalName, setModalName] = useState("");
@@ -207,11 +212,15 @@ export default function FileBrowser({
         }}
       />
 
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-ink/10 px-3">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
-          Files
-        </h2>
-        <div className="flex items-center gap-0.5">
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-ink/10 px-3">
+        <div className="min-w-0 flex-1">
+          {title ?? (
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
+              Files
+            </h2>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-0.5">
           <HeaderBtn
             action="upload"
             tip="Upload files (kept in your browser)"

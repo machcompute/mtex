@@ -301,3 +301,86 @@ export function IconFile({ className }: P) {
     </svg>
   );
 }
+
+export function IconSearch({ className }: P) {
+  return (
+    <Svg className={className}>
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.5 10.5 14 14" />
+    </Svg>
+  );
+}
+
+export function IconChat({ className }: P) {
+  return (
+    <Svg className={className}>
+      <path d="M2.5 2.5h11a.5.5 0 0 1 .5.5v8a.5.5 0 0 1-.5.5H8.5L5 14.5V11.5H2.5a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5z" />
+    </Svg>
+  );
+}
+
+export function IconClock({ className }: P) {
+  return (
+    <Svg className={className}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.5V8l2.5 1.5" />
+    </Svg>
+  );
+}
+
+export function IconChart({ className }: P) {
+  return (
+    <Svg className={className}>
+      <path d="M2.5 13.5h11" />
+      <path d="M4.5 13.5V8.5M8 13.5V4.5M11.5 13.5V6.5" />
+    </Svg>
+  );
+}
+
+export function IconNote({ className }: P) {
+  return (
+    <Svg className={className}>
+      <path d="M2 3.5h12v3.5H2z" />
+      <path d="M3.5 7v5.5h9V7" />
+      <path d="M6.5 9h3" />
+    </Svg>
+  );
+}
+
+export function IconLink({ className }: P) {
+  return (
+    <Svg className={className}>
+      <path d="M6.5 9.5l3-3" />
+      <path d="M7 5 5.5 6.5a2.5 2.5 0 0 0 3.5 3.5L10.5 8.5" />
+      <path d="M9 11l1.5-1.5a2.5 2.5 0 0 0-3.5-3.5L5.5 7.5" />
+    </Svg>
+  );
+}
+
+export function IconCode({ className }: P) {
+  return (
+    <Svg className={className}>
+      <path d="M5.5 5 2.5 8l3 3" />
+      <path d="M10.5 5l3 3-3 3" />
+    </Svg>
+  );
+}
+
+export function IconImage({ className }: P) {
+  return (
+    <Svg className={className}>
+      <rect x="2" y="3" width="12" height="10" rx="1" />
+      <circle cx="5.5" cy="6.5" r="1" />
+      <path d="M2.5 11.5 6 8.5l2.5 2 3-3 2 2" />
+    </Svg>
+  );
+}
+
+export function IconTable({ className }: P) {
+  return (
+    <Svg className={className}>
+      <rect x="2" y="3" width="12" height="10" rx="1" />
+      <path d="M2 7.5h12M6.5 3v10M10.5 3v10" />
+    </Svg>
+  );
+}

@@ -39,18 +39,15 @@ const { Runner, seedProject } = require("./helpers.cjs");
     await page.reload({ waitUntil: "load" });
     await r.waitReady();
 
-    // 1. Open the chat drawer from the status bar.
-    await page.locator('button[title="Toggle the chat drawer"]').first().click();
+    // 1. Open the chat panel from the icon rail.
+    await page.locator('[data-rail="chat"]').click();
     const input = page.locator("[data-chat-input]");
-    r.ok("chat drawer shows the input", await input.isVisible());
+    r.ok("chat panel shows the input", await input.isVisible());
     r.ok(
-      "drawer carries the Log/Chat tabs",
-      (await page.locator('[data-bottom-tab="log"]').count()) === 1 &&
-        (await page.locator('[data-bottom-tab="chat"]').count()) === 1,
-    );
-    r.ok(
-      "the status bar shows Hide chat while the drawer is on chat",
-      (await page.locator("button", { hasText: "Hide chat" }).count()) === 1,
+      "the rail carries Files/Chat/Log with Chat active",
+      (await page.locator('[data-rail="files"]').count()) === 1 &&
+        (await page.locator('[data-rail="log"]').count()) === 1 &&
+        (await page.locator('[data-rail="chat"][data-active]').count()) === 1,
     );
 
     // 4a. The key is not in the DOM (it must live server-side only).
@@ -192,15 +189,15 @@ const { Runner, seedProject } = require("./helpers.cjs");
       { timeout: 120_000 },
     );
 
-    // 5. Clear empties the conversation; the Log tab still shows the log.
+    // 5. Clear empties the conversation; the Log panel still shows the log.
     await page.locator("[data-chat-clear]").click();
     r.ok(
       "clear empties the conversation",
       (await page.locator("[data-chat-role]").count()) === 0,
     );
-    await page.locator('[data-bottom-tab="log"]').click();
+    await page.locator('[data-rail="log"]').click();
     r.ok(
-      "the Log tab shows the build log",
+      "the Log panel shows the build log",
       (await page.locator("pre").count()) >= 1,
     );
   } finally {

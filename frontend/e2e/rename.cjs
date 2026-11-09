@@ -10,8 +10,10 @@ const r = new Runner("rename");
 
 (async () => {
   await r.start();
+  // :not([title]) — the files header's project-name input also matches
+  // "aside input" (inscribe.io layout), but it carries a title attr.
   const renameInput = () =>
-    r.page.locator('aside input:not([type="file"])');
+    r.page.locator('aside input:not([type="file"]):not([title])');
 
   await r.goto();
   await r.waitReady();
@@ -94,8 +96,8 @@ const r = new Runner("rename");
   const bodyText = await r.page.evaluate(() => document.body.innerText);
   r.ok("invalid rename shows notice", /Cannot rename/.test(bodyText));
   r.ok(
-    "invalid rename leaves the log drawer closed",
-    (await r.page.locator("button", { hasText: "View log" }).count()) > 0,
+    "invalid rename leaves the log panel closed",
+    (await r.page.locator('[data-rail="log"][data-active]').count()) === 0,
   );
   r.ok(
     "invalid rename leaves file unchanged",

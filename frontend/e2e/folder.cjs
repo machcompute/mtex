@@ -88,7 +88,10 @@ const r = new Runner("folder");
   r.ok(
     "doc.tex tab opened",
     (await r.page.evaluate(
-      () => document.querySelector("[data-active]")?.getAttribute("data-tab"),
+      () =>
+        document.querySelector("[data-tab][data-active]")?.getAttribute(
+          "data-tab",
+        ),
     )) === "doc.tex",
   );
 

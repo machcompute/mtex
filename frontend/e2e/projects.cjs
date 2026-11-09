@@ -1,6 +1,8 @@
 // Project management: first-run defaults, create/switch/delete from the
 // Projects menu, rename persistence across reloads, delete-to-empty, and
-// the menu's outside-click close. No compiles — the engine is never needed.
+// the menu's outside-click close. The P1MARK marker edit trips the
+// auto-compile (bare text, so it fails and auto-opens the Log panel) —
+// ensureFilesPane restores the Files panel where the name input now lives.
 const { Runner, readProject } = require("./helpers.cjs");
 
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -23,6 +25,16 @@ const nameValue = (r) =>
     (sel) => document.querySelector(sel)?.value ?? "",
     NAME_INPUT,
   );
+// A failed build (the P1MARK marker is bare text, not LaTeX) auto-opens
+// the Log panel, which unmounts the file tree — and with it the project
+// name input (inscribe.io layout: the name lives in the files header).
+// Restore the Files panel before touching files-panel UI.
+const ensureFilesPane = async (r) => {
+  if ((await r.page.locator('[data-rail="log"][data-active]').count()) > 0) {
+    await r.page.locator('[data-rail="files"]').click();
+    await sleep(200);
+  }
+};
 const openMenu = async (r) => {
   await projectsBtn(r).click();
   await r.page.waitForSelector('[data-menu="projects"] div[data-project]', {
@@ -189,6 +201,7 @@ const mainValue = async (r) => {
   );
 
   // --- rename persists across reload --------------------------------------
+  await ensureFilesPane(r); // the P1MARK build failure may have opened the Log
   await nameInput(r).fill("Renamed proj");
   await sleep(1500);
   await r.page.reload({ waitUntil: "load" });
@@ -277,7 +290,10 @@ const mainValue = async (r) => {
   );
 
   // --- outside click closes the menu ---------------------------------------
-  await nameInput(r).click();
+  // The status text at the header's right edge: outside the dropdown, and
+  // (unlike the name input, which now sits in the files header UNDER the
+  // dropdown) clicking it triggers nothing but the document close handler.
+  await r.page.locator("header span.w-64.truncate").first().click();
   await sleep(300);
   r.ok(
     "menu: outside click closes it",
