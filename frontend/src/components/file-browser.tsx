@@ -45,6 +45,9 @@ type Props = {
    * there (inscribe.io places the project name above the tree, not in the
    * app bar). */
   title?: ReactNode;
+  /** Extra header controls at the far right (the page puts the project
+   * stats button there — inscribe.io's rightmost header icon). */
+  headerExtra?: ReactNode;
 };
 
 /**
@@ -67,6 +70,7 @@ export default function FileBrowser({
   onUpload,
   width,
   title,
+  headerExtra,
 }: Props) {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalName, setModalName] = useState("");
@@ -222,13 +226,6 @@ export default function FileBrowser({
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
           <HeaderBtn
-            action="upload"
-            tip="Upload files (kept in your browser)"
-            onClick={pickUpload}
-          >
-            <IconUpload className="h-4 w-4" />
-          </HeaderBtn>
-          <HeaderBtn
             action="upload-folder"
             tip="Upload a whole folder (kept in your browser)"
             onClick={pickFolder}
@@ -242,6 +239,14 @@ export default function FileBrowser({
           >
             <IconPlus className="h-4 w-4" />
           </HeaderBtn>
+          <HeaderBtn
+            action="upload"
+            tip="Upload files (kept in your browser)"
+            onClick={pickUpload}
+          >
+            <IconUpload className="h-4 w-4" />
+          </HeaderBtn>
+          {headerExtra}
         </div>
       </div>
 

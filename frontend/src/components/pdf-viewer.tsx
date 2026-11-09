@@ -90,6 +90,17 @@ type Props = {
    * inscribe.io's layout: build button left, viewer controls right).
    */
   leading?: ReactNode;
+  /**
+   * Rendered at the right end of the toolbar row (the page puts the
+   * compile-history, notes and page-count badge there — inscribe.io's
+   * right-side icon group).
+   */
+  trailing?: ReactNode;
+  /**
+   * Called with the current PDF's page count whenever it changes (0 when
+   * there is no PDF) — the page shows it as a badge in the toolbar.
+   */
+  onNumPages?: (n: number) => void;
 };
 
 export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
@@ -102,6 +113,8 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
     onToggleSyncScroll,
     onViewportTop,
     leading,
+    trailing,
+    onNumPages,
   },
   ref,
 ) {
@@ -115,6 +128,8 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
   clickRef.current = onPageClick;
   const viewportRef = useRef(onViewportTop);
   viewportRef.current = onViewportTop;
+  const numPagesRef = useRef(onNumPages);
+  numPagesRef.current = onNumPages;
 
   // Zoom: null = fit-to-width (default, follows the pane width); a number
   // is a manual zoom in 0.5–4.
@@ -159,6 +174,7 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
       // fitScale back to its default and re-trigger this effect forever.
       renderedDataRef.current = data;
       setNumPages(0);
+      numPagesRef.current?.(0);
       setPageWidthPts(null);
       setPage(1);
     }
@@ -190,6 +206,7 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
       .then(async (pdf) => {
         if (cancelled) return;
         setNumPages(pdf.numPages);
+        numPagesRef.current?.(pdf.numPages);
         const s =
           scale ?? (pageWidthPts && containerWidth > 0 ? fitScale : 1.5);
         for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -457,18 +474,20 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
   };
 
   const tBtn =
-    "rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40";
+    "rounded p-0.5 text-stone transition-colors hover:bg-peach/40 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40";
 
   return (
     <div className={"flex h-full min-w-0 flex-col " + (className ?? "")}>
       {/* Toolbar: [page's leading slot] | zoom | fit | page | sync-scroll |
           download — one row for the whole pane top (inscribe.io places the
           Compile button and the viewer controls in the same strip). */}
-      <div className="flex h-9 shrink-0 items-center gap-0.5 border-b border-ink/10 bg-cream px-2">
+      {/* No overflow-x here: a scrollable row would clip the page's
+          popovers (history/notes), which hang below it. */}
+      <div className="flex h-9 shrink-0 items-center gap-px border-b border-ink/10 bg-cream px-2">
         {leading && (
           <>
             {leading}
-            <span className="mx-1 h-4 w-px shrink-0 bg-ink/10" />
+            <span className="mx-0.5 h-4 w-px shrink-0 bg-ink/10" />
           </>
         )}
         <button title="Zoom out" disabled={!hasPdf} onClick={() => zoomBy(1 / 1.25)} className={tBtn}>
@@ -478,14 +497,14 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
           title="Actual size (100%)"
           disabled={!hasPdf}
           onClick={() => setScale(1)}
-          className="w-12 rounded px-1 py-1 text-center text-xs font-medium text-ink transition-colors hover:bg-peach/40 disabled:cursor-not-allowed disabled:opacity-40"
+          className="w-10 rounded px-1 py-1 text-center text-xs font-medium text-ink transition-colors hover:bg-peach/40 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {hasPdf ? `${Math.round(effScale * 100)}%` : "–"}
         </button>
         <button title="Zoom in" disabled={!hasPdf} onClick={() => zoomBy(1.25)} className={tBtn}>
           <IconZoomIn className="h-4 w-4" />
         </button>
-        <span className="mx-1 h-4 w-px bg-ink/10" />
+        <span className="mx-0.5 h-4 w-px bg-ink/10" />
         <button
           title="Fit to width"
           disabled={!hasPdf}
@@ -506,7 +525,7 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
         >
           <IconChevronLeft className="h-4 w-4" />
         </button>
-        <span className="px-1 text-xs tabular-nums text-stone">
+        <span className="px-0.5 text-xs tabular-nums text-stone">
           {numPages > 0 ? `${page} / ${numPages}` : "–"}
         </span>
         <button
@@ -517,7 +536,7 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
         >
           <IconChevronRight className="h-4 w-4" />
         </button>
-        <span className="mx-1 h-4 w-px bg-ink/10" />
+        <span className="mx-0.5 h-4 w-px bg-ink/10" />
         <button
           title={
             syncScroll
@@ -537,6 +556,12 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
         <button title="Download PDF" disabled={!hasPdf} onClick={download} className={tBtn}>
           <IconDownload className="h-4 w-4" />
         </button>
+        {trailing && (
+          <>
+            <span className="mx-0.5 h-4 w-px shrink-0 bg-ink/10" />
+            {trailing}
+          </>
+        )}
       </div>
       <div
         ref={containerRef}

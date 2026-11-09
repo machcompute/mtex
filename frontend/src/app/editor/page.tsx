@@ -32,6 +32,7 @@ import FileBrowser, {
 } from "@/components/file-browser";
 import {
   IconAuto,
+  IconChart,
   IconChat,
   IconCheck,
   IconChevronDown,
@@ -39,6 +40,7 @@ import {
   IconCode,
   IconClock,
   IconFile,
+  IconNote,
   IconGitHub,
   IconImage,
   IconLink,
@@ -461,6 +463,14 @@ type WorkspaceLayout = {
 const WORKSPACE_KEY = "homehub-workspace-v1";
 const FILES_W = { min: 160, max: 480 };
 const SPLIT = { min: 0.2, max: 0.8 };
+// Compile-history popover: newest first, capped so a long session can't
+// grow it without bound.
+const HISTORY_CAP = 50;
+// Per-project notes live in localStorage keyed by project id — browser-
+// local, like the workspace layout and the chat conversation.
+const NOTES_KEY = (id: string) => `homehub-notes-${id}`;
+const readNotes = (id: string | null) =>
+  id ? (localStorage.getItem(NOTES_KEY(id)) ?? "") : "";
 const DEFAULT_WORKSPACE: WorkspaceLayout = {
   filesW: 256,
   split: 0.5,
@@ -585,6 +595,31 @@ export default function EditorPage() {
   const [autoRecompile, setAutoRecompile] = useState(true);
   const [syncScroll, setSyncScroll] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
+  // Compile history for this session's project (newest first, capped at
+  // HISTORY_CAP). In-memory like the chat — a project's build log is not
+  // part of its stored files. Cleared when a different project opens.
+  const [compileHistory, setCompileHistory] = useState<
+    { t: string; ok: boolean; ms?: number; message?: string }[]
+  >([]);
+  // The popovers in the toolbar rows (compile history, project notes,
+  // project stats) — each closes on an outside click (see below).
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
+  // The current PDF's page count (the badge in the PDF toolbar row); the
+  // viewer reports it through onNumPages.
+  const [pdfPages, setPdfPages] = useState(0);
+  const recordHistory = useCallback(
+    (ok: boolean, extra: { ms?: number; message?: string } = {}) => {
+      setCompileHistory((h) =>
+        [{ t: new Date().toISOString(), ok, ...extra }, ...h].slice(
+          0,
+          HISTORY_CAP,
+        ),
+      );
+    },
+    [],
+  );
   // True while the debounced OPFS persist is pending — the "Saving…"
   // indicator in the editor toolbar.
   const [savePending, setSavePending] = useState(false);
@@ -784,6 +819,9 @@ export default function EditorPage() {
     // outgoing project's auto-opened log pane (its failed build's error
     // state would otherwise survive the switch).
     setLeftPane("files");
+    // The build history belongs to the outgoing project's session.
+    setCompileHistory([]);
+    setHistoryOpen(false);
     window.clearTimeout(autoTimerRef.current);
     try {
       localStorage.setItem(ACTIVE_PROJECT_KEY, id);
@@ -1617,6 +1655,23 @@ export default function EditorPage() {
     return () => document.removeEventListener("click", onDocClick);
   }, [projectsMenuOpen]);
 
+  // Same outside-click dismissal for the toolbar popovers (compile
+  // history, project notes, project stats).
+  useEffect(() => {
+    if (!historyOpen && !notesOpen && !statsOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!(e.target instanceof Element)) return;
+      // Each popover stays open only while the click lands inside it
+      // (the trigger button lives inside its root, so the button's own
+      // onClick still toggles it).
+      if (!e.target.closest('[data-popover-root="history"]')) setHistoryOpen(false);
+      if (!e.target.closest('[data-popover-root="notes"]')) setNotesOpen(false);
+      if (!e.target.closest('[data-popover-root="stats"]')) setStatsOpen(false);
+    };
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
+  }, [historyOpen, notesOpen, statsOpen]);
+
   // --- engine ------------------------------------------------------------
   useEffect(() => {
     const compiler = new BusyTexCompiler();
@@ -1786,6 +1841,7 @@ export default function EditorPage() {
               : null,
           );
           setStatus({ kind: "done", ms: Math.round(performance.now() - started) });
+          recordHistory(true, { ms: Math.round(performance.now() - started) });
           return;
         }
       }
@@ -1822,6 +1878,7 @@ export default function EditorPage() {
       if (result.pdf && result.pdf.byteLength > 0) {
         setPdf(result.pdf);
         setStatus({ kind: "done", ms: Math.round(performance.now() - started) });
+        recordHistory(true, { ms: Math.round(performance.now() - started) });
         // Refresh the dashboard's square thumbnail (first page). Fire-and-
         // forget: rendering it is best-effort and must never affect the
         // compile result the reader just saw.
@@ -1841,6 +1898,7 @@ export default function EditorPage() {
         // bar and the (auto-shown) log panel.
         setStatus({ kind: "error", message: "Compilation failed — see log" });
         setLeftPane("log");
+        recordHistory(false, { message: "Compilation failed — see log" });
       }
       setLog(result.log);
       // A missing babel language (\usepackage[portuguese]{babel}): recent TeX
@@ -1924,8 +1982,10 @@ export default function EditorPage() {
       // Same stale-switch guard as after the compile call: a build of the
       // outgoing project must not flag the incoming one as failed.
       if (projectId === persistStateRef.current.activeProjectId) {
-        setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+        const msg = err instanceof Error ? err.message : String(err);
+        setStatus({ kind: "error", message: msg });
         setLeftPane("log");
+        recordHistory(false, { message: msg });
       }
     } finally {
       busyRef.current = false;
@@ -1948,7 +2008,7 @@ export default function EditorPage() {
         }
       }
     }
-  }, [files, mainPath]);
+  }, [files, mainPath, recordHistory]);
   // Called by the packages modal after a successful install/remove: the
   // engine must restart to pick the package up (see above).
   const handlePackagesChanged = (msg: string) => {
@@ -2962,6 +3022,19 @@ export default function EditorPage() {
     </div>
   );
 
+  // Stats for the files-header popover (computed only while it is open —
+  // splitting the active file's text is cheap, but pointless per render).
+  const activeFileStats = statsOpen
+    ? (() => {
+        const t = files[activePath];
+        if (typeof t !== "string") return null;
+        return {
+          words: t.trim().split(/\s+/).filter(Boolean).length,
+          lines: t.split("\n").length,
+        };
+      })()
+    : null;
+
   const pdfPane = (
     <div
       style={{ flex: `${1 - workspace.split} 1 0%` }}
@@ -2988,7 +3061,7 @@ export default function EditorPage() {
               onClick={() => compileRef.current()}
               disabled={status.kind === "compiling"}
               title="Recompile (Ctrl/Cmd+Enter)"
-              className="flex shrink-0 items-center gap-1.5 rounded-full bg-mint px-4 py-1.5 text-sm font-semibold text-ink transition-colors hover:bg-ink hover:text-mint disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex shrink-0 items-center gap-1.5 rounded-full bg-mint px-3.5 py-1.5 text-sm font-semibold text-ink transition-colors hover:bg-ink hover:text-mint disabled:cursor-not-allowed disabled:opacity-50"
             >
               {status.kind === "compiling" ? (
                 <IconSpinner className="h-3.5 w-3.5 animate-spin" />
@@ -3005,10 +3078,119 @@ export default function EditorPage() {
                   ? "Jump the PDF to the line under the editor cursor"
                   : "Compile first to build the PDF<->source map"
               }
-              className="shrink-0 rounded border border-stone/40 px-2.5 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+              className="shrink-0 rounded border border-stone/40 px-2 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
             >
               Go to PDF
             </button>
+          </>
+        }
+        onNumPages={setPdfPages}
+        // Right-end icons (inscribe.io's right group): compile history,
+        // project notes, and the page-count badge on the document glyph.
+        trailing={
+          <>
+            <span data-popover-root="history" className="relative">
+              <button
+                title="Compile history"
+                onClick={() => setHistoryOpen((v) => !v)}
+                className="rounded p-0.5 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+              >
+                <IconClock className="h-4 w-4" />
+              </button>
+              {historyOpen && (
+                <div className="absolute right-0 top-full z-30 mt-1 w-80 rounded-md border border-ink/10 bg-white p-2 shadow-lg">
+                  <div className="mb-1 flex items-center justify-between px-1">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-stone">
+                      Compile history
+                    </span>
+                    <button
+                      title="Clear the history"
+                      onClick={() => setCompileHistory([])}
+                      className="text-xs text-stone transition-colors hover:text-ink"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  {compileHistory.length === 0 ? (
+                    <p className="px-1 py-2 text-xs text-stone">
+                      No compiles yet this session.
+                    </p>
+                  ) : (
+                    <ul className="max-h-72 overflow-y-auto">
+                      {compileHistory.map((h, i) => (
+                        <li
+                          key={h.t + ":" + i}
+                          className="flex items-start gap-2 rounded px-1 py-1 text-xs hover:bg-peach/30"
+                        >
+                          <span
+                            className={
+                              "mt-1 h-1.5 w-1.5 shrink-0 rounded-full " +
+                              (h.ok ? "bg-mint" : "bg-red-500")
+                            }
+                          />
+                          <span className="min-w-0 flex-1 truncate text-ink">
+                            {h.ok
+                              ? `Compiled in ${h.ms} ms`
+                              : (h.message ?? "Compilation failed")}
+                          </span>
+                          <span className="shrink-0 tabular-nums text-stone">
+                            {new Date(h.t).toLocaleTimeString()}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </span>
+            <span data-popover-root="notes" className="relative">
+              <button
+                title="Project notes (kept in this browser)"
+                onClick={() => setNotesOpen((v) => !v)}
+                className="rounded p-0.5 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+              >
+                <IconNote className="h-4 w-4" />
+              </button>
+              {notesOpen && activeProjectId && (
+                <div className="absolute right-0 top-full z-30 mt-1 w-80 rounded-md border border-ink/10 bg-white p-2 shadow-lg">
+                  <p className="mb-1 px-1 text-xs font-semibold uppercase tracking-wide text-stone">
+                    Notes — {projectName}
+                  </p>
+                  <textarea
+                    // The key remounts the textarea per project, re-reading
+                    // that project's stored notes (uncontrolled on purpose:
+                    // the value lives in localStorage, written on change).
+                    key={activeProjectId}
+                    defaultValue={readNotes(activeProjectId)}
+                    onChange={(e) =>
+                      localStorage.setItem(
+                        NOTES_KEY(activeProjectId),
+                        e.target.value,
+                      )
+                    }
+                    data-notes
+                    placeholder="Notes about this project (kept in this browser)…"
+                    rows={6}
+                    className="w-full resize-y rounded border border-stone/30 bg-cream/40 px-2 py-1.5 text-xs text-ink focus:border-mint focus:outline-none"
+                  />
+                </div>
+              )}
+            </span>
+            <span
+              title={
+                pdfPages > 0
+                  ? `${pdfPages} page${pdfPages === 1 ? "" : "s"} in the current PDF`
+                  : "No PDF yet — press Compile"
+              }
+              className="relative rounded p-0.5 text-stone"
+            >
+              <IconFile className="h-4 w-4" />
+              {pdfPages > 0 && (
+                <span className="absolute -right-2 -top-1.5 rounded-full bg-peach px-1 text-[9px] font-semibold leading-none text-ink">
+                  {pdfPages}
+                </span>
+              )}
+            </span>
           </>
         }
       />
@@ -3468,6 +3650,61 @@ export default function EditorPage() {
                   title="Project name (saved in your browser)"
                   className="w-full min-w-0 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-sm font-medium text-ink transition-colors hover:border-ink/15 focus:border-mint focus:outline-none"
                 />
+              }
+              // The project stats button — inscribe.io's rightmost icon in
+              // the files panel header.
+              headerExtra={
+                <span
+                  data-popover-root="stats"
+                  className="relative flex items-center gap-0.5"
+                >
+                  <button
+                    title="Project stats"
+                    onClick={() => setStatsOpen((v) => !v)}
+                    className="rounded p-1 text-stone transition-colors hover:bg-peach/40 hover:text-ink"
+                  >
+                    <IconChart className="h-4 w-4" />
+                  </button>
+                  {statsOpen && (
+                    <div className="absolute right-0 top-full z-30 mt-1 w-60 rounded-md border border-ink/10 bg-white p-2 shadow-lg">
+                      <p className="mb-1 px-1 text-xs font-semibold uppercase tracking-wide text-stone">
+                        {projectName}
+                      </p>
+                      <dl className="space-y-1 px-1 text-xs">
+                        <div className="flex justify-between">
+                          <dt className="text-stone">Files</dt>
+                          <dd className="tabular-nums text-ink">
+                            {entries.length}
+                          </dd>
+                        </div>
+                        {activeFileStats && (
+                          <>
+                            <div className="flex justify-between">
+                              <dt className="text-stone">
+                                Words — {activePath}
+                              </dt>
+                              <dd className="tabular-nums text-ink">
+                                {activeFileStats.words.toLocaleString()}
+                              </dd>
+                            </div>
+                            <div className="flex justify-between">
+                              <dt className="text-stone">Lines</dt>
+                              <dd className="tabular-nums text-ink">
+                                {activeFileStats.lines}
+                              </dd>
+                            </div>
+                          </>
+                        )}
+                        <div className="flex justify-between">
+                          <dt className="text-stone">PDF pages</dt>
+                          <dd className="tabular-nums text-ink">
+                            {pdfPages || "—"}
+                          </dd>
+                        </div>
+                      </dl>
+                    </div>
+                  )}
+                </span>
               }
             />
           )}
