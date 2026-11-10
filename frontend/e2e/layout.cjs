@@ -4,10 +4,9 @@
 // anchored at its bottom, the search view itself, and the divider's
 // hover-only swap button, the formatting toolbar + save indicator row,
 // the PDF pane's right group (compile history, notes, page badge), the
-// files-panel stats popover, and the PDF line-number gutter drawn from
-// the auto-compiled synctex map. No compiles of its own (the first load
-// auto-compiles; the gutter checks poll for its PDF + map) and no
-// project management — dashboard.cjs and projects.cjs own those.
+// files-panel stats popover. No compiles of its own (the first load
+// auto-compiles) and no project management — dashboard.cjs and
+// projects.cjs own those.
 const { Runner } = require("./helpers.cjs");
 
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -128,7 +127,7 @@ async function poll(r, fn, tries = 40, every = 250) {
     !!wrapped,
     wrapped?.slice(0, 80),
   );
-  // Restore the pristine file: the search and gutter checks below expect
+  // Restore the pristine file: the search check below expects
   // the default project, and the auto-recompile must get it back too.
   await r.page.evaluate(
     (o) => window.monaco.editor.getEditors()[0]?.getModel()?.setValue(o),
@@ -202,11 +201,15 @@ async function poll(r, fn, tries = 40, every = 250) {
     (await r.page.locator("[data-chat-input]").count()) === 1 &&
       (await r.page.locator("[data-search-input]").count()) === 0,
   );
+  // NOTE: the chat drawer is ALWAYS mounted (display:none when another
+  // pane is active — the runtime must survive pane switches), so "the
+  // others are gone" asserts VISIBILITY, not unmounting, for the chat
+  // input. The search pane is a true conditional branch: count 0.
   await r.page.locator('[data-rail="log"]').click();
   await r.page.locator("h2", { hasText: /^Log$/ }).waitFor({ state: "visible", timeout: 10000 });
   r.ok(
     "rail switch: log pane replaces chat",
-    (await r.page.locator("[data-chat-input]").count()) === 0,
+    !(await r.page.locator("[data-chat-input]").isVisible()),
   );
   await r.page.locator('[data-rail="files"]').click();
   await filesPane(r).waitFor({ state: "visible", timeout: 10000 });
@@ -214,7 +217,7 @@ async function poll(r, fn, tries = 40, every = 250) {
     "rail switch: back to files, the others are gone",
     (await filesPane(r).count()) === 1 &&
       (await r.page.locator("[data-search-input]").count()) === 0 &&
-      (await r.page.locator("[data-chat-input]").count()) === 0,
+      !(await r.page.locator("[data-chat-input]").isVisible()),
   );
 
   // --- the search view: rows, badge, empty states, jump-to-line -----------
@@ -313,87 +316,6 @@ async function poll(r, fn, tries = 40, every = 250) {
     JSON.stringify({ before, after }),
   );
 
-  // --- the PDF line-number gutter (the auto-compiled map from above) ----
-  // The viewer draws one label per physical baseline, in the page's own
-  // left margin, from the decoded synctex map. Poll: on a fresh profile
-  // the engine download plus the synctex decode can still be running.
-  const gutterFirst = await poll(
-    r,
-    () => {
-      const w = document.querySelector("[data-page]");
-      const labs = w
-        ? [...w.querySelectorAll("[data-line-gutter-label]")]
-        : [];
-      return labs.length > 0 ? labs.length : null;
-    },
-    80,
-    500,
-  );
-  r.ok(
-    "gutter: line numbers appear in the rendered page's left margin",
-    (gutterFirst ?? 0) > 3,
-    gutterFirst,
-  );
-  const gutter = await r.page.evaluate(() => {
-    const pages = [];
-    for (const w of document.querySelectorAll("[data-page]")) {
-      const pr = w.getBoundingClientRect();
-      const labs = [];
-      for (const l of w.querySelectorAll("[data-line-gutter-label]")) {
-        const lr = l.getBoundingClientRect();
-        labs.push({
-          line: Number(l.textContent),
-          file: l.dataset.lineGutterFile ?? "",
-          num: /^\d+$/.test(l.textContent ?? ""),
-          left: lr.left - pr.left, // px from the page's left edge
-          top: lr.top - pr.top, // px from the page's top edge
-          pe: getComputedStyle(l).pointerEvents,
-        });
-      }
-      pages.push(labs);
-    }
-    const stray = [...document.querySelectorAll("[data-line-gutter-label]")]
-      .filter((l) => !l.closest("[data-page]")).length;
-    return { pages, stray };
-  });
-  const all = gutter.pages.flat();
-  r.ok(
-    "gutter: every label is a line number in the page's left margin",
-    all.length > 0 &&
-      all.every((g) => g.num && g.left >= 0 && g.left <= 12),
-    JSON.stringify(all.slice(0, 3)) + ` (stray=${gutter.stray})`,
-  );
-  // A click on a label must fall through to the page's synctex handler.
-  r.ok(
-    "gutter: labels are click-through (pointer-events:none)",
-    all.every((g) => g.pe === "none"),
-    JSON.stringify([...new Set(all.map((g) => g.pe))]),
-  );
-  // Top to bottom on each page, the line numbers never decrease WITHIN
-  // one file (a wrapped source line may repeat its number on the next
-  // baseline). Across files they reset — the references section is
-  // typeset from refs.bib, so main.tex:8 above refs.bib:3 is correct.
-  let monotone = null;
-  for (const labs of gutter.pages) {
-    labs.sort((a, b) => a.top - b.top);
-    for (let i = 1; i < labs.length; i++) {
-      const p = labs[i - 1];
-      if (p.file !== labs[i].file) continue;
-      const bad = labs[i].top <= p.top || labs[i].line < p.line;
-      if (bad && monotone === null) monotone = `${p.file}:${p.line} -> ${labs[i].file}:${labs[i].line}`;
-    }
-  }
-  r.ok(
-    "gutter: line numbers rise top to bottom within a file",
-    monotone === null,
-    monotone,
-  );
-  r.ok(
-    "gutter: labels live only inside page wrappers",
-    gutter.stray === 0,
-    gutter.stray,
-  );
-
   // --- the PDF pane's right group: history, notes, page badge --------------
   // The auto-compile above produced the PDF, so the history is non-empty.
   await r.page.locator('button[title="Compile history"]').click();
@@ -422,15 +344,24 @@ async function poll(r, fn, tries = 40, every = 250) {
   );
   await notesBtn.click(); // close
   // The page-count badge on the document glyph mirrors the rendered pages.
-  const pageBadge = await r.page.evaluate(() => ({
-    n:
-      document.querySelector('span[title$="in the current PDF"] span')
-        ?.textContent ?? "",
-    pages: document.querySelectorAll("[data-page]").length,
-  }));
+  // The badge is set when the document loads, but the page wrappers arrive
+  // one by one — poll until both agree (a one-shot snapshot can land in
+  // between and see pages=0).
+  const pageBadge = await poll(
+    r,
+    () => {
+      const n =
+        document.querySelector('span[title$="in the current PDF"] span')
+          ?.textContent ?? "";
+      const pages = document.querySelectorAll("[data-page]").length;
+      return n === String(pages) && pages > 0 ? { n, pages } : null;
+    },
+    40,
+    500,
+  );
   r.ok(
     "page badge: counts the rendered PDF pages",
-    pageBadge.n === String(pageBadge.pages) && pageBadge.pages > 0,
+    pageBadge !== null,
     JSON.stringify(pageBadge),
   );
   // The stats popover (files-panel header): project + active-file counts.

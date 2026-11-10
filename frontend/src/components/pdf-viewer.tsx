@@ -10,7 +10,6 @@ import {
   type ReactNode,
 } from "react";
 import * as pdfjsLib from "pdfjs-dist";
-import type { SyncEntry } from "@/lib/synctex";
 import {
   IconChevronLeft,
   IconChevronRight,
@@ -102,14 +101,6 @@ type Props = {
    * there is no PDF) — the page shows it as a badge in the toolbar.
    */
   onNumPages?: (n: number) => void;
-  /**
-   * Decoded synctex entries for `data` — drawn as source line-number
-   * labels in each page's own left margin (inscribe.io's gutter). One
-   * label per physical baseline: the smallest source line occupying it.
-   * Null when the current PDF has no map (nothing compiled yet, or the
-   * build failed) — then no labels are drawn.
-   */
-  synctex?: SyncEntry[] | null;
 };
 
 export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
@@ -124,17 +115,11 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
     leading,
     trailing,
     onNumPages,
-    synctex,
   },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const taskRef = useRef<pdfjsLib.PDFDocumentLoadingTask | null>(null);
-  // The synctex map decodes asynchronously (after the PDF bytes arrive),
-  // so the label effect below reads it through a ref and re-runs on the
-  // prop itself.
-  const synctexRef = useRef<SyncEntry[] | null | undefined>(synctex);
-  synctexRef.current = synctex;
   // Identity of the data prop currently rendered; page-state resets (below)
   // only happen when it changes, never on zoom/fit re-renders.
   const renderedDataRef = useRef<Uint8Array | null | undefined>(undefined);
@@ -323,86 +308,6 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
       cancelled = true;
     };
   }, [data, scale, fitScale, containerWidth, pageWidthPts]);
-
-  // Source line-number labels in each page's own left margin (the
-  // inscribe.io gutter). A SEPARATE effect from the render above on
-  // purpose: the pages arrive one by one inside task.promise.then, and
-  // the synctex map decodes even later, so poll for the wrappers and
-  // (re)build the labels whenever the PDF, the zoom, or the map changes.
-  // A re-render wipes the labels (container.replaceChildren) and this
-  // effect runs on the same keys, so they are always restored.
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    const entries = synctexRef.current;
-    if (!entries || entries.length === 0 || !data || numPages === 0) {
-      // No map (or no PDF): drop any stale labels and draw nothing.
-      container
-        .querySelectorAll("[data-line-gutter-label]")
-        .forEach((l) => l.remove());
-      return;
-    }
-    let cancelled = false;
-    // Labels need only the wrappers (dataset.scale is set when each
-    // wrapper is created), so wait until all of them exist — at most
-    // ~3 s, which covers even a slow page-by-page render.
-    const build = () => {
-      if (cancelled) return false;
-      // The render rejected (error div): the wrappers will never reach
-      // numPages, so stop polling instead of looping for the session.
-      if (container.querySelector("[data-render-error]")) return true;
-      const wrappers = Array.from(
-        container.querySelectorAll<HTMLElement>("[data-page]"),
-      );
-      if (wrappers.length < numPages) return false;
-      for (const w of wrappers) {
-        const pageNum = Number(w.dataset.page) || 0;
-        const s = Number.parseFloat(w.dataset.scale || "1") || 1;
-        w
-          .querySelectorAll("[data-line-gutter-label]")
-          .forEach((l) => l.remove());
-        // One label per physical baseline (yTop in pt); a source line
-        // wrapped over several baselines keeps the smallest line (and
-        // that line's file — the bibliography page mixes files, so the
-        // number alone does not say which file a line is in).
-        const lineByBaseline = new Map<number, { line: number; file: string }>();
-        for (const e of entries) {
-          if (e.page !== pageNum || !e.hasGlyph) continue;
-          const k = Math.round(e.yTop * 1000);
-          const prev = lineByBaseline.get(k);
-          if (prev === undefined || e.line < prev.line) {
-            lineByBaseline.set(k, { line: e.line, file: e.file });
-          }
-        }
-        for (const [k, { line, file }] of lineByBaseline) {
-          const lab = document.createElement("span");
-          lab.dataset.lineGutterLabel = "";
-          lab.dataset.lineGutterFile = file;
-          lab.textContent = String(line);
-          // pointer-events:none on purpose: a click on a label falls
-          // through to the wrapper's synctex click handler.
-          lab.className =
-            "absolute select-none tabular-nums text-stone/50";
-          lab.style.left = "3px";
-          lab.style.top = `${(k / 1000) * s}px`;
-          lab.style.transform = "translateY(-0.85em)";
-          lab.style.fontSize = "9px";
-          lab.style.lineHeight = "1";
-          lab.style.pointerEvents = "none";
-          w.append(lab);
-        }
-      }
-      return true;
-    };
-    if (build()) return;
-    const iv = window.setInterval(() => {
-      if (build()) window.clearInterval(iv);
-    }, 100);
-    return () => {
-      cancelled = true;
-      window.clearInterval(iv);
-    };
-  }, [data, scale, fitScale, numPages, synctex]);
 
   // Page tracking + viewport-top reporting while the reader scrolls.
   useEffect(() => {

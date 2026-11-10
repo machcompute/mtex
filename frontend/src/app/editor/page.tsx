@@ -2611,10 +2611,6 @@ export default function EditorPage() {
           </>
         }
         onNumPages={setPdfPages}
-        // The decoded synctex map: the viewer draws a source line number
-        // in each page's left margin for every rendered line (null until
-        // the first successful compile).
-        synctex={syncEntries}
         // Right-end icons (inscribe.io's right group): compile history,
         // project notes, and the page-count badge on the document glyph.
         trailing={
