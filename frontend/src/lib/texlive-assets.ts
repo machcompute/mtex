@@ -69,10 +69,17 @@ function ensureRelease(): Promise<void> {
           `[texlive] release changed to ${RELEASE_BASE}; wiping cache ${dir}`,
         );
         await rm(dir, { recursive: true, force: true });
-        await mkdir(dir, { recursive: true });
       }
+      // The dir may not exist yet (fresh checkout: .texlive-cache is
+      // gitignored), and writeFile would ENOENT without it.
+      await mkdir(dir, { recursive: true });
       await writeFile(marker, RELEASE_BASE);
-    })();
+    })().catch((err) => {
+      // Don't cache a failed check: a transient disk error must not wedge
+      // every later /api/texlive request until the next server restart.
+      releaseCheck = null;
+      throw err;
+    });
   }
   return releaseCheck;
 }
