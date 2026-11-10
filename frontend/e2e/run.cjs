@@ -31,10 +31,14 @@ const suites = [
   // reuses an unchanged build's PDF without running the engine. Installs
   // biblatex through the modal (the classic bibtex8 path needs no install).
   "incremental.cjs",
-  // The bottom-zone chat: the page proxies /api/chat to the LAN LLM
-  // router (server-side key, SSE streaming); asserts the drawer UX, a
-  // streamed reply, the active-file context, and that the key never
-  // reaches the browser. Needs the router up plus .env.local.
+  // The bottom-zone chat against the LAN WebGPU engine (the default
+  // backend): the drawer UX, a streamed reply over the postMessage wire,
+  // active-file context, agentic tools (list_files, apply_edit
+  // accept/reject), stop/clear, the settings modal with the engine's
+  // live model list, the engine-down fallback, and the unconfigured
+  // /api/chat 503 for the router. The first round cold-downloads the
+  // model weights (minutes, on the software WebGPU adapter in headless),
+  // so this is the slowest suite.
   "chat.cjs",
   // The babel language auto-fix: a clean-store Portuguese document hits
   // "Unknown option 'portuguese'", the editor finds the babel-* tlpkg that
