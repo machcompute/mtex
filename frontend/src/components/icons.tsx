@@ -82,6 +82,15 @@ export function IconClose({ className }: P) {
   );
 }
 
+export function IconGear({ className }: P) {
+  return (
+    <Svg className={className}>
+      <circle cx="8" cy="8" r="3.2" />
+      <path d="M8 1.6v2.1M8 12.3v2.1M1.6 8h2.1M12.3 8h2.1M3.5 3.5l1.5 1.5M11 11l1.5 1.5M12.5 3.5 11 5M5 11l-1.5 1.5" />
+    </Svg>
+  );
+}
+
 export function IconChevronLeft({ className }: P) {
   return (
     <Svg className={className}>
