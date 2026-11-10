@@ -2980,7 +2980,11 @@ export default function EditorPage() {
                 )}
               </div>
             </div>
-          ) : (
+          ) : leftPane === "files" ? (
+            // The chat pane renders only the always-mounted ChatDrawer
+            // above (the runtime must survive pane switches); without
+            // this condition the files panel would also render for
+            // leftPane === "chat" and squish the drawer out of sight.
             <FileBrowser
               files={entries}
               activePath={activePath}
@@ -3058,6 +3062,11 @@ export default function EditorPage() {
                 </span>
               }
             />
+          ) : (
+            // leftPane === "chat": nothing besides the always-mounted
+            // ChatDrawer (rendered above); the ternary needs a false
+            // branch for every other value.
+            null
           )}
           <div
             onPointerDown={(e) => {
