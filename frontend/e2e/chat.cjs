@@ -23,9 +23,13 @@
 // On a real-GPU host tokens stream within seconds of ready and the
 // full suite runs uncut.
 //
-// The Router backend (/api/chat, server-side key) is checked only for
-// its unconfigured-503 handling: it is unconfigured by design in this
-// environment (no .env.local).
+// The API endpoint backend (user-configured address + API key, called
+// directly from the page — the /api/chat proxy route is gone) is checked
+// against a local mock OpenAI-compatible SSE server: the streamed reply
+// must render, the request must hit the endpoint straight from the
+// browser with the Bearer key the user typed, and no round may ever
+// touch the deleted /api/chat route. The mock is instant, so this check
+// does not need inference and runs uncut.
 //
 // Checks (SKIP-gated ones need a streamed token):
 //   1. The chat pane opens from the icon rail; the rail carries
@@ -33,8 +37,8 @@
 //   2. (gated) A deterministic question gets a streamed assistant
 //      reply (the first round cold-loads the model into WebGPU —
 //      minutes, by design, in a fresh profile).
-//   3. The LAN backend never hits /api/chat (asserted after every LAN
-//      round; only the final router round may).
+//   3. No round hits /api/chat (the old proxy route is deleted, so any
+//      request to it is a bug; asserted after every LAN round).
 //   4. (gated) The model sees the active file (context question about
 //      a marker command only the seeded document defines).
 //   5. The system prompt carries the cursor position — read off the
@@ -57,9 +61,10 @@
 //      and a send fails into the graceful error box with a settings link.
 //  13. Restoring the engine URL: the modal is reachable again; the
 //      (gated) reply round works again.
-//  14. Router backend (unconfigured by design): the 503 surfaces
-//      gracefully, and the /api/chat request carries no Authorization
-//      header (the key is server-side only).
+//  14. API endpoint backend: the settings ask for an address + API key
+//      (+ model), the page calls the endpoint straight from the browser
+//      (a local mock SSE server here), the Bearer key rides on the wire,
+//      and the streamed reply renders in the thread.
 const { Runner, seedProject } = require("./helpers.cjs");
 
 const ENGINE_URL =
@@ -97,7 +102,7 @@ const INFEASIBLE_AFTER_READY_MS = 600_000; // 10 min
 const GATE_ABSOLUTE_MS = 2_700_000; // 45 min
 const GATE_POLL_MS = 5_000;
 
-const GEAR = 'button[title="Chat settings (backend, engine URL, model)"]';
+const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
 
 (async () => {
   const r = new Runner("chat");
@@ -133,17 +138,13 @@ const GEAR = 'button[title="Chat settings (backend, engine URL, model)"]';
         (await page.locator('[data-rail="chat"][data-active]').count()) === 1,
     );
 
-    // The Router is the only chat path that may hit /api/chat; the LAN
-    // backend talks to the engine over postMessage. The request headers
-    // are captured so the router round can prove the key never leaves
-    // the server.
+    // /api/chat is the old proxy route, deleted: no chat path may ever
+    // hit it (the LAN backend talks to the engine over postMessage, the
+    // endpoint backend calls the user's address directly). The request
+    // counter is an assertion, not an expectation.
     let apiChatCount = 0;
-    let apiChatAuth = null;
     page.on("request", (req) => {
-      if (req.url().includes("/api/chat")) {
-        apiChatCount++;
-        apiChatAuth = req.headers()["authorization"] ?? null;
-      }
+      if (req.url().includes("/api/chat")) apiChatCount++;
     });
 
     const sendButton = page.locator("[data-chat-send]");
@@ -327,7 +328,7 @@ const GEAR = 'button[title="Chat settings (backend, engine URL, model)"]';
         reply.slice(0, 120),
       );
       r.ok(
-        "the LAN backend has not hit /api/chat",
+        "the LAN backend has not hit the deleted /api/chat route",
         apiChatCount === 0,
         `${apiChatCount} requests`,
       );
@@ -520,7 +521,7 @@ const GEAR = 'button[title="Chat settings (backend, engine URL, model)"]';
         `inference infeasible (${gate.reason})`,
       );
       r.ok(
-        "the LAN backend has not hit /api/chat",
+        "the LAN backend has not hit the deleted /api/chat route",
         apiChatCount === 0,
         `${apiChatCount} requests`,
       );
@@ -584,7 +585,7 @@ const GEAR = 'button[title="Chat settings (backend, engine URL, model)"]';
     );
     await page.locator('[data-rail="chat"]').click();
     r.ok(
-      "no LAN round ever hit /api/chat",
+      "no round ever hit the deleted /api/chat route",
       apiChatCount === 0,
       `${apiChatCount} requests`,
     );
@@ -668,28 +669,89 @@ const GEAR = 'button[title="Chat settings (backend, engine URL, model)"]';
       );
     }
 
-    // 14. Router backend: unconfigured by design here, so the 503
-    //     surfaces as a graceful error box. The toggle applies
-    //     immediately; only this round may hit /api/chat.
+    // 14. API endpoint backend: the settings ask for an address + API
+    //     key (+ model), and the page calls the endpoint directly from
+    //     the browser — no /api/chat. The endpoint here is a local mock
+    //     OpenAI-compatible SSE server (deterministic, instant — it does
+    //     not need inference, so it runs uncut).
+    const http = require("http");
+    const mockSeen = [];
+    const mock = http.createServer((req, res) => {
+      const origin = req.headers.origin ?? "*";
+      if (req.method === "OPTIONS") {
+        // Preflight: the page's origin differs from the mock's port, and
+        // the request carries Authorization + content-type headers.
+        res.writeHead(204, {
+          "access-control-allow-origin": origin,
+          "access-control-allow-methods": "POST, OPTIONS",
+          "access-control-allow-headers": "authorization, content-type",
+        });
+        res.end();
+        return;
+      }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        mockSeen.push({
+          method: req.method,
+          url: req.url,
+          auth: req.headers.authorization ?? null,
+          body: body ? JSON.parse(body) : null,
+        });
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "access-control-allow-origin": origin,
+        });
+        res.write(
+          'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}\n\n',
+        );
+        res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+        res.write("data: [DONE]\n\n");
+        res.end();
+      });
+    });
+    await new Promise((resolve) => mock.listen(0, "127.0.0.1", resolve));
+    const mockBase = `http://localhost:${mock.address().port}/v1`;
+
     await page.locator(GEAR).click();
     const modal4 = page.locator('[data-modal="chat-settings"]');
     await modal4.waitFor({ timeout: 10_000 });
-    await modal4.locator('button:has-text("Router (/api/chat)")').click();
+    await modal4.locator('button:has-text("API endpoint")').click();
+    await modal4
+      .locator('input[placeholder="http://host:port/v1"]')
+      .fill(mockBase);
+    await modal4.locator('input[type="password"]').fill("e2e-key-123");
+    await modal4.locator('input[placeholder^="Model id"]').fill("mock-model");
+    await modal4.locator('button:has-text("Save")').click();
     await modal4.locator('button:has-text("Cancel")').click();
     await modal4.waitFor({ state: "detached", timeout: 10_000 });
-    await send("Reply with exactly: OK", 30_000);
-    const routerErr = (await page.locator("[data-chat-error]").textContent()) || "";
+    await send("Reply with exactly: OK", 15_000);
     r.ok(
-      "an unconfigured router shows a graceful error (503)",
-      routerErr.includes("chat backend not configured"),
-      routerErr.slice(0, 160),
+      "the endpoint reply streams into the thread",
+      /OK/.test(await lastAssistant()),
+      (await lastAssistant()).slice(0, 120),
     );
-    r.ok("the router round hit /api/chat", apiChatCount === 1, `${apiChatCount} requests`);
     r.ok(
-      "the /api/chat request carries no Authorization header",
-      apiChatAuth === null,
-      `got: ${apiChatAuth}`,
+      "the page called the endpoint directly (no /api/chat)",
+      mockSeen.length === 1 &&
+        mockSeen[0].method === "POST" &&
+        mockSeen[0].url === "/v1/chat/completions" &&
+        apiChatCount === 0,
+      JSON.stringify(mockSeen[0] ?? null).slice(0, 160),
     );
+    r.ok(
+      "the endpoint request carries the user's Bearer key",
+      mockSeen[0]?.auth === "Bearer e2e-key-123",
+      String(mockSeen[0]?.auth),
+    );
+    r.ok(
+      "the endpoint request asks for the configured model and streams",
+      mockSeen[0]?.body?.model === "mock-model" &&
+        mockSeen[0]?.body?.stream === true &&
+        Array.isArray(mockSeen[0]?.body?.messages),
+      JSON.stringify(mockSeen[0]?.body ?? null).slice(0, 160),
+    );
+    mock.close();
     // Restore the default (LAN) backend.
     await page.locator(GEAR).click();
     const modal5 = page.locator('[data-modal="chat-settings"]');

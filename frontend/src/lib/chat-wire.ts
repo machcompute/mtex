@@ -1,8 +1,10 @@
 // The wire layer between the chat runtime and the two backends: the LAN
-// WebGPU engine (through lan-llm) and the Router (/api/chat, an OpenAI-style
-// SSE proxy). Both speak OpenAI chat shapes; this module normalizes the
-// thread history into wire messages and exposes one streaming generator
-// per round so the runtime does not care which backend answers.
+// WebGPU engine (through lan-llm) and a user-configured OpenAI-compatible
+// API endpoint, called directly from the page (SSE stream, Bearer key —
+// no server-side proxy). Both speak OpenAI chat shapes; this module
+// normalizes the thread history into wire messages and exposes one
+// streaming generator per round so the runtime does not care which
+// backend answers.
 import type { ThreadMessage } from "@assistant-ui/core";
 import { lanStreamChat, type LanProgress } from "./lan-llm";
 import type { LanChatMessage } from "./mach-llm-sdk";
@@ -134,7 +136,7 @@ export function toWireMessages(
 /**
  * One streaming completion against the configured backend. Yields
  * normalized events (text / reasoning / tool-call fragments) and a final
- * "done". Aborts through the given signal: the Router path rejects its
+ * "done". Aborts through the given signal: the endpoint path rejects its
  * read loop with an AbortError, the LAN path cancels the engine request.
  * Errors (engine unreachable, HTTP failure, …) propagate to the caller.
  */
@@ -148,7 +150,7 @@ export async function* streamWireRound(opts: {
   if (opts.settings.backend === "lan") {
     yield* streamLanRound(opts);
   } else {
-    yield* streamRouterRound(opts);
+    yield* streamEndpointRound(opts);
   }
 }
 
@@ -205,15 +207,42 @@ async function* streamLanRound(opts: {
   yield { type: "done", finishReason };
 }
 
-async function* streamRouterRound(opts: {
+// The user enters the base of an OpenAI-compatible API ("…/v1"); the
+// page appends /chat/completions unless the full path was pasted in.
+function endpointUrl(raw: string): string {
+  const t = raw.trim().replace(/\/+$/, "");
+  if (t === "") return "";
+  return t.endsWith("/chat/completions") ? t : `${t}/chat/completions`;
+}
+
+async function* streamEndpointRound(opts: {
+  settings: ChatSettings;
   messages: WireMessage[];
   tools: object[];
   signal: AbortSignal;
 }): AsyncGenerator<WireStreamEvent> {
-  const res = await fetch("/api/chat", {
+  const url = endpointUrl(opts.settings.endpointUrl);
+  if (url === "") {
+    throw new Error(
+      "No endpoint address set — open chat settings and enter the endpoint address.",
+    );
+  }
+  const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ messages: opts.messages, tools: opts.tools }),
+    headers: {
+      "content-type": "application/json",
+      ...(opts.settings.apiKey !== ""
+        ? { authorization: `Bearer ${opts.settings.apiKey}` }
+        : {}),
+    },
+    body: JSON.stringify({
+      ...(opts.settings.endpointModel !== ""
+        ? { model: opts.settings.endpointModel }
+        : {}),
+      messages: opts.messages,
+      tools: opts.tools,
+      stream: true,
+    }),
     signal: opts.signal,
   });
   if (!res.ok || !res.body) {
@@ -238,8 +267,8 @@ async function* streamRouterRound(opts: {
     if (done) break;
     buf += decoder.decode(value, { stream: true });
     let nl: number;
-    // The upstream is SSE: "data: {…}\n" lines, "\n\n" between events,
-    // and a final "data: [DONE]".
+    // The endpoint streams SSE: "data: {…}\n" lines, "\n\n" between
+    // events, and a final "data: [DONE]".
     while ((nl = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, nl).replace(/\r$/, "").trim();
       buf = buf.slice(nl + 1);

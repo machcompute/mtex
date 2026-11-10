@@ -111,7 +111,7 @@ export default function ChatDrawer({
           </h2>
           <div className="flex items-center gap-1">
             <button
-              title="Chat settings (backend, engine URL, model)"
+              title="Chat settings (backend, URL, model, endpoint)"
               onClick={onOpenSettings}
               className="rounded p-1 text-stone transition-colors hover:bg-peach hover:text-ink"
             >
@@ -274,7 +274,7 @@ function ChatToolCallPart({
 
 /**
  * The last message is the in-flight or most recent reply: if it ended in
- * error (engine unreachable, router failure, …) show the message.
+ * error (engine unreachable, endpoint failure, …) show the message.
  */
 function ChatErrorBox({
   isLanBackend,

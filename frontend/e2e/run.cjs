@@ -35,8 +35,9 @@ const suites = [
   // backend): the drawer UX, a streamed reply over the postMessage wire,
   // active-file context, agentic tools (list_files, apply_edit
   // accept/reject), stop/clear, the settings modal with the engine's
-  // live model list, the engine-down fallback, and the unconfigured
-  // /api/chat 503 for the router. The first round cold-downloads the
+  // live model list, the engine-down fallback, and the API endpoint
+  // backend (user address + key, called straight from the page) checked
+  // against a local mock SSE server. The first round cold-downloads the
   // model weights (minutes, on the software WebGPU adapter in headless),
   // so this is the slowest suite.
   "chat.cjs",

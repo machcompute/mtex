@@ -27,20 +27,24 @@ function errMsg(e: unknown): string {
 
 /**
  * Where the chat talks to: the LAN WebGPU engine (default — the local
- * MachLLM server) or the Router (the /api/chat server-side proxy). Also
- * the engine URL, the model to ask for (listed live from the engine,
- * with its cached flag), and a connection/progress readout.
+ * MachLLM server) or an API endpoint the page calls directly — the user
+ * enters the endpoint address, the API key, and the model to ask for.
+ * For the LAN engine the model list is fetched live (its cached flag
+ * included) and the listing doubles as the connection test.
  */
 export default function ChatSettingsModal({
   settings,
   onChange,
   onClose,
 }: Props) {
-  // URL and model are edited as drafts and committed with "Save"; the
-  // backend toggle applies immediately (it cannot break anything in
-  // flight — a running chat keeps its own settings snapshot).
+  // Fields are edited as drafts and committed with "Save"; the backend
+  // toggle applies immediately (it cannot break anything in flight — a
+  // running chat keeps its own settings snapshot).
   const [url, setUrl] = useState(settings.engineUrl);
   const [model, setModel] = useState(settings.model);
+  const [endpointUrl, setEndpointUrl] = useState(settings.endpointUrl);
+  const [apiKey, setApiKey] = useState(settings.apiKey);
+  const [endpointModel, setEndpointModel] = useState(settings.endpointModel);
   // The model list is per-URL: tag it so a stale list for a previous URL
   // can never render (derived `current` below is the only thing shown).
   const [modelList, setModelList] = useState<{
@@ -87,7 +91,11 @@ export default function ChatSettingsModal({
       : null;
   const connecting = !models && !listErr;
   const dirty =
-    url.trim() !== settings.engineUrl || model !== settings.model;
+    url.trim() !== settings.engineUrl ||
+    model !== settings.model ||
+    endpointUrl.trim() !== settings.endpointUrl ||
+    apiKey !== settings.apiKey ||
+    endpointModel.trim() !== settings.endpointModel;
 
   const changeBackend = (backend: ChatBackend) => {
     if (backend === settings.backend) return;
@@ -102,7 +110,14 @@ export default function ChatSettingsModal({
       closeLanLlm(settings.engineUrl);
       setProgress(null);
     }
-    onChange({ ...settings, engineUrl: nextUrl, model });
+    onChange({
+      ...settings,
+      engineUrl: nextUrl,
+      model,
+      endpointUrl: endpointUrl.trim(),
+      apiKey: apiKey.trim(),
+      endpointModel: endpointModel.trim(),
+    });
   };
 
   return (
@@ -133,7 +148,7 @@ export default function ChatSettingsModal({
           {(
             [
               ["lan", "LAN engine (WebGPU)"],
-              ["router", "Router (/api/chat)"],
+              ["endpoint", "API endpoint"],
             ] as Array<[ChatBackend, string]>
           ).map(([b, label]) => (
             <button
@@ -212,11 +227,55 @@ export default function ChatSettingsModal({
             )}
           </>
         ) : (
-          <p className="mb-2 text-xs text-stone">
-            Requests go to this page’s /api/chat route, which proxies the
-            router configured server-side. The engine URL and model pickers
-            apply when the LAN engine is selected.
-          </p>
+          <>
+            {/* Endpoint address */}
+            <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-stone">
+              Endpoint address
+            </p>
+            <input
+              type="text"
+              value={endpointUrl}
+              onChange={(e) => setEndpointUrl(e.target.value)}
+              placeholder="http://host:port/v1"
+              spellCheck={false}
+              autoComplete="off"
+              className="mb-2 w-full rounded border border-stone/40 bg-white px-2 py-1.5 font-mono text-xs text-ink focus:border-mint focus:outline-none"
+            />
+
+            {/* API key */}
+            <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-stone">
+              API key
+            </p>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="sk-…"
+              autoComplete="off"
+              className="mb-2 w-full rounded border border-stone/40 bg-white px-2 py-1.5 font-mono text-xs text-ink focus:border-mint focus:outline-none"
+            />
+
+            {/* Model */}
+            <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-stone">
+              Model
+            </p>
+            <input
+              type="text"
+              value={endpointModel}
+              onChange={(e) => setEndpointModel(e.target.value)}
+              placeholder="Model id (e.g. qwen3.8-27b)"
+              spellCheck={false}
+              autoComplete="off"
+              className="mb-2 w-full rounded border border-stone/40 bg-white px-2 py-1.5 font-mono text-xs text-ink focus:border-mint focus:outline-none"
+            />
+
+            <p className="mb-2 text-xs text-stone">
+              The page streams from this OpenAI-compatible endpoint
+              directly — the key is sent to it as a Bearer token and
+              stored only in this browser. The engine URL and model
+              picker apply when the LAN engine is selected.
+            </p>
+          </>
         )}
 
         {/* Footer */}
