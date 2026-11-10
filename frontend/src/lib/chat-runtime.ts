@@ -226,16 +226,28 @@ async function* runLoop(
         return;
       }
       // Give each call its final id, then execute them one by one.
-      // Stop clicked while apply_edit held the loop → settle first,
-      // then the signal checks below turn the throw into a cancel.
+      // Stop clicked while apply_edit held the loop → the settle unblocks
+      // the await; the aborted check after the yield turns it into a cancel.
       for (const c of realCalls) {
         if (!c.id) c.id = c.key;
         throwIfAborted(signal);
         c.result = await ctx.executeTool(c.id, c.name, c.argsText);
       }
-      throwIfAborted(signal);
+      // A stop may have landed while the loop blocked on an approval:
+      // yield the settled results BEFORE the abort propagates — a
+      // cancelled run keeps its last yield, and a tool part without a
+      // result would spin forever next to the card the user just settled
+      // (unexecuted siblings get a terminal result of their own).
+      if (signal.aborted) {
+        for (const c of realCalls) {
+          if (c.result === undefined)
+            c.result =
+              "ERROR: the conversation was stopped before this tool ran.";
+        }
+      }
       priorParts = [...priorParts, ...roundParts()];
       yield { content: priorParts };
+      throwIfAborted(signal);
       wire.push({
         role: "assistant",
         content: text,
