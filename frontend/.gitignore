@@ -32,6 +32,8 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# Dev-only public values (NEXT_PUBLIC_LLM_ENGINE_URL) — committed on purpose.
+!.env.development
 
 # vercel
 .vercel
