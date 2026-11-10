@@ -543,6 +543,14 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
       await captureWire(engineFrame);
       await page.locator(".view-lines .view-line").nth(3).click();
       await input.fill("Reply with exactly: OK");
+      // Snapshot the engine-error count BEFORE the send. The engine's
+      // busy reply (if any) is posted the moment the request lands, so
+      // under load the page can process it while the wire capture below
+      // is still resolving — a post-send snapshot would count it as
+      // baseline and never see it as "new".
+      const engineErrBase = await page.evaluate(
+        () => window.__gate.engineErrors.length,
+      );
       await sendButton.click();
       await engineFrame.waitForFunction(
         () => (window.__chatWire?.length ?? 0) >= 1,
@@ -555,41 +563,54 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
         /line 4, column/.test(sysPrompt),
         sysPrompt.slice(0, 200),
       );
-      // Settle the round — but its fate depends on the engine's busy
-      // flag, which the gate's stop left behind: the flag is held for
-      // the whole completion and cleared only when runCompletion
-      // settles (engine protocol.ts), and a stuck prefill never
-      // settles, because the abort signal is checked only in the decode
-      // loop (engine completions.ts). On this host class the engine
-      // therefore rejects this send with a busy error, the round
-      // settles on its own, and the Stop button never appears — a
-      // blind stopAndSettle() times out waiting for it. Decide from the
-      // engine's own reply (posted to the main window as soon as the
-      // request lands — before the wire wait above resolves), not from
-      // a render race: a busy error means "already settling" (wait for
-      // the Send button); its absence means the round went in flight
-      // (only possible if the gate's backstop fired while a slow load
-      // was still finishing) and gets stopped.
-      const engineErrBase = await page.evaluate(
-        () => window.__gate.engineErrors.length,
-      );
-      const busyRejected = await page
+      // Settle the round. Its fate is decided by the engine's busy
+      // flag, which the gate's stop left held: the flag is cleared only
+      // when runCompletion settles (engine protocol.ts), and a stuck
+      // prefill never settles (the abort signal is checked only in the
+      // decode loop, engine completions.ts). Two outcomes:
+      //   busy  — the engine rejects this send with an error reply; the
+      //           round settles on its own (error box, Send returns, the
+      //           Stop button never durably renders);
+      //   free  — the round goes in flight and the Stop button renders
+      //           and stays (only possible if the gate's absolute
+      //           backstop fired while a very slow load was still
+      //           finishing).
+      // Watch for EITHER outcome within the same 30 s budget
+      // stopAndSettle uses for its Stop wait — the outcome is which one
+      // the UI shows, so no arrival timing is assumed.
+      const outcome = await page
         .waitForFunction(
-          (base) => window.__gate.engineErrors.length > base,
+          (base) => {
+            if (window.__gate.engineErrors.length > base) return "error";
+            if (document.querySelector("[data-chat-stop]")) return "stop";
+            return "none";
+          },
           engineErrBase,
-          { timeout: 5_000, polling: 100 },
+          { timeout: 30_000, polling: 100 },
         )
-        .then(() => true)
-        .catch(() => false);
-      if (busyRejected) {
-        await page.waitForFunction(
-          () => !!document.querySelector("[data-chat-send]"),
-          null,
-          { timeout: 30_000 },
+        .then((f) => f.value)
+        .catch(() => "none");
+      if (outcome === "none") {
+        throw new Error(
+          "check 5: after the send, neither an engine error reply nor " +
+            "the Stop button appeared within 30 s",
         );
-      } else {
-        await stopAndSettle();
       }
+      if (outcome === "stop") {
+        // In flight — stop it. The click may find nothing if the busy
+        // reply landed in the same instant the Stop was observed (the
+        // round is then already settling); either way the settle end
+        // state is the Send button.
+        await page
+          .locator("[data-chat-stop]")
+          .click({ timeout: 5_000 })
+          .catch(() => {});
+      }
+      await page.waitForFunction(
+        () => !!document.querySelector("[data-chat-send]"),
+        null,
+        { timeout: 30_000 },
+      );
 
       skip(
         "6. list_files tool",
