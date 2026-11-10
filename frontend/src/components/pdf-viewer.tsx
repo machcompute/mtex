@@ -313,6 +313,7 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
       .catch((err) => {
         if (cancelled) return;
         const error = document.createElement("div");
+        error.dataset.renderError = "";
         error.className = "p-4 text-sm text-red-600";
         error.textContent = `Failed to render PDF: ${err}`;
         container.append(error);
@@ -347,6 +348,9 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
     // ~3 s, which covers even a slow page-by-page render.
     const build = () => {
       if (cancelled) return false;
+      // The render rejected (error div): the wrappers will never reach
+      // numPages, so stop polling instead of looping for the session.
+      if (container.querySelector("[data-render-error]")) return true;
       const wrappers = Array.from(
         container.querySelectorAll<HTMLElement>("[data-page]"),
       );
