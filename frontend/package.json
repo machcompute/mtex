@@ -10,6 +10,7 @@
     "test:e2e": "node e2e/run.cjs"
   },
   "dependencies": {
+    "@assistant-ui/react": "^0.15.34",
     "@monaco-editor/react": "^4.7.0",
     "next": "16.4.3",
     "pdfjs-dist": "^6.4.299",
