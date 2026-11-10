@@ -8,7 +8,13 @@
 // no webpack externals. The SDK still talks to the live engine through a
 // hidden <iframe allow="webgpu"> (postMessage); only the loader is local.
 // When the shared engine's client.js changes, re-copy it here and update
-// the .d.ts.
+// the .d.ts. One deliberate deviation: on abort the pending request is
+// rejected client-side (AbortError) instead of waiting for the engine to
+// answer — a stop must settle the round deterministically even while the
+// engine is mid-inference and slow (or never) to acknowledge the abort.
+// The wire protocol is unchanged: the "abort" message is still posted,
+// and a late engine response for the dropped id is ignored by the
+// listener.
 const NS = "mach-llm";
 const DEFAULT_ENGINE_URL = "https://shared.machcomputing.com";
 
@@ -144,15 +150,26 @@ export class MachLLM {
       this.#pending.set(id, { resolve, reject, onChunk });
       this.#iframe.contentWindow.postMessage({ ns: NS, id, method, params }, this.#engineOrigin);
       if (signal && abortable) {
-        const sendAbort = () => {
-          if (this.#closed || !this.#pending.has(id)) return;
-          this.#iframe.contentWindow.postMessage(
-            { ns: NS, id: nextId(), method: "abort", params: { targetId: id } },
-            this.#engineOrigin
-          );
+        // Abort settles client-side immediately: reject the pending
+        // request so the caller's read loop ends deterministically, then
+        // ask the engine to stop the work (best effort — the client does
+        // not wait for the engine to acknowledge).
+        const onAbort = () => {
+          const pending = this.#pending.get(id);
+          if (!pending) return;
+          this.#pending.delete(id);
+          const e = new Error("aborted");
+          e.name = "AbortError";
+          pending.reject(e);
+          if (!this.#closed) {
+            this.#iframe.contentWindow.postMessage(
+              { ns: NS, id: nextId(), method: "abort", params: { targetId: id } },
+              this.#engineOrigin
+            );
+          }
         };
-        if (signal.aborted) sendAbort();
-        else signal.addEventListener("abort", sendAbort, { once: true });
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
       }
     });
   }
