@@ -1289,6 +1289,16 @@ export default function EditorPage() {
     // A project switch mid-build must not land the old project's PDF on the
     // new project; the result is dropped instead.
     const projectId = persistStateRef.current.activeProjectId;
+    // …but a compile that started before ANY project was known (null — the
+    // SSR-default render on first load, or an OPFS-unavailable session) has
+    // no outgoing project for its result to belong to, so it is never
+    // stale: success or failure lands on the project that is active now,
+    // the one the user is looking at. Dropping it instead (the old
+    // `projectId !== activeProjectId` test, which is true when projectId is
+    // null and a project applies mid-build) swallows the result entirely —
+    // a failed first-load build then sat on "Loading engine…" forever.
+    const isStale = () =>
+      projectId !== null && projectId !== persistStateRef.current.activeProjectId;
     // Remember the PDF's scroll position so the new PDF can restore it —
     // a recompile must not yank the reader back to the top of page 1.
     // The old PDF stays on screen while the build runs (the reader keeps
@@ -1310,7 +1320,7 @@ export default function EditorPage() {
         const hash = await contentHash({ ...files, "\u0000main": mainPath });
         const cached = await loadBuildCache(projectId, hash).catch(() => null);
         if (cached) {
-          if (projectId !== persistStateRef.current.activeProjectId) return;
+          if (isStale()) return;
           setPdf(cached.pdf);
           setLog(cached.log);
           setSyncEntries(
@@ -1326,7 +1336,7 @@ export default function EditorPage() {
         }
       }
       await compiler.init();
-      if (projectId !== persistStateRef.current.activeProjectId) return;
+      if (isStale()) return;
       // Incremental builds, part B — seed this build with the last
       // successful build's state (opfs.ts): the .aux/.bcf/.bbl ride in as
       // ordinary project files (the pipeline writes them before its first
@@ -1353,7 +1363,7 @@ export default function EditorPage() {
       // The build ran for seconds: a project switch in that window must not
       // land the old project's result — or its auto-shown log panel — on the
       // new project (the init() check above only covers that short window).
-      if (projectId !== persistStateRef.current.activeProjectId) return;
+      if (isStale()) return;
       // An empty PDF is a failure (a zero-length Uint8Array is truthy).
       if (result.pdf && result.pdf.byteLength > 0) {
         setPdf(result.pdf);
@@ -1460,8 +1470,10 @@ export default function EditorPage() {
       }
     } catch (err) {
       // Same stale-switch guard as after the compile call: a build of the
-      // outgoing project must not flag the incoming one as failed.
-      if (projectId === persistStateRef.current.activeProjectId) {
+      // outgoing project must not flag the incoming one as failed. A
+      // pre-project compile (isStale() false) has no outgoing project, so
+      // its error belongs to the project active now.
+      if (!isStale()) {
         const msg = err instanceof Error ? err.message : String(err);
         setStatus({ kind: "error", message: msg });
         setLeftPane("log");
@@ -1480,8 +1492,9 @@ export default function EditorPage() {
       if (recompileQueuedRef.current) {
         recompileQueuedRef.current = false;
         // A project switch consumed the queued edit — retrying would
-        // compile the NEW project for no reason.
-        if (projectId === persistStateRef.current.activeProjectId) {
+        // compile the NEW project for no reason. (A pre-project compile
+        // has no outgoing project, so it never consumes the queue.)
+        if (!isStale()) {
           // Let the state above settle, then recompile through the
           // always-current ref so the latest files are picked up.
           window.setTimeout(() => compileRef.current(), 0);
