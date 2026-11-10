@@ -52,6 +52,18 @@ import {
 } from "@/components/icons";
 import GitHubModal, { type PullRequest, type PushRequest } from "@/components/github-modal";
 import PackagesModal from "@/components/packages-modal";
+import ChatDrawer, { type PendingEdit } from "@/components/chat-drawer";
+import ChatSettingsModal from "@/components/chat-settings-modal";
+import {
+  loadChatSettings,
+  saveChatSettings,
+  type ChatSettings,
+} from "@/lib/chat-settings";
+import {
+  createChatModelAdapter,
+  type ChatRuntimeCtx,
+} from "@/lib/chat-runtime";
+import { useLocalRuntime } from "@assistant-ui/react";
 import { BusyTexCompiler, contentHash } from "@/lib/busytex";
 import {
   ensureDefaults,
@@ -146,41 +158,6 @@ type Status =
   | { kind: "done"; ms: number }
   | { kind: "error"; message: string };
 
-// One message in the chat drawer's conversation (the system context is
-// built per request and never stored here). Assistant messages may carry
-// the tool calls they made (rendered as chips); tool messages record a
-// tool's result back into the transcript.
-type ChatToolCallInfo = { id: string; name: string; args: string };
-type ChatMessage =
-  | { role: "user"; content: string }
-  | { role: "assistant"; content: string; toolCalls?: ChatToolCallInfo[] }
-  | { role: "tool"; toolCallId: string; toolName: string; content: string };
-
-// The wire shapes for /api/chat (OpenAI format). Assistant messages may
-// carry tool_calls (content can then be empty); tool messages answer
-// exactly one call by id.
-type ApiToolCall = {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: string };
-};
-type ApiChatMessage =
-  | { role: "system"; content: string }
-  | { role: "user"; content: string }
-  | { role: "assistant"; content: string; tool_calls?: ApiToolCall[] }
-  | { role: "tool"; tool_call_id: string; content: string };
-
-// A file change the assistant proposed and the user has not decided yet.
-// The tool loop BLOCKS on it: the model's turn already ended, no stream
-// is open, so waiting between turns is safe.
-type PendingEdit = {
-  id: string; // the tool_call id
-  path: string;
-  old: string;
-  new: string;
-  line: number; // 1-based line of the match
-};
-
 // The snapshot the chat tools execute against (chatCtxRef, reassigned
 // every render — the loop outlives renders and must never see stale files
 // or log).
@@ -193,258 +170,6 @@ type ChatToolCtx = {
   setFiles: Dispatch<SetStateAction<Record<string, FileData>>>;
   handlePackagesChanged: (msg: string) => void;
 };
-
-// The seven tools the assistant can call on the project (OpenAI function
-// format). The page executes them against in-memory state; the model only
-// ever sees the results. `apply_edit` is gated on the user's accept.
-const CHAT_TOOLS: Array<{
-  type: "function";
-  function: { name: string; description: string; parameters: object };
-}> = [
-  {
-    type: "function",
-    function: {
-      name: "list_files",
-      description:
-        "List all files in the current project (path and whether each is binary), and which file is the main file.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "read_file",
-      description: "Read the text content of one file in the project.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "File path, e.g. main.tex" },
-        },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "compile",
-      description:
-        "Compile the project with XeLaTeX and wait for the build to finish. Returns the outcome (success/failure) and a tail of the build log.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_build_log",
-      description: "Return the log of the last completed build.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "apply_edit",
-      description:
-        "Replace one exact occurrence of `old` in a project file with `new`. The user must accept the change in the UI; the result reports whether it was accepted. `old` must occur exactly once in the file — if it does not, the result is an error and you should read_file and retry with the exact text.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "File path, e.g. main.tex" },
-          old: {
-            type: "string",
-            description:
-              "The exact existing text to replace (must occur exactly once)",
-          },
-          new: { type: "string", description: "The replacement text" },
-        },
-        required: ["path", "old", "new"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "install_package",
-      description:
-        "Install a LaTeX package (plus its dependencies) from CTAN into the browser's package store. The engine restarts and the package is available on the next compile.",
-      parameters: {
-        type: "object",
-        properties: {
-          name: {
-            type: "string",
-            description: "The tlpkg package name, e.g. tikz or biblatex",
-          },
-        },
-        required: ["name"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "search_packages",
-      description:
-        "Search CTAN for LaTeX packages by name or description. Returns matches with a one-line description and whether each is already installed.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "Search text, e.g. \"tikz\" or \"bibliography\"",
-          },
-        },
-        required: ["query"],
-      },
-    },
-  },
-];
-
-// Minimal line diff (LCS) for the apply_edit approval card. Snippets are
-// small; the DP grid is fine.
-type DiffLine = { t: "same" | "del" | "add"; text: string };
-function diffSnippet(oldText: string, newText: string): DiffLine[] {
-  const a = oldText.split("\n");
-  const b = newText.split("\n");
-  const n = a.length;
-  const m = b.length;
-  const dp: number[][] = Array.from({ length: n + 1 }, () =>
-    new Array<number>(m + 1).fill(0),
-  );
-  for (let i = n - 1; i >= 0; i--)
-    for (let j = m - 1; j >= 0; j--)
-      dp[i][j] =
-        a[i] === b[j]
-          ? dp[i + 1][j + 1] + 1
-          : Math.max(dp[i + 1][j], dp[i][j + 1]);
-  const out: DiffLine[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      out.push({ t: "same", text: a[i] });
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      out.push({ t: "del", text: a[i] });
-      i++;
-    } else {
-      out.push({ t: "add", text: b[j] });
-      j++;
-    }
-  }
-  while (i < n) out.push({ t: "del", text: a[i++] });
-  while (j < m) out.push({ t: "add", text: b[j++] });
-  return out;
-}
-
-/**
- * One streaming completion against /api/chat. Accumulates the assistant's
- * content and its tool_calls (the upstream streams them as per-index
- * fragments: function.name and function.arguments arrive in pieces and
- * are concatenated here before the caller JSON.parses them). onDelta
- * fires per content piece so the transcript can stream live.
- */
-async function streamChatCompletion(
-  messages: ApiChatMessage[],
-  tools: object[],
-  signal: AbortSignal,
-  onDelta: (delta: string) => void,
-): Promise<{
-  content: string;
-  toolCalls: ApiToolCall[];
-  finishReason: string | null;
-}> {
-  const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ messages, tools }),
-    signal,
-  });
-  if (!res.ok || !res.body) {
-    let detail = "";
-    try {
-      detail = String((await res.json())?.error ?? "");
-    } catch {
-      detail = `HTTP ${res.status}`;
-    }
-    throw new Error(detail || `HTTP ${res.status}`);
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let content = "";
-  let finishReason: string | null = null;
-  const calls = new Map<number, { id: string; name: string; arguments: string }>();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl: number;
-    // The upstream is SSE: "data: {…}\n" lines, "\n\n" between events,
-    // and a final "data: [DONE]".
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).replace(/\r$/, "").trim();
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (!payload || payload === "[DONE]") continue;
-      let ev: {
-        choices?: {
-          delta?: {
-            content?: unknown;
-            tool_calls?: Array<{
-              index?: unknown;
-              id?: unknown;
-              function?: { name?: unknown; arguments?: unknown };
-            }>;
-          };
-          finish_reason?: unknown;
-        }[];
-      };
-      try {
-        ev = JSON.parse(payload);
-      } catch {
-        // A partial or malformed line is skipped; the stream ends with
-        // [DONE] regardless.
-        continue;
-      }
-      const choice = ev.choices?.[0];
-      if (!choice) continue;
-      if (typeof choice.finish_reason === "string")
-        finishReason = choice.finish_reason;
-      const d = choice.delta;
-      if (!d) continue;
-      if (typeof d.content === "string" && d.content) {
-        content += d.content;
-        onDelta(d.content);
-      }
-      if (Array.isArray(d.tool_calls)) {
-        for (const tc of d.tool_calls) {
-          const idx = typeof tc.index === "number" ? tc.index : 0;
-          const cur = calls.get(idx) ?? { id: "", name: "", arguments: "" };
-          if (typeof tc.id === "string") cur.id += tc.id;
-          if (typeof tc.function?.name === "string")
-            cur.name += tc.function.name;
-          if (typeof tc.function?.arguments === "string")
-            cur.arguments += tc.function.arguments;
-          calls.set(idx, cur);
-        }
-      }
-    }
-  }
-  return {
-    content,
-    toolCalls: [...calls.values()]
-      .filter((c) => c.id || c.name)
-      .map((c) => ({
-        id: c.id,
-        type: "function" as const,
-        function: { name: c.name, arguments: c.arguments },
-      })),
-    finishReason,
-  };
-}
 
 // --- workspace layout ----------------------------------------------------
 // The panes are user-arrangeable: drag the files panel's right edge to
@@ -578,15 +303,18 @@ export default function EditorPage() {
   // The Search view's query (session-only, like the log — it is not part
   // of the project).
   const [searchQuery, setSearchQuery] = useState("");
-  // The chat conversation (in-memory; it lives with this page's session,
-  // like the log — it is not part of the project).
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState("");
-  const [chatBusy, setChatBusy] = useState(false);
-  const [chatError, setChatError] = useState<string | null>(null);
   // apply_edit calls awaiting the user's decision (the diff card in the
   // drawer). The tool loop blocks on the matching resolver below.
   const [pendingEdits, setPendingEdits] = useState<PendingEdit[]>([]);
+  // The chat backend's settings (which engine answers the chat, where the
+  // LAN engine lives, which model to ask for) — persisted in localStorage.
+  // The lazy initializer is SSR-safe (it returns the defaults on the
+  // server), and before the first message the value only reaches the DOM
+  // through the (absent) error box, so hydration never mismatches.
+  const [chatSettings, setChatSettings] = useState<ChatSettings>(() =>
+    loadChatSettings(),
+  );
+  const [chatSettingsModalOpen, setChatSettingsModalOpen] = useState(false);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   // Decoded synctex data for the current PDF (null = no navigation yet).
   const [syncEntries, setSyncEntries] = useState<SyncEntry[] | null>(null);
@@ -710,12 +438,6 @@ export default function EditorPage() {
   // scrolling back to the bottom resumes following.
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logFollowRef = useRef(true);
-  // The chat drawer's scroll container and sticky-to-bottom flag (same
-  // behavior as the log: follows until the user scrolls up).
-  const chatScrollRef = useRef<HTMLDivElement | null>(null);
-  const chatFollowRef = useRef(true);
-  // In-flight chat stream; Stop (and unmount) abort it.
-  const chatAbortRef = useRef<AbortController | null>(null);
   // Resolvers for the pending apply_edit cards, keyed by tool_call id.
   // The tool loop awaits the promise; deciding (or stopping) resolves it,
   // which unblocks the loop.
@@ -862,20 +584,9 @@ export default function EditorPage() {
     if (el && logFollowRef.current) el.scrollTop = el.scrollHeight;
   }, [leftPane, liveLog, log]);
 
-  // --- chat (bottom drawer, proxied through /api/chat — the router's key
-  //     never reaches the browser) ----------------------------------------
-  const handleChatScroll = useCallback(() => {
-    const el = chatScrollRef.current;
-    if (!el) return;
-    chatFollowRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-  }, []);
-
-  // Follow the streaming reply until the user scrolls up to read.
-  useEffect(() => {
-    if (leftPane !== "chat") return;
-    const el = chatScrollRef.current;
-    if (el && chatFollowRef.current) el.scrollTop = el.scrollHeight;
-  }, [leftPane, chatMessages, chatError]);
+  // --- chat (assistant-ui runtime; the agentic loop — model round → tool
+  //     execution → next round — runs inside the adapter, with the tools
+  //     themselves executed by this page) ---------------------------------
 
   // Resolves a pending apply_edit (the user's button, or a stop/clear/
   // unmount) and drops its card. Idempotent: a double settle is a no-op.
@@ -886,32 +597,6 @@ export default function EditorPage() {
     setPendingEdits((prev) => prev.filter((p) => p.id !== id));
     resolve(result);
   }, []);
-
-  // Aborts the in-flight stream AND settles any pending apply_edit: the
-  // loop blocks on that promise with no fetch in flight to reject, so
-  // without the settle it would wait forever after Stop.
-  const abortChat = useCallback(() => {
-    chatAbortRef.current?.abort();
-    for (const id of [...pendingEditResolveRef.current.keys()])
-      settlePendingEdit(
-        id,
-        "The user stopped the conversation; the edit was not applied.",
-      );
-  }, [settlePendingEdit]);
-
-  // A stream (or a blocked tool) that outlives the page (unmount) is
-  // aborted.
-  useEffect(() => abortChat, [abortChat]);
-
-  const stopChat = () => {
-    abortChat();
-  };
-
-  const clearChat = () => {
-    abortChat();
-    setChatMessages([]);
-    setChatError(null);
-  };
 
   // The system context is rebuilt every round (not just at send time): an
   // accepted edit changes the active file mid-conversation, and the model
@@ -957,37 +642,6 @@ export default function EditorPage() {
       "\n- search_packages(query) / install_package(name): find and install CTAN packages" +
       "\n\nRules: inspect the real project (list_files, read_file, compile, get_build_log) before diagnosing or changing anything. To change a file, call apply_edit with the EXACT existing text as \"old\" (it must occur exactly once — copy it from read_file). Never claim an edit was made unless the result says the user accepted it; if an edit is rejected, say so and do not retry the same change. Answer concisely, in the user's language, and use ```tex code fences for code."
     );
-  };
-
-  // The transcript (state) in the wire shapes /api/chat expects.
-  const toApiMessages = (msgs: ChatMessage[]): ApiChatMessage[] => {
-    const out: ApiChatMessage[] = [];
-    for (const m of msgs) {
-      if (m.role === "tool") {
-        out.push({
-          role: "tool",
-          tool_call_id: m.toolCallId,
-          content: m.content.slice(0, 16_000),
-        });
-      } else if (m.role === "assistant") {
-        if (m.toolCalls && m.toolCalls.length > 0) {
-          out.push({
-            role: "assistant",
-            content: m.content,
-            tool_calls: m.toolCalls.map((t) => ({
-              id: t.id,
-              type: "function",
-              function: { name: t.name, arguments: t.args },
-            })),
-          });
-        } else {
-          out.push({ role: "assistant", content: m.content });
-        }
-      } else {
-        out.push({ role: "user", content: m.content });
-      }
-    }
-    return out;
   };
 
   // Wait until no build is in flight and the last one reached a terminal
@@ -1201,132 +855,60 @@ export default function EditorPage() {
     }
   };
 
-  // One agentic turn: the model ends with either a text answer (done) or
-  // tool_calls (execute them, feed the results back as tool messages, and
-  // go again until it does).
-  const sendChat = async () => {
-    const text = chatInput.trim();
-    if (!text || chatBusy) return;
-    setChatError(null);
-    setChatInput("");
-    setChatBusy(true);
-    chatFollowRef.current = true;
-    const controller = new AbortController();
-    chatAbortRef.current = controller;
-    // The conversation so far (state) + this user message, in wire shape.
-    const history: ApiChatMessage[] = [
-      { role: "system", content: buildChatSystemPrompt() },
-      ...toApiMessages(chatMessages),
-      { role: "user", content: text },
-    ];
-    setChatMessages((prev) => [...prev, { role: "user", content: text }]);
-    // Stream the reply into the LAST assistant bubble (the stub added per
-    // round); tool rounds add no deltas, so the stub is always the target.
-    const appendAssistantDelta = (delta: string) => {
-      setChatMessages((prev) => {
-        const next = prev.slice();
-        const last = next[next.length - 1];
-        if (!last || last.role !== "assistant") return prev;
-        next[next.length - 1] = { ...last, content: last.content + delta };
-        return next;
-      });
-    };
-    try {
-      for (;;) {
-        // Rebuild the system context: an accepted edit may have changed
-        // the active file since the previous round.
-        history[0] = { role: "system", content: buildChatSystemPrompt() };
-        setChatMessages((prev) => [
-          ...prev,
-          { role: "assistant", content: "" },
-        ]);
-        const turn = await streamChatCompletion(
-          history,
-          CHAT_TOOLS,
-          controller.signal,
-          appendAssistantDelta,
-        );
-        if (turn.toolCalls.length > 0) {
-          // Record the assistant message WITH its tool calls (the wire
-          // shape the next request needs) and execute each call.
-          setChatMessages((prev) => {
-            const next = prev.slice();
-            const last = next[next.length - 1];
-            if (last && last.role === "assistant")
-              next[next.length - 1] = {
-                ...last,
-                toolCalls: turn.toolCalls.map((t) => ({
-                  id: t.id,
-                  name: t.function.name,
-                  args: t.function.arguments,
-                })),
-              };
-            return next;
-          });
-          history.push({
-            role: "assistant",
-            content: turn.content,
-            tool_calls: turn.toolCalls,
-          });
-          for (const tc of turn.toolCalls) {
-            const result = await executeChatTool(
-              tc.id,
-              tc.function.name,
-              tc.function.arguments,
-            );
-            // Stop was clicked while a tool (apply_edit) held the loop.
-            if (controller.signal.aborted) {
-              const e = new Error("aborted");
-              e.name = "AbortError";
-              throw e;
-            }
-            history.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              content: result,
-            });
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                role: "tool",
-                toolCallId: tc.id,
-                toolName: tc.function.name,
-                content: result,
-              },
-            ]);
-          }
-          continue;
-        }
-        // Final text turn: the streamed content is already in the stub.
-        if (turn.content === "") {
-          setChatMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && last.role === "assistant" && last.content === "")
-              return prev.slice(0, -1).concat({
-                role: "assistant",
-                content: "(no response from the model)",
-              });
-            return prev;
-          });
-        }
-        return;
-      }
-    } catch (err) {
-      if ((err as Error).name !== "AbortError") {
-        setChatError((err as Error).message || "chat request failed");
-      }
-      // Drop an empty assistant stub so the transcript stays clean.
-      setChatMessages((prev) => {
-        const last = prev[prev.length - 1];
-        if (last && last.role === "assistant" && last.content === "")
-          return prev.slice(0, -1);
-        return prev;
-      });
-    } finally {
-      chatAbortRef.current = null;
-      setChatBusy(false);
-    }
+  // Settle EVERY pending apply_edit card at once (stop, clear, unmount):
+  // the loop blocks on those resolvers with no stream in flight, so a
+  // settle is what unblocks it.
+  const settlePendingEdits = useCallback(
+    (result: string) => {
+      for (const id of [...pendingEditResolveRef.current.keys()])
+        settlePendingEdit(id, result);
+    },
+    [settlePendingEdit],
+  );
+
+  // A pending edit that outlives the page (unmount) is settled.
+  useEffect(
+    () => () =>
+      settlePendingEdits("The editor was closed; the edit was not applied."),
+    [settlePendingEdits],
+  );
+
+  // Stop: settle any pending edit (the loop is blocked on its resolver),
+  // then cancel the in-flight run. The runtime treats the abort as a
+  // cancelled run; the user's message stays in the thread.
+  const stopChat = () => {
+    settlePendingEdits(
+      "The user stopped the conversation; the edit was not applied.",
+    );
+    runtime.thread.cancelRun();
   };
+
+  // Clear: settle, cancel any run, and reset the thread — zero
+  // [data-chat-role] elements remain, as the e2e contract expects.
+  const clearChat = () => {
+    settlePendingEdits(
+      "The conversation was cleared; the edit was not applied.",
+    );
+    runtime.thread.cancelRun();
+    runtime.thread.reset();
+  };
+
+  // The assistant-ui runtime. The adapter is rebuilt every render (cheap;
+  // the runtime itself keeps its identity — a new adapter only refreshes
+  // its options, and it has no history adapter, so nothing resets). The
+  // context is this render's, so a run always sees the settings and
+  // handlers it started with: a settings change made while a run is
+  // blocked on an apply_edit approval does not rescope it. The whole
+  // agentic loop (model round → tool execution → next round) runs inside
+  // the adapter's run(); this page's executeChatTool — with the apply_edit
+  // user-approval gate — is the only place tools ever execute.
+  const chatRuntimeCtx: ChatRuntimeCtx = {
+    getSettings: () => chatSettings,
+    buildSystemPrompt: buildChatSystemPrompt,
+    executeTool: executeChatTool,
+  };
+  const chatModelAdapter = createChatModelAdapter(() => chatRuntimeCtx);
+  const runtime = useLocalRuntime(chatModelAdapter);
 
   // --- load the active project from OPFS (client-only; defaults render
   //     first, as SSR did, so hydration never mismatches) -----------------
@@ -3310,187 +2892,20 @@ export default function EditorPage() {
           className="relative flex shrink-0"
           style={{ width: workspace.filesW }}
         >
-          {leftPane === "chat" ? (
-            <div className="flex min-w-0 flex-1 flex-col bg-white">
-              <div className="flex h-9 shrink-0 items-center justify-between border-b border-ink/10 px-3">
-                <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
-                  Chat
-                </h2>
-                <button
-                  data-chat-clear
-                  title="Clear the conversation"
-                  onClick={clearChat}
-                  className="rounded px-2 py-0.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
-                >
-                  Clear
-                </button>
-              </div>
-              <div className="flex min-h-0 flex-1 flex-col">
-                <div
-                  ref={chatScrollRef}
-                  onScroll={handleChatScroll}
-                  className="min-h-0 flex-1 space-y-2 overflow-auto p-3"
-                >
-                  {chatMessages.length === 0 && !chatError && (
-                    <p className="text-xs text-stone">
-                      Ask about the document you are editing — or have the
-                      assistant read files, compile, fix code (you approve each
-                      change), or install packages.
-                    </p>
-                  )}
-                  {chatMessages.map((m, i) =>
-                    m.role === "tool" ? (
-                      <div
-                        key={i}
-                        data-chat-role="tool"
-                        className="rounded border border-stone/30 bg-peach/30 px-2 py-1.5"
-                      >
-                        <div className="text-[10px] font-semibold uppercase tracking-wide text-stone">
-                          Tool · {m.toolName}
-                        </div>
-                        <div className="max-h-28 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-ink">
-                          {m.content}
-                        </div>
-                      </div>
-                    ) : (
-                      <div
-                        key={i}
-                        data-chat-role={m.role}
-                        className={
-                          "rounded border px-2 py-1.5 " +
-                          (m.role === "user"
-                            ? "border-mint/60 bg-mint/30"
-                            : "border-stone/30 bg-white/70")
-                        }
-                      >
-                        <div className="text-[10px] font-semibold uppercase tracking-wide text-stone">
-                          {m.role === "user" ? "You" : "Assistant"}
-                        </div>
-                        <div className="whitespace-pre-wrap text-xs leading-relaxed text-ink">
-                          {m.content ||
-                            (i === chatMessages.length - 1 && chatBusy
-                              ? "…"
-                              : "")}
-                        </div>
-                        {m.role === "assistant" &&
-                          m.toolCalls &&
-                          m.toolCalls.length > 0 && (
-                            <div className="mt-1 flex flex-wrap gap-1">
-                              {m.toolCalls.map((t) => (
-                                <span
-                                  key={t.id}
-                                  className="rounded bg-peach/60 px-1.5 py-0.5 font-mono text-[10px] font-medium text-ink"
-                                >
-                                  ⚙ {t.name}
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                      </div>
-                    ),
-                  )}
-                  {pendingEdits.map((p) => (
-                    <div
-                      key={p.id}
-                      data-chat-pending-edit
-                      className="rounded border border-ink/20 bg-white/80 p-2 shadow-sm"
-                    >
-                      <div className="flex items-baseline gap-2">
-                        <span className="text-[10px] font-semibold uppercase tracking-wide text-ink">
-                          Apply edit
-                        </span>
-                        <span className="truncate font-mono text-[11px] text-stone">
-                          {p.path}:{p.line}
-                        </span>
-                      </div>
-                      <pre className="mt-1 max-h-40 overflow-auto rounded bg-cream p-1.5 font-mono text-[11px] leading-relaxed">
-                        {diffSnippet(p.old, p.new).map((d, li) => (
-                          <div
-                            key={li}
-                            className={
-                              d.t === "del"
-                                ? "bg-red-100 text-red-800"
-                                : d.t === "add"
-                                  ? "bg-green-100 text-green-800"
-                                  : "text-stone"
-                            }
-                          >
-                            {d.t === "del" ? "- " : d.t === "add" ? "+ " : "  "}
-                            {d.text || " "}
-                          </div>
-                        ))}
-                      </pre>
-                      <div className="mt-1.5 flex gap-2">
-                        <button
-                          data-chat-edit-accept
-                          onClick={() => decideEdit(p.id, true)}
-                          className="rounded bg-mint px-2.5 py-1 text-xs font-semibold text-ink transition-colors hover:bg-ink hover:text-mint"
-                        >
-                          Accept
-                        </button>
-                        <button
-                          data-chat-edit-reject
-                          onClick={() => decideEdit(p.id, false)}
-                          className="rounded border border-stone/40 px-2.5 py-1 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
-                        >
-                          Reject
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  {chatError && (
-                    <div
-                      data-chat-error
-                      className="whitespace-pre-wrap rounded border border-red-300 bg-red-50 px-2 py-1.5 text-xs text-red-700"
-                    >
-                      {chatError}
-                    </div>
-                  )}
-                </div>
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    sendChat();
-                  }}
-                  className="flex shrink-0 items-end gap-2 border-t border-ink/10 p-2"
-                >
-                  <textarea
-                    data-chat-input
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        sendChat();
-                      }
-                    }}
-                    rows={1}
-                    placeholder="Ask the assistant… (Enter to send, Shift+Enter for a new line)"
-                    className="max-h-24 min-w-0 flex-1 resize-y rounded border border-stone/40 bg-white px-2 py-1.5 text-xs text-ink outline-none focus:border-ink"
-                  />
-                  {chatBusy ? (
-                    <button
-                      type="button"
-                      data-chat-stop
-                      onClick={stopChat}
-                      className="rounded border border-stone/40 px-3 py-1.5 text-xs text-stone transition-colors hover:bg-peach hover:text-ink"
-                    >
-                      Stop
-                    </button>
-                  ) : (
-                    <button
-                      type="submit"
-                      data-chat-send
-                      disabled={!chatInput.trim()}
-                      className="rounded bg-ink px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-80 disabled:opacity-40 disabled:hover:opacity-40"
-                    >
-                      Send
-                    </button>
-                  )}
-                </form>
-              </div>
-            </div>
-          ) : leftPane === "log" ? (
+          {/* The chat drawer stays mounted while another pane is shown
+              (hidden with display:none): the runtime — and any in-flight
+              run — must survive a pane switch. */}
+          <ChatDrawer
+            hidden={leftPane !== "chat"}
+            runtime={runtime}
+            pendingEdits={pendingEdits}
+            onDecideEdit={decideEdit}
+            onStop={stopChat}
+            onClear={clearChat}
+            onOpenSettings={() => setChatSettingsModalOpen(true)}
+            isLanBackend={chatSettings.backend === "lan"}
+          />
+          {leftPane === "log" ? (
             <div className="flex min-w-0 flex-1 flex-col bg-white">
               <div className="flex h-9 shrink-0 items-center border-b border-ink/10 px-3">
                 <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
@@ -3688,6 +3103,16 @@ export default function EditorPage() {
         <PackagesModal
           onChanged={handlePackagesChanged}
           onClose={() => setPkgModalOpen(false)}
+        />
+      )}
+      {chatSettingsModalOpen && (
+        <ChatSettingsModal
+          settings={chatSettings}
+          onChange={(next) => {
+            setChatSettings(next);
+            saveChatSettings(next);
+          }}
+          onClose={() => setChatSettingsModalOpen(false)}
         />
       )}
     </div>

@@ -18,7 +18,6 @@ import {
   ThreadPrimitive,
   useAuiState,
   type AssistantRuntime,
-  type EmptyMessagePartProps,
   type MessageState,
   type ReasoningMessagePartProps,
   type TextMessagePartProps,
