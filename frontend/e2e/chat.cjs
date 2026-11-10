@@ -108,12 +108,15 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
 // The box is shared and its load spikes (observed up to ~20 on 16 cores),
 // so a FATAL under load must be diagnosable from the log alone. Two
 // instruments are installed after the first reload:
-// - an rAF gap ticker: if the app's main thread is blocked for > 2 s at
-//   FATAL time the gaps prove it (a Playwright locator.click that times
-//   out after "performing click action" is either a blocked main thread
-//   or a stalled CDP round trip — this tells which);
+// - an rAF gap ticker: gaps > 2 s at FATAL time prove BeginFrame
+//   (compositor) starvation — a headless page under load can go
+//   minutes without frames while its main thread still answers CDP.
+//   It does NOT by itself prove a JS block: the dump's in-page
+//   evaluate succeeding rules that out (see dumpFatalEvidence);
 // - a ring of cross-origin (engine / dead-port) request events, plus
-//   Playwright-side navigation and dialog watchers.
+//   Playwright-side navigation and dialog watchers. Request
+//   timestamps landing inside a gap window prove the main thread
+//   executed JS there.
 // On FATAL the current page state (URL, iframes, modal, max gap) is
 // dumped next to the error.
 function installEvidenceProbe(page) {
@@ -162,11 +165,18 @@ async function dumpFatalEvidence({ r, page }) {
       };
     });
     const load = os.loadavg().map((x) => x.toFixed(1)).join(", ");
+    // Note: this dump evaluated IN-PAGE, so the main thread was
+    // responsive at FATAL time — a long rAF gap therefore proves
+    // BEGINFRAME (compositor) starvation, not a JS block. (A true JS
+    // block would make THIS evaluate time out → "page state
+    // unavailable" in the catch below.) A headless page under load
+    // can go minutes without BeginFrames while still answering CDP.
     console.error(
       `EVIDENCE: loadavg=[${load}] max rAF gap ${ev.maxGapMs.toFixed(0)} ms ` +
         `(at ${ev.atMs.toFixed(0)} ms of ${ev.nowMs.toFixed(0)} ms, ${ev.ticks} ticks) — ` +
         (ev.maxGapMs > 2000
-          ? "APP MAIN THREAD BLOCKED"
+          ? "rAF/BeginFrame starved (compositor); main thread RESPONSIVE " +
+            "at FATAL time (this dump ran in-page) — not a JS block"
           : "app main thread responsive (suspect CDP/browser-level stall)"),
     );
     console.error(
@@ -771,6 +781,26 @@ const suite = { r: null, page: null };
     // 12. Engine down: point the engine at a dead port. The modal's
     //     listing reports the failed handshake (20 s timeout), and a
     //     send fails into the graceful error box.
+    //
+    // Reload first. The gate's stopped round left the engine iframe
+    // stuck in an un-abortable prefill (the engine checks abort only in
+    // its decode loop). The Save below CHANGES the URL, so the handler
+    // calls closeLanLlm() — removing that stuck iframe mid-prefill.
+    // Under this box's load (observed up to ~20) the browser's teardown
+    // of the stuck out-of-process iframe stalled the CDP round trips
+    // the click's post-input phase needs, past the 30 s click budget:
+    // the handler demonstrably ran (dead-port iframe created) and the
+    // page answered CDP evaluates at FATAL time, yet locator.click()
+    // never returned (chatstandalone3 evidence). The engine connection
+    // is per-page, so a reload drops it — the app's documented
+    // recovery path — and check 12's Save then tears down only a fresh
+    // handshake-only connection. The dead-port handshake and the
+    // graceful error box — what this check asserts — are unchanged.
+    await page.reload({ waitUntil: "load" });
+    await r.waitReady();
+    await page.locator('[data-rail="chat"]').click();
+    await page.locator("[data-chat-input]").waitFor({ timeout: 10_000 });
+
     await page.locator(GEAR).click();
     const modal2 = page.locator('[data-modal="chat-settings"]');
     await modal2.waitFor({ timeout: 10_000 });
