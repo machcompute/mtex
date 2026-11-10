@@ -2018,7 +2018,6 @@ export default function EditorPage() {
       flash: !pending.quiet,
       select: !pending.quiet,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePath]);
 
   /** Inverse sync entry point: a click in the rendered PDF. */
@@ -3146,23 +3145,32 @@ function BinaryPreview({ name, data }: { name: string; data: Uint8Array }) {
   const dot = name.lastIndexOf(".");
   const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
   const isImage = IMAGE_EXT.has(ext);
-  const [url, setUrl] = useState<string | null>(null);
-
+  // The object URL is derived from the props: create it in the render pass
+  // (useMemo) so the preview shows on the first render — no
+  // setState-in-effect round trip. The effect owns only the revoke
+  // lifecycle. (StrictMode's dev double-invocation of the memo factory
+  // leaves one extra blob URL unrevoked; it frees at page unload.)
+  const url = useMemo(
+    () =>
+      isImage
+        ? URL.createObjectURL(
+            new Blob([toArrayBuffer(data)], { type: mimeOf(name) }),
+          )
+        : null,
+    [data, isImage, name],
+  );
   useEffect(() => {
-    if (!isImage) {
-      setUrl(null);
-      return;
-    }
-    const u = URL.createObjectURL(
-      new Blob([toArrayBuffer(data)], { type: mimeOf(name) }),
-    );
-    setUrl(u);
-    return () => URL.revokeObjectURL(u);
-  }, [data, isImage, name]);
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [url]);
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 overflow-auto bg-cream p-6 text-center">
       {url ? (
+        // next/image cannot load blob: URLs (its loader assumes http(s)),
+        // so the raw <img> is the right element for the object URL.
+        // eslint-disable-next-line @next/next/no-img-element
         <img
           src={url}
           alt={name}
