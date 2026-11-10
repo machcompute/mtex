@@ -132,14 +132,28 @@ export class BusyTexCompiler {
    * worker always gets them.
    */
   private storeFilesSent = false;
+  /**
+   * One in-flight init at a time. The mount effect preloads the engine,
+   * and a fast first compile (or a package-change restart) calls init()
+   * again while the first is still fetching the package list — without a
+   * shared promise each call passes the `!this.worker` guard below the
+   * fetch and creates a SECOND worker: two ~92 MB data preloads, and the
+   * first worker orphaned forever (dispose() only terminates this.worker),
+   * whose own load failure later overwrites the compile's error status.
+   */
+  private initPromise: Promise<void> | null = null;
+  /** Bumped by dispose(): invalidates an in-flight startWorker. */
+  private initGeneration = 0;
 
   constructor(private workerUrl = `/busytex/busytex_worker.js?v=${WORKER_VERSION}`) {}
 
   /**
    * Create the worker and send the init message. Idempotent while a worker
-   * is alive. onError fires for failures outside a compile (an asset load
-   * failing during init, a worker crash) — the worker is disposed when it
-   * fires, and the next compile() recreates it.
+   * is alive, and while an init is in flight (concurrent callers share
+   * the same worker start — see initPromise). onError fires for failures
+   * outside a compile (an asset load failing during init, a worker crash)
+   * — the worker is disposed when it fires, and the next compile()
+   * recreates it.
    */
   async init(
     onLog?: (line: string) => void,
@@ -149,112 +163,123 @@ export class BusyTexCompiler {
     this.onLog = onLog ?? this.onLog;
     this.onReady = onReady ?? this.onReady;
     this.onError = onError ?? this.onError;
-    if (!this.worker) {
-      // A dispose() that PRECEDES init() is the normal recovery path —
-      // a failed worker was disposed, and the caller (compile()) wants
-      // the fresh worker. Only a dispose() DURING the fetch below means
-      // the caller is tearing the compiler down.
-      const disposedBefore = this.disposed;
-      // The package list is fetched before the worker starts: the
-      // init message carries it (see the file header), and the engine
-      // needs the right list from its very first compile. Fails soft —
-      // an empty list only means installed packages fall through to the
-      // enable-all-data-packages fallback, which still compiles.
-      const remote_packages = await remotePackageNames().catch((err) => {
-        console.warn("[busytex] installed package list unavailable, continuing without remote_packages:", err);
-        return [];
+    if (!this.worker && !this.initPromise) {
+      this.initGeneration++;
+      const promise = this.startWorker(this.initGeneration);
+      this.initPromise = promise;
+      promise.finally(() => {
+        if (this.initPromise === promise) this.initPromise = null;
       });
-      // The await yielded: a dispose() in that window makes this worker
-      // start moot (the caller is tearing the compiler down).
-      if (this.disposed && !disposedBefore) return;
-      this.disposed = false;
-      const worker = new Worker(this.workerUrl);
-      this.worker = worker;
-      // A fresh worker has a fresh /texlive tree: whatever the previous
-      // session sent, this one must get the store files again. (Also
-      // covers a worker that died after a compile's store-file fetch —
-      // the flag may say "sent" for the dead worker.)
-      this.storeFilesSent = false;
+    }
+    await this.initPromise;
+  }
 
-      worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
-        const msg = e.data;
-        if (msg.ready !== undefined) {
-          console.debug("[busytex] worker ready");
-          return;
-        }
-        if (msg.loaded !== undefined) {
-          console.debug("[busytex] engine loaded");
-          if (this.onReady) this.onReady();
-          return;
-        }
-        if (msg.print !== undefined && this.onLog) this.onLog(msg.print);
-        // Worker-reported failure (asset load, pipeline crash, …).
-        if (msg.error !== undefined) {
-          console.error("[busytex] worker error:\n" + msg.error);
-          if (this.pending) {
-            const resolvePending = this.pending;
-            this.pending = null;
-            this.dispose();
-            resolvePending({ pdf: null, log: msg.error });
-          } else {
-            // Outside a compile (an init-time asset load failed): the
-            // worker is dead — dispose it and report it, or the next
-            // compile would wait forever on a promise that never settles.
-            this.dispose();
-            this.onError?.(msg.error);
-          }
-          return;
-        }
-        // Compile results only arrive while pending.
-        if (this.pending && (msg.pdf !== undefined || msg.log !== undefined)) {
-          const resolvePending = this.pending;
-          this.pending = null;
-          resolvePending(msg);
-        }
-      };
-      // The worker script itself failed to load or crashed — its own
-      // {error} channel can't report that, so surface it here.
-      worker.onerror = (e) => {
-        const message = `worker crashed${e.message ? ": " + e.message : ""}`;
-        console.error("[busytex] worker error event:", e);
+  private async startWorker(generation: number): Promise<void> {
+    // A dispose() that PRECEDES this start is the normal recovery path —
+    // a failed worker was disposed, and the caller (compile()) wants the
+    // fresh worker (this.disposed is still true here; the generation
+    // check below only guards the in-flight window).
+    // The package list is fetched before the worker starts: the
+    // init message carries it (see the file header), and the engine
+    // needs the right list from its very first compile. Fails soft —
+    // an empty list only means installed packages fall through to the
+    // enable-all-data-packages fallback, which still compiles.
+    const remote_packages = await remotePackageNames().catch((err) => {
+      console.warn("[busytex] installed package list unavailable, continuing without remote_packages:", err);
+      return [];
+    });
+    // The await yielded: a dispose() in that window (or one that
+    // superseded this start) bumps the generation — the worker start is
+    // moot (the caller is tearing the compiler down, or a re-init
+    // already starts the fresh worker).
+    if (generation !== this.initGeneration) return;
+    this.disposed = false;
+    const worker = new Worker(this.workerUrl);
+    this.worker = worker;
+    // A fresh worker has a fresh /texlive tree: whatever the previous
+    // session sent, this one must get the store files again. (Also
+    // covers a worker that died after a compile's store-file fetch —
+    // the flag may say "sent" for the dead worker.)
+    this.storeFilesSent = false;
+
+    worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
+      const msg = e.data;
+      if (msg.ready !== undefined) {
+        console.debug("[busytex] worker ready");
+        return;
+      }
+      if (msg.loaded !== undefined) {
+        console.debug("[busytex] engine loaded");
+        if (this.onReady) this.onReady();
+        return;
+      }
+      if (msg.print !== undefined && this.onLog) this.onLog(msg.print);
+      // Worker-reported failure (asset load, pipeline crash, …).
+      if (msg.error !== undefined) {
+        console.error("[busytex] worker error:\n" + msg.error);
         if (this.pending) {
           const resolvePending = this.pending;
           this.pending = null;
           this.dispose();
-          resolvePending({ pdf: null, log: message });
+          resolvePending({ pdf: null, log: msg.error });
         } else {
-          // The worker is dead with no compile to report to — dispose and
-          // surface the error instead of leaving the UI stuck.
+          // Outside a compile (an init-time asset load failed): the
+          // worker is dead — dispose it and report it, or the next
+          // compile would wait forever on a promise that never settles.
           this.dispose();
-          this.onError?.(message);
+          this.onError?.(msg.error);
         }
-      };
+        return;
+      }
+      // Compile results only arrive while pending.
+      if (this.pending && (msg.pdf !== undefined || msg.log !== undefined)) {
+        const resolvePending = this.pending;
+        this.pending = null;
+        resolvePending(msg);
+      }
+    };
+    // The worker script itself failed to load or crashed — its own
+    // {error} channel can't report that, so surface it here.
+    worker.onerror = (e) => {
+      const message = `worker crashed${e.message ? ": " + e.message : ""}`;
+      console.error("[busytex] worker error event:", e);
+      if (this.pending) {
+        const resolvePending = this.pending;
+        this.pending = null;
+        this.dispose();
+        resolvePending({ pdf: null, log: message });
+      } else {
+        // The worker is dead with no compile to report to — dispose and
+        // surface the error instead of leaving the UI stuck.
+        this.dispose();
+        this.onError?.(message);
+      }
+    };
 
-      // The worker reads evt.data and expects the fields at the top level
-      // (the release protocol posts plain message objects, no wrapper).
-      worker.postMessage({
-        busytex_js: asset("busytex.js"),
-        busytex_wasm: asset("busytex.wasm"),
-        // The biber module is lazy in the pipeline (constructor only stores
-        // the URLs); the assets load on the first biber run, so passing
-        // them now costs nothing.
-        biber_js: asset("biber.js"),
-        biber_wasm: asset("biber.wasm"),
-        biber_data: asset("biber.data"),
-        // The data-package catalog (the resolver fetches each .js for the
-        // \ProvidesPackage scan) and the set to preload now (basic only —
-        // the other two are hundreds of MB and load on demand).
-        data_packages_js: DATA_PACKAGES_JS,
-        preload_data_packages_js: PRELOAD_DATA_PACKAGES_JS,
-        texmf_local: [] as string[],
-        preload: true,
-        verbose: "silent",
-        // The names the browser's CTAN package store (src/lib/ctan-store.ts)
-        // provides, treated as local so they never trigger the
-        // enable-all-data-packages fallback.
-        remote_packages,
-      });
-    }
+    // The worker reads evt.data and expects the fields at the top level
+    // (the release protocol posts plain message objects, no wrapper).
+    worker.postMessage({
+      busytex_js: asset("busytex.js"),
+      busytex_wasm: asset("busytex.wasm"),
+      // The biber module is lazy in the pipeline (constructor only stores
+      // the URLs); the assets load on the first biber run, so passing
+      // them now costs nothing.
+      biber_js: asset("biber.js"),
+      biber_wasm: asset("biber.wasm"),
+      biber_data: asset("biber.data"),
+      // The data-package catalog (the resolver fetches each .js for the
+      // \ProvidesPackage scan) and the set to preload now (basic only —
+      // the other two are hundreds of MB and load on demand).
+      data_packages_js: DATA_PACKAGES_JS,
+      preload_data_packages_js: PRELOAD_DATA_PACKAGES_JS,
+      texmf_local: [] as string[],
+      preload: true,
+      verbose: "silent",
+      // The names the browser's CTAN package store (src/lib/ctan-store.ts)
+      // provides, treated as local so they never trigger the
+      // enable-all-data-packages fallback.
+      remote_packages,
+    });
   }
 
   /**
@@ -376,6 +401,11 @@ export class BusyTexCompiler {
   }
 
   dispose() {
+    // Invalidate an in-flight init even when re-disposing: a startWorker
+    // begun before the FIRST dispose may still be awaiting its fetch, and
+    // would otherwise create a worker after the teardown.
+    this.initGeneration++;
+    this.initPromise = null;
     if (this.disposed) return;
     this.disposed = true;
     this.worker?.terminate();
