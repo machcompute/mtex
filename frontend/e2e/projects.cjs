@@ -47,18 +47,38 @@ const goDashboard = async (r) => {
   await r.page.waitForSelector(NEW_PROJECT_BTN, { timeout: 15000 });
   // The card grid fills in asynchronously from OPFS (each card also reads
   // its preview thumbnail) — wait until it settles (cards OR the empty
-  // state), not just for the header button.
+  // state), not just for the header button. VISIBLE only: Next 16 keeps
+  // the previous route's DOM in the tree (hidden), and a stale card from
+  // an earlier visit would end the poll before this visit's grid has
+  // re-read OPFS.
   for (let i = 0; i < 60; i++) {
     const settled =
-      (await r.page.locator('button[title^="Open "]').count()) > 0 ||
-      (await r.page.locator("text=No projects yet").count()) > 0;
+      (await visibleCards(r).count()) > 0 ||
+      (await r.page.locator("text=No projects yet").first().isVisible());
     if (settled) break;
     await sleep(250);
   }
 };
 const cardBy = (r, name) =>
   r.page.locator(`button[title="Open ${name}"]`);
-const cardCount = (r) => r.page.locator('button[title^="Open "]');
+// Plain count() also matches the hidden cards of earlier dashboard visits
+// (the cached route DOM stays in the tree), so every card-count assertion
+// goes through the visible locator instead.
+const visibleCards = (r) => r.page.locator('button[title^="Open "]:visible');
+// Poll until the visible card count matches the expectation (the grid
+// re-reads OPFS on every visit and commits the full set in one state
+// update, so the count jumps 0 → N, not N−1 → N). Returns the visible
+// count on timeout too, so a failed assertion's extra shows the truth.
+const waitCards = async (r, n) => {
+  for (let i = 0; i < 80; i++) {
+    const vis = await visibleCards(r).count();
+    const empty =
+      await r.page.locator("text=No projects yet").first().isVisible();
+    if (vis === n && (n > 0 || empty)) return vis;
+    await sleep(250);
+  }
+  return await visibleCards(r).count();
+};
 // Click a card and wait for the editor to load that project — the name
 // input flips to it in one commit, so this means the switch landed.
 const openCard = async (r, name) => {
@@ -158,11 +178,14 @@ const mainValue = async (r) => {
     await projectCount(r),
   );
   await goDashboard(r);
+  const n1 = await waitCards(r, 1);
   r.ok(
     "first run: the dashboard lists it",
-    (await cardCount(r).count()) === 1 &&
-      (await cardBy(r, "LaTeX project").count()) === 1,
-    await cardCount(r).count(),
+    n1 === 1 &&
+      (await r.page
+        .locator('button[title="Open LaTeX project"]:visible')
+        .count()) === 1,
+    n1,
   );
 
   // --- create two more projects via the dashboard -------------------------
@@ -172,7 +195,8 @@ const mainValue = async (r) => {
   await goDashboard(r);
   await createFromDashboard(r, "LaTeX project 3");
   await goDashboard(r);
-  r.ok("create: three cards now", (await cardCount(r).count()) === 3);
+  const n3 = await waitCards(r, 3);
+  r.ok("create: three cards now", n3 === 3, n3);
   r.ok(
     "create: three projects in storage",
     (await projectCount(r)) === 3,
@@ -247,11 +271,14 @@ const mainValue = async (r) => {
     dialogMsg.includes("LaTeX project 3"),
     dialogMsg,
   );
+  const n2 = await waitCards(r, 2);
   r.ok(
     "delete: card gone, two left",
-    (await cardCount(r).count()) === 2 &&
-      (await cardBy(r, "LaTeX project 3").count()) === 0,
-    await cardCount(r).count(),
+    n2 === 2 &&
+      (await r.page
+        .locator('button[title="Open LaTeX project 3"]:visible')
+        .count()) === 0,
+    n2,
   );
   r.ok(
     "delete: two projects in storage",
@@ -268,7 +295,9 @@ const mainValue = async (r) => {
   );
   r.ok(
     "delete active: its card is gone",
-    (await cardBy(r, "Renamed proj").count()) === 0,
+    (await r.page
+      .locator('button[title="Open Renamed proj"]:visible')
+      .count()) === 0,
   );
   // The dashboard's active-project key still points at the deleted project;
   // opening the editor directly must fall back to a remaining one. The
@@ -294,15 +323,16 @@ const mainValue = async (r) => {
   // picked the most recently updated REMAINING project — so exactly one
   // card is left. Delete whatever remains, however many.
   await goDashboard(r);
-  while ((await cardCount(r).count()) > 0) {
-    const title = await cardCount(r).first().getAttribute("title");
+  while ((await visibleCards(r).count()) > 0) {
+    const title = await visibleCards(r).first().getAttribute("title");
     await deleteCard(r, title.replace(/^Open /, ""));
   }
+  const n0 = await waitCards(r, 0);
   r.ok(
     "delete-to-empty: the dashboard shows its empty state",
-    (await cardCount(r).count()) === 0 &&
-      (await r.page.locator("text=No projects yet").count()) === 1,
-    await cardCount(r).count(),
+    n0 === 0 &&
+      (await r.page.locator("text=No projects yet").first().isVisible()),
+    n0,
   );
   r.ok(
     "delete-to-empty: storage is empty",

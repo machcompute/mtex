@@ -40,6 +40,7 @@ import {
   IconClock,
   IconFile,
   IconNote,
+  IconSearch,
   IconGitHub,
   IconImage,
   IconLink,
@@ -574,6 +575,9 @@ export default function EditorPage() {
   const [leftPane, setLeftPane] = useState<
     "files" | "search" | "chat" | "log"
   >("files");
+  // The Search view's query (session-only, like the log — it is not part
+  // of the project).
+  const [searchQuery, setSearchQuery] = useState("");
   // The chat conversation (in-memory; it lives with this page's session,
   // like the log — it is not part of the project).
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -2395,6 +2399,19 @@ export default function EditorPage() {
     }
   };
 
+  /** Search view: open the file (if needed) and jump to the line. */
+  const jumpToLine = (path: string, line: number) => {
+    // A programmatic editor scroll follows; stop it from bouncing the
+    // PDF back (the same guard the synctex jumps use).
+    lockRef.current.until = now() + 500;
+    if (path === activePath) {
+      revealLine(line, { flash: true, select: true });
+    } else {
+      pendingJumpRef.current = { file: path, line, quiet: false };
+      openPath(path);
+    }
+  };
+
   // Monaco switches the model in its own (child) effect, which runs before
   // this one — so the model for `activePath` is live when we get here.
   useEffect(() => {
@@ -2667,6 +2684,26 @@ export default function EditorPage() {
       handlePackagesChanged,
     };
   });
+
+  // Search view: matches across the project's text files (binary files
+  // are skipped — their bytes are not text). Filename first, then line
+  // number; capped so a large project can't build an unbounded list.
+  const searchResults = useMemo(() => {
+    const out: { path: string; line: number; text: string }[] = [];
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return out;
+    for (const [path, data] of Object.entries(files)) {
+      if (typeof data !== "string") continue;
+      const lines = data.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].toLowerCase().includes(q)) {
+          out.push({ path, line: i + 1, text: lines[i].trim() });
+          if (out.length >= 200) return out;
+        }
+      }
+    }
+    return out;
+  }, [files, searchQuery]);
 
   const statusText =
     status.kind === "idle"
@@ -3213,8 +3250,7 @@ export default function EditorPage() {
 
       <div className="flex min-h-0 flex-1">
         {/* Icon rail: switches the left panel's content (inscribe.io's
-            vertical tab strip). Files for now; Search joins with the
-            search view. */}
+            vertical tab strip). */}
         <nav
           aria-label="Left panel"
           className="flex w-10 shrink-0 flex-col items-center gap-1 border-r border-ink/10 bg-cream py-2"
@@ -3222,6 +3258,7 @@ export default function EditorPage() {
           {(
             [
               ["files", "Files", IconFile],
+              ["search", "Search", IconSearch],
               ["chat", "Chat", IconChat],
               ["log", "Log", IconClock],
             ] as const
@@ -3466,6 +3503,49 @@ export default function EditorPage() {
                     ? liveLog
                     : log) || "(no log output yet)"}
                 </pre>
+              </div>
+            </div>
+          ) : leftPane === "search" ? (
+            <div className="flex min-w-0 flex-1 flex-col bg-white">
+              <div className="flex h-9 shrink-0 items-center gap-2 border-b border-ink/10 px-3">
+                <IconSearch className="h-3.5 w-3.5 shrink-0 text-stone" />
+                <input
+                  data-search-input
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search files…"
+                  className="min-w-0 flex-1 bg-transparent text-xs text-ink outline-none placeholder:text-stone/60"
+                />
+                {searchQuery.trim() !== "" && (
+                  <span className="shrink-0 text-[10px] tabular-nums text-stone">
+                    {searchResults.length}
+                    {searchResults.length >= 200 ? "+" : ""}
+                  </span>
+                )}
+              </div>
+              <div className="min-h-0 flex-1 overflow-auto">
+                {searchQuery.trim() === "" ? (
+                  <p className="p-3 text-xs text-stone">
+                    Search every text file in the project.
+                  </p>
+                ) : searchResults.length === 0 ? (
+                  <p className="p-3 text-xs text-stone">No matches.</p>
+                ) : (
+                  searchResults.map((hit, i) => (
+                    <button
+                      key={`${hit.path}:${hit.line}:${i}`}
+                      onClick={() => jumpToLine(hit.path, hit.line)}
+                      className="block w-full border-b border-ink/5 px-3 py-1.5 text-left transition-colors hover:bg-mint/30"
+                    >
+                      <span className="block truncate font-mono text-[10px] text-stone">
+                        {hit.path}:{hit.line}
+                      </span>
+                      <span className="block truncate font-mono text-xs text-ink">
+                        {hit.text}
+                      </span>
+                    </button>
+                  ))
+                )}
               </div>
             </div>
           ) : (
