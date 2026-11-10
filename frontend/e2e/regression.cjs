@@ -15,6 +15,7 @@
 // traffic instead of engine fetches.
 const {
   Runner,
+  APP_URL,
   seedProject,
   openPackagesModal,
   closePackagesModal,
@@ -303,8 +304,9 @@ const r = new Runner("reg");
     badApi.length === 0,
     badApi.map((req) => req.url).join(", ").slice(0, 200),
   );
+  const appOrigin = new URL(APP_URL).origin;
   const allowed = (u) =>
-    u.startsWith("http://localhost:3000") ||
+    u.startsWith(appOrigin) ||
     u.startsWith("blob:") ||
     /https:\/\/cdn\.jsdelivr\.net\/npm\/monaco-editor/.test(u);
   const foreign = requests.filter((req) => !allowed(req.url));

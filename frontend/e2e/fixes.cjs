@@ -4,7 +4,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { Runner, seedProject, readProject } = require("./helpers.cjs");
+const { Runner, APP_URL, seedProject, readProject } = require("./helpers.cjs");
 
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
@@ -508,7 +508,7 @@ async function seed(r, p) {
   r4.ok("b.tex listed", (await rows(r4)).includes("b.tex"));
   r4.ok(
     "#23 the page did not navigate away",
-    r4.page.url().startsWith("http://localhost:3000/editor"),
+    r4.page.url().startsWith(APP_URL),
     r4.page.url(),
   );
   // #10 a real OS folder dropped on the editor pane is imported (top folder
