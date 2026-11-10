@@ -50,10 +50,19 @@ class Runner {
       executablePath: this.browser === "firefox" ? FIREFOX : CHROME,
       headless: true,
       // Chrome-only flags; Firefox doesn't take them.
+      // --enable-unsafe-webgpu: headless Chrome on a bare server exposes no
+      // WebGPU adapter by default (no trusted display/GPU), which breaks the
+      // LAN-engine chat path (its inference runs on WebGPU). The flag lets
+      // the software (SwiftShader) adapter come up; the handshake and model
+      // listing work without it, only inference needs the adapter.
       args:
         this.browser === "firefox"
           ? []
-          : ["--no-sandbox", "--disable-dev-shm-usage"],
+          : [
+              "--no-sandbox",
+              "--disable-dev-shm-usage",
+              "--enable-unsafe-webgpu",
+            ],
     });
     this.page = await this.ctx.newPage();
     this.page.on("pageerror", (e) =>
