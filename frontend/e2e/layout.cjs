@@ -2,8 +2,10 @@
 // only — project management moved to the dashboard), the icon rail that
 // switches the left panel (files/search/chat/log) with GitHub + Packages
 // anchored at its bottom, the search view itself, and the divider's
-// hover-only swap button, and the PDF line-number gutter drawn from the
-// auto-compiled synctex map. No compiles of its own (the first load
+// hover-only swap button, the formatting toolbar + save indicator row,
+// the PDF pane's right group (compile history, notes, page badge), the
+// files-panel stats popover, and the PDF line-number gutter drawn from
+// the auto-compiled synctex map. No compiles of its own (the first load
 // auto-compiles; the gutter checks poll for its PDF + map) and no
 // project management — dashboard.cjs and projects.cjs own those.
 const { Runner } = require("./helpers.cjs");
@@ -72,6 +74,77 @@ async function poll(r, fn, tries = 40, every = 250) {
     "app bar: no Projects menu (it lives on the dashboard now)",
     !bar.projectsText && !bar.projectsTitle,
     `text=${bar.projectsText} title=${bar.projectsTitle}`,
+  );
+
+  // --- the formatting toolbar (the row under the tab strip) ---------------
+  // main.tex is the active file until the search section below switches it,
+  // so the functional check runs here and restores the file afterwards.
+  const toolbar = await r.page.evaluate(() => {
+    const sel = document.querySelector("select[data-format-block]");
+    return {
+      block: sel ? [...sel.options].map((o) => o.value).join(",") : "",
+      btns: [...document.querySelectorAll("button[data-format]")].map(
+        (b) => b.dataset.format,
+      ),
+    };
+  });
+  r.ok(
+    "toolbar: block select + I/B/U/S/link/code/image/table, in order",
+    toolbar.block ===
+      "normal,section,subsection,subsubsection,itemize,enumerate" &&
+      toolbar.btns.join(",") ===
+        "emph,strong,underline,strikethrough,link,code,image,table",
+    JSON.stringify(toolbar),
+  );
+  const origMain = await r.page.evaluate(
+    () => window.monaco.editor.getEditors()[0]?.getModel()?.getValue() ?? null,
+  );
+  // Park the cursor just after \begin{document}: the edit may trip the
+  // auto-recompile while it is in its intermediate state, and a failed
+  // compile (text before \documentclass would be one) opens the log pane
+  // — the stats check below expects the files pane.
+  await r.page.evaluate(() => {
+    const ed = window.monaco.editor.getEditors()[0];
+    const m = ed?.getModel();
+    if (!ed || !m) return;
+    for (let i = 1; i <= m.getLineCount(); i++) {
+      if ((m.getLineContent(i) ?? "").includes("\\begin{document}")) {
+        ed.setPosition({ lineNumber: Math.min(i + 1, m.getLineCount()), column: 1 });
+        return;
+      }
+    }
+  });
+  await r.page.locator('button[data-format="strong"]').click();
+  const wrapped = await poll(
+    r,
+    () => {
+      const v = window.monaco.editor.getEditors()[0]?.getModel()?.getValue();
+      return v && v.includes("\\textbf{Text}") ? v : null;
+    },
+    10,
+  );
+  r.ok(
+    "toolbar: Bold inserts the \\textbf{Text} placeholder",
+    !!wrapped,
+    wrapped?.slice(0, 80),
+  );
+  // Restore the pristine file: the search and gutter checks below expect
+  // the default project, and the auto-recompile must get it back too.
+  await r.page.evaluate(
+    (o) => window.monaco.editor.getEditors()[0]?.getModel()?.setValue(o),
+    origMain,
+  );
+  // The debounced OPFS persist completes: the indicator is Saved again.
+  const savedState = await poll(r, () =>
+    document.querySelector("[data-save-state]")?.getAttribute("data-save-state") ===
+    "saved"
+      ? document.querySelector("[data-save-state]")?.textContent?.trim()
+      : null,
+  );
+  r.ok(
+    "toolbar: save indicator reads Saved at rest",
+    savedState === "Saved",
+    savedState,
   );
 
   // --- the icon rail: four entries, in order, bottom-anchored extras ------
@@ -319,6 +392,75 @@ async function poll(r, fn, tries = 40, every = 250) {
     "gutter: labels live only inside page wrappers",
     gutter.stray === 0,
     gutter.stray,
+  );
+
+  // --- the PDF pane's right group: history, notes, page badge --------------
+  // The auto-compile above produced the PDF, so the history is non-empty.
+  await r.page.locator('button[title="Compile history"]').click();
+  const hist = await poll(r, () => {
+    const ul = document.querySelector('[data-popover-root="history"] ul');
+    return ul?.textContent ?? null;
+  });
+  r.ok(
+    "history: the popover lists the auto-compile",
+    !!hist && /Compiled in \d+ ms/.test(hist),
+    String(hist).slice(0, 80),
+  );
+  await r.page.locator('button[title="Compile history"]').click(); // close
+  // Notes survive a close/reopen: the textarea remounts from localStorage.
+  const notesBtn = r.page.locator('button[title^="Project notes"]');
+  await notesBtn.click();
+  await r.page.locator("[data-notes]").waitFor({ state: "visible", timeout: 5000 });
+  await r.page.locator("[data-notes]").fill("GUTTER-NOTE");
+  await notesBtn.click(); // close
+  await notesBtn.click(); // reopen
+  const noteVal = await r.page.locator("[data-notes]").inputValue();
+  r.ok(
+    "notes: typed notes survive closing and reopening",
+    noteVal === "GUTTER-NOTE",
+    noteVal,
+  );
+  await notesBtn.click(); // close
+  // The page-count badge on the document glyph mirrors the rendered pages.
+  const pageBadge = await r.page.evaluate(() => ({
+    n:
+      document.querySelector('span[title$="in the current PDF"] span')
+        ?.textContent ?? "",
+    pages: document.querySelectorAll("[data-page]").length,
+  }));
+  r.ok(
+    "page badge: counts the rendered PDF pages",
+    pageBadge.n === String(pageBadge.pages) && pageBadge.pages > 0,
+    JSON.stringify(pageBadge),
+  );
+  // The stats popover (files-panel header): project + active-file counts.
+  // A failed auto-compile earlier in the suite (the Bold test edits the
+  // file) opens the log pane and unmounts the FileBrowser — make sure
+  // the files pane is active before looking for the button.
+  await r.page.locator('[data-rail="files"]').click();
+  await r.page
+    .locator('button[data-action="new-file"]')
+    .waitFor({ state: "visible", timeout: 5000 });
+  await r.page.locator('button[title="Project stats"]').click();
+  const stats = await poll(r, () => {
+    const pop = document.querySelector('[data-popover-root="stats"] dl');
+    if (!pop) return null;
+    return [...pop.querySelectorAll("div")].map((d) => ({
+      dt: d.querySelector("dt")?.textContent ?? "",
+      dd: d.querySelector("dd")?.textContent ?? "",
+    }));
+  });
+  const srows = Object.fromEntries(
+    (stats ?? []).map((s) => [s.dt.split(" — ")[0].trim(), s.dd]),
+  );
+  r.ok(
+    "stats: files, words, lines and PDF pages are numeric",
+    !!stats &&
+      /^\d+$/.test(srows.Files ?? "") &&
+      /^\d+$/.test(srows.Words ?? "") &&
+      /^\d+$/.test(srows.Lines ?? "") &&
+      /^\d+$/.test(srows["PDF pages"] ?? ""),
+    JSON.stringify(stats),
   );
 
   console.log(
