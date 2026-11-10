@@ -104,9 +104,87 @@ const GATE_POLL_MS = 5_000;
 
 const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
 
+// --- Failure evidence ---------------------------------------------------
+// The box is shared and its load spikes (observed up to ~20 on 16 cores),
+// so a FATAL under load must be diagnosable from the log alone. Two
+// instruments are installed after the first reload:
+// - an rAF gap ticker: if the app's main thread is blocked for > 2 s at
+//   FATAL time the gaps prove it (a Playwright locator.click that times
+//   out after "performing click action" is either a blocked main thread
+//   or a stalled CDP round trip — this tells which);
+// - a ring of cross-origin (engine / dead-port) request events, plus
+//   Playwright-side navigation and dialog watchers.
+// On FATAL the current page state (URL, iframes, modal, max gap) is
+// dumped next to the error.
+function installEvidenceProbe(page) {
+  return page.evaluate(() => {
+    window.__e2eTicks = [];
+    (function tick() {
+      window.__e2eTicks.push(performance.now());
+      if (window.__e2eTicks.length > 4000)
+        window.__e2eTicks.splice(0, 2000);
+      requestAnimationFrame(tick);
+    })();
+    window.__e2eEvents = [];
+    window.addEventListener("error", (e) => {
+      window.__e2eEvents.push(
+        `${performance.now().toFixed(0)}ms [window-error] ${String(e.message).slice(0, 120)}`,
+      );
+      if (window.__e2eEvents.length > 200) window.__e2eEvents.shift();
+    });
+  });
+}
+
+async function dumpFatalEvidence({ r, page }) {
+  if (!page) return;
+  const os = require("os");
+  try {
+    const ev = await page.evaluate(() => {
+      const t = window.__e2eTicks ?? [];
+      let max = 0;
+      let at = 0;
+      for (let i = 1; i < t.length; i++)
+        if (t[i] - t[i - 1] > max) {
+          max = t[i] - t[i - 1];
+          at = t[i];
+        }
+      return {
+        maxGapMs: max,
+        atMs: at,
+        ticks: t.length,
+        nowMs: performance.now(),
+        events: (window.__e2eEvents ?? []).slice(-30),
+        url: location.href,
+        iframes: Array.from(document.querySelectorAll("iframe")).map(
+          (f) => f.src,
+        ),
+        modal: !!document.querySelector("[data-modal]"),
+      };
+    });
+    const load = os.loadavg().map((x) => x.toFixed(1)).join(", ");
+    console.error(
+      `EVIDENCE: loadavg=[${load}] max rAF gap ${ev.maxGapMs.toFixed(0)} ms ` +
+        `(at ${ev.atMs.toFixed(0)} ms of ${ev.nowMs.toFixed(0)} ms, ${ev.ticks} ticks) — ` +
+        (ev.maxGapMs > 2000
+          ? "APP MAIN THREAD BLOCKED"
+          : "app main thread responsive (suspect CDP/browser-level stall)"),
+    );
+    console.error(
+      `EVIDENCE: url=${ev.url} modal=${ev.modal} iframes=${JSON.stringify(ev.iframes)}`,
+    );
+    for (const line of ev.events) console.error(`EVIDENCE: ${line}`);
+  } catch (d) {
+    console.error(
+      "EVIDENCE: (page state unavailable — browser may be gone):",
+      String(d).slice(0, 120),
+    );
+  }
+}
+
+const suite = { r: null, page: null };
 (async () => {
-  const r = new Runner("chat");
-  const page = await r.start();
+  const r = (suite.r = new Runner("chat"));
+  const page = (suite.page = await r.start());
   try {
     await r.goto();
     if (!(await r.waitReady())) throw new Error("engine not ready");
@@ -126,6 +204,25 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
     });
     await page.reload({ waitUntil: "load" });
     await r.waitReady();
+
+    await installEvidenceProbe(page);
+    page.on("framenavigated", (f) =>
+      console.log(`[evidence:frame] ${f.url()}`),
+    );
+    page.on("dialog", (d) => {
+      console.log(`[evidence:dialog] ${d.type()}: ${d.message().slice(0, 120)}`);
+      d.dismiss().catch(() => {});
+    });
+    // Engine-origin and dead-port traffic (the model download comes from
+    // the internet and is not interesting at check 12 time).
+    page.on("request", (req) => {
+      const u = req.url();
+      if (u.includes("localhost:3001") || u.includes("localhost:3999"))
+        console.log(
+          `[evidence:req] ${new Date().toISOString().slice(11, 23)} ` +
+            `${req.method()} ${u}`,
+        );
+    });
 
     // 1. Open the chat pane from the icon rail.
     await page.locator('[data-rail="chat"]').click();
@@ -825,6 +922,15 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
           `${skipped.map((s) => s.split(". ")[0]).join(", ")}`,
       );
     }
+  } catch (e) {
+    // Dump the page evidence BEFORE the finally below tears down the
+    // browser profile (the dump evaluates in-page).
+    try {
+      await dumpFatalEvidence(suite);
+    } catch (d) {
+      console.error("EVIDENCE: dump failed:", String(d).slice(0, 120));
+    }
+    throw e;
   } finally {
     await r.finish();
   }
