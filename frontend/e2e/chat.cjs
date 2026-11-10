@@ -180,11 +180,13 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
     // created lazily by the first send, but engine→app messages
     // (progress / chunk / result / error) are always posted to the
     // app's main window, so a main-frame listener installed before the
-    // first send sees everything. Records when the model reports ready
-    // and when the first streamed content chunk (a "chunk" without
-    // event:"progress") or a terminal event arrives.
+    // first send sees everything. Records when the model reports ready,
+    // when the first streamed content chunk (a "chunk" without
+    // event:"progress") or a terminal event arrives, and the message of
+    // every engine error reply (e.g. a send rejected as busy while the
+    // engine is still unwinding an aborted prefill).
     await page.evaluate(() => {
-      window.__gate = { readyAt: 0, firstTokenAt: 0, lastStage: "" };
+      window.__gate = { readyAt: 0, firstTokenAt: 0, lastStage: "", engineErrors: [] };
       window.addEventListener("message", (e) => {
         const d = e.data;
         if (!d || d.ns !== "mach-llm") return;
@@ -195,6 +197,8 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
         } else if (d.type === "chunk" || d.type === "result" || d.type === "error") {
           if (!window.__gate.firstTokenAt)
             window.__gate.firstTokenAt = performance.now();
+          if (d.type === "error")
+            window.__gate.engineErrors.push(d.data?.message ?? "");
         }
       });
     });
@@ -533,8 +537,8 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
       // 5. The system prompt carries the cursor position. The request is
       //    posted to the engine at send time, so the wire capture works
       //    even though the round itself will never settle: send, wait
-      //    for the captured request, assert, then stop the round so the
-      //    remaining checks start from a settled UI.
+      //    for the captured request, assert, then settle the round so
+      //    the remaining checks start from a settled UI.
       const engineFrame = findEngineFrame();
       await captureWire(engineFrame);
       await page.locator(".view-lines .view-line").nth(3).click();
@@ -551,7 +555,41 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
         /line 4, column/.test(sysPrompt),
         sysPrompt.slice(0, 200),
       );
-      await stopAndSettle();
+      // Settle the round — but its fate depends on the engine's busy
+      // flag, which the gate's stop left behind: the flag is held for
+      // the whole completion and cleared only when runCompletion
+      // settles (engine protocol.ts), and a stuck prefill never
+      // settles, because the abort signal is checked only in the decode
+      // loop (engine completions.ts). On this host class the engine
+      // therefore rejects this send with a busy error, the round
+      // settles on its own, and the Stop button never appears — a
+      // blind stopAndSettle() times out waiting for it. Decide from the
+      // engine's own reply (posted to the main window as soon as the
+      // request lands — before the wire wait above resolves), not from
+      // a render race: a busy error means "already settling" (wait for
+      // the Send button); its absence means the round went in flight
+      // (only possible if the gate's backstop fired while a slow load
+      // was still finishing) and gets stopped.
+      const engineErrBase = await page.evaluate(
+        () => window.__gate.engineErrors.length,
+      );
+      const busyRejected = await page
+        .waitForFunction(
+          (base) => window.__gate.engineErrors.length > base,
+          engineErrBase,
+          { timeout: 5_000, polling: 100 },
+        )
+        .then(() => true)
+        .catch(() => false);
+      if (busyRejected) {
+        await page.waitForFunction(
+          () => !!document.querySelector("[data-chat-send]"),
+          null,
+          { timeout: 30_000 },
+        );
+      } else {
+        await stopAndSettle();
+      }
 
       skip(
         "6. list_files tool",
