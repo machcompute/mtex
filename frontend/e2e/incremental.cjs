@@ -117,9 +117,18 @@ async function editFile(r, relPath, text) {
 // (a terminal status alone is not enough: the previous build's terminal
 // text is still on screen until the new compile starts). Robust even
 // when the build may have finished before waiting started.
+//
+// The cap matches waitEditCompile's below (450 × 200 ms = 90 s), which
+// already carries the same edit→settle wait: in a loaded full 16-suite
+// run the S3 broken build was still "Compiling…" at the old 24 s cap
+// (load avg 5.6/35/56 at the run's start), while idle it settles in
+// seconds — slow under load, not a hang (standalone idle run: all
+// green). The slowest legitimate build measured under that same loaded
+// run was ~11 s (biber); 90 s is ~3.75× the broken build's measured
+// 24 s lower bound.
 async function waitForSettled(r) {
   let text = "", sawNonTerminal = false;
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 450; i++) {
     text = ((await r.status.textContent().catch(() => "")) || "").trim();
     const disabled = await r.page.evaluate(
       () => document.querySelector('button[title^="Recompile"]')?.disabled,
