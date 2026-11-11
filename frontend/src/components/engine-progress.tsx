@@ -42,7 +42,6 @@ export function EngineProgressRow({ state }: { state: EngineProgressState }) {
   const { progress, startedAt } = state;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    setNow(Date.now());
     const t = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(t);
   }, []);
