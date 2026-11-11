@@ -782,22 +782,34 @@ const suite = { r: null, page: null };
     //     listing reports the failed handshake (20 s timeout), and a
     //     send fails into the graceful error box.
     //
-    // Reload first. The gate's stopped round left the engine iframe
-    // stuck in an un-abortable prefill (the engine checks abort only in
-    // its decode loop). The Save below CHANGES the URL, so the handler
-    // calls closeLanLlm() — removing that stuck iframe mid-prefill.
-    // Under this box's load (observed up to ~20) the browser's teardown
-    // of the stuck out-of-process iframe stalled the CDP round trips
-    // the click's post-input phase needs, past the 30 s click budget:
-    // the handler demonstrably ran (dead-port iframe created) and the
-    // page answered CDP evaluates at FATAL time, yet locator.click()
-    // never returned (chatstandalone3 evidence). The engine connection
-    // is per-page, so a reload drops it — the app's documented
-    // recovery path — and check 12's Save then tears down only a fresh
-    // handshake-only connection. The dead-port handshake and the
-    // graceful error box — what this check asserts — are unchanged.
-    await page.reload({ waitUntil: "load" });
-    await r.waitReady();
+    // Reload first, at COMMIT (not load). The gate's stopped round left
+    // the engine iframe stuck in an un-abortable prefill (the engine
+    // checks abort only in its decode loop), and the Save below CHANGES
+    // the URL — so its handler calls closeLanLlm() and removes that
+    // stuck iframe mid-prefill. Under this box's load (observed up to
+    // ~20) the browser's teardown of the stuck out-of-process iframe
+    // stalls the CDP round trips a locator.click()'s post-input phase
+    // needs, past the 30 s click budget: the handler demonstrably ran
+    // (dead-port iframe created) and the page answered CDP evaluates at
+    // FATAL time, yet the click never returned (chatstandalone3).
+    //
+    // A plain waitUntil:"load" reload is a trap too: its commit DOES
+    // drop the stuck document (the point), but the full subresource load
+    // (the texlive wasm) never reaches the `load` event within 30 s
+    // while the GPU is recovering and the box is loaded (chatstandalone4:
+    // "navigated to …", then `load` never fired). So commit the reload at
+    // the instant the navigation commits — exactly when the stuck
+    // iframe's document is destroyed — and let waitReady() (the app
+    // settle: the WASM compile status, up to 180 s) cover hydration +
+    // auto-compile + GPU recovery. The busytex compile is CPU/WASM, not
+    // the WebGPU engine, so it settles regardless. After that, check 12's
+    // Save tears down only a fresh handshake-only connection (no
+    // prefill), so the click returns normally. The dead-port handshake
+    // and the graceful error box — what this check asserts — are
+    // unchanged; no window was widened.
+    await page.reload({ waitUntil: "commit" });
+    if (!(await r.waitReady()))
+      throw new Error("app not ready after the pre-check-12 reload");
     await page.locator('[data-rail="chat"]').click();
     await page.locator("[data-chat-input]").waitFor({ timeout: 10_000 });
 
