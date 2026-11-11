@@ -157,3 +157,7 @@ export async function dropFiles(files: File[], target: EventTarget = window): Pr
   return e;
 }
 void dropEvent;
+
+export const compileButton = () => q<HTMLButtonElement>('button[title^="Recompile"]');
+export const gotoPdfButton = () => qa<HTMLButtonElement>("button").find((b) => b.textContent === "Go to PDF") ?? null;
+export const autoButton = () => q<HTMLButtonElement>('button[title^="Auto recompile"]');

@@ -70,3 +70,13 @@ export const projectNameValue = (): string =>
   (document.querySelector('aside input[title^="Project name"]') as HTMLInputElement | null)?.value ?? "";
 
 export { act, render, screen, within };
+
+export function deferred<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
