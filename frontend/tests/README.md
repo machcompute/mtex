@@ -22,7 +22,9 @@ npx tsc --noEmit && npm run lint  # the other two gates
 * **TeX engine**: `BusyTexCompiler` is replaced by `FakeBusyTex` (`tests/support/fake-busytex.ts`) whose
   `compile()` is answered by a per-test handler; `lib/busytex.ts` itself is tested against a fake `Worker`.
   The LAN LLM engine is the mocked `MachLLM` client (and the vendored SDK is tested over jsdom's real
-  `postMessage`).
+  `postMessage`). Every chat request — LAN, endpoint and the runtime-level fake — goes through the strict
+  engine validation in `tests/support/fake-engine.ts` (last message user/tool, tool calls answered, …), so a
+  mis-ordered or malformed message list fails the test instead of being silently accepted.
 * **Heavy UI libraries**: Monaco and pdf.js are stand-ins (`tests/support/stubs`) that keep the
   behaviour the page relies on (models keyed by path, cursor/selection, `executeEdits`, scroll calls).
   The file panel, GitHub modal, chat drawer + assistant-ui runtime, chat-settings modal and the

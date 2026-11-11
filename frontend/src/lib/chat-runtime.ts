@@ -156,6 +156,13 @@ async function* runRounds(
   const signal = options.abortSignal;
   // The conversation so far, including the triggering user message.
   const wire: WireMessage[] = toWireMessages(options.messages);
+  // A triggering message with no text (nothing to send) would leave an
+  // assistant message last, which every backend rejects with an
+  // unhelpful validation error — say what is wrong instead.
+  const tail = wire[wire.length - 1];
+  if (tail === undefined || (tail.role !== "user" && tail.role !== "tool")) {
+    throw new Error("There is no message to send — type some text first.");
+  }
   // Parts from finished rounds; each round appends its own parts.
   let priorParts: Part[] = [];
 

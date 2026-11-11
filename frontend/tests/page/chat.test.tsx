@@ -881,3 +881,24 @@ describe("multi-turn conversations against a validating engine", () => {
     expect(last[4].content).toBe("thanks");
   });
 });
+
+describe("LAN request-shape errors", () => {
+  it("an engine validation error is shown without pointing at the engine connection (the engine is reachable)", async () => {
+    lan.lanStreamChat.mockRejectedValue(new Error('the last message must have role "user" or "tool"'));
+    await mountEditor(seed);
+    await rail("chat");
+    await send("hi");
+    const box = q("[data-chat-error]")!;
+    expect(box.textContent).toContain('the last message must have role "user" or "tool"');
+    expect(box.textContent).not.toContain("Open chat settings");
+    expect(box.textContent).not.toContain("engine connection");
+  });
+
+  it("other engine failures keep the settings link", async () => {
+    lan.lanStreamChat.mockRejectedValue(new Error("WebGPU is not available"));
+    await mountEditor(seed);
+    await rail("chat");
+    await send("hi");
+    expect(q("[data-chat-error]")!.textContent).toContain("Open chat settings");
+  });
+});

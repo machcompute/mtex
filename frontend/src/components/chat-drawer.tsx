@@ -288,6 +288,12 @@ function ChatEngineProgress({ state }: { state: EngineProgressState | null }) {
   return <EngineProgressRow state={state} />;
 }
 
+// The engine's own request-validation errors (completions.ts
+// validateMessages): the engine IS reachable, the request was malformed —
+// pointing the user at the connection settings would mislead.
+const ENGINE_REQUEST_SHAPE_ERROR =
+  /^(the last message must have role|messages(\[\d+\])?[. ]|a system message is only allowed)/i;
+
 /**
  * The last message is the in-flight or most recent reply: if it ended in
  * error (engine unreachable, endpoint failure, …) show the message.
@@ -319,7 +325,7 @@ function ChatErrorBox({
       className="whitespace-pre-wrap rounded border border-red-300 bg-red-50 px-2 py-1.5 text-xs text-red-700"
     >
       {error}
-      {isLanBackend && (
+      {isLanBackend && !ENGINE_REQUEST_SHAPE_ERROR.test(error) && (
         <>
           {" "}
           <button

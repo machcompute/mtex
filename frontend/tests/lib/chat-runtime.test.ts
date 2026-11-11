@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WireStreamEvent } from "@/lib/chat-wire";
 import type { WireMessage } from "@/lib/chat-wire";
 import type { LanProgress } from "@/lib/lan-llm";
+import { validateWireRequest } from "../support/fake-engine";
 
 const wire = vi.hoisted(() => ({
   rounds: [] as unknown[],
@@ -13,6 +14,8 @@ vi.mock("@/lib/chat-wire", async (orig) => {
   return {
     ...actual,
     streamWireRound: vi.fn(async function* (opts: { messages: WireMessage[]; onEngineProgress?: (p: LanProgress) => void }) {
+      // The strict engine fake: every round's request must be one the real engine accepts.
+      validateWireRequest(opts.messages);
       wire.calls.push({ messages: JSON.parse(JSON.stringify(opts.messages)), onEngineProgress: opts.onEngineProgress });
       const round = wire.rounds.shift() as WireStreamEvent[] | (() => AsyncGenerator<WireStreamEvent>) | undefined;
       if (!round) throw new Error("no scripted round");
@@ -85,6 +88,39 @@ describe("createChatModelAdapter", () => {
     expect(wire.calls[0].messages[0]).toEqual({ role: "system", content: "SYSTEM PROMPT" });
     expect(wire.calls[0].messages[1]).toEqual({ role: "user", content: "go" });
     expect(ctx.exec).not.toHaveBeenCalled();
+  });
+
+  it("turn 2 of a conversation (previous assistant reply with reasoning in the thread) sends [system, user, assistant, user]", async () => {
+    wire.rounds.push(text("Doing well."));
+    const out = await runAdapter(makeCtx(), new AbortController().signal, [
+      { role: "user", content: [{ type: "text", text: "Hi" }] },
+      { role: "assistant", content: [{ type: "reasoning", text: "greeting" }, { type: "text", text: "Hello! How can I assist you with your thesis today?" }] },
+      { role: "user", content: [{ type: "text", text: "how are you?" }] },
+    ]);
+    expect(wire.calls[0].messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
+    expect(wire.calls[0].messages.at(-1)).toEqual({ role: "user", content: "how are you?" });
+    expect(out.at(-1)!.content).toEqual([{ type: "text", id: "t0", text: "Doing well." }]);
+  });
+
+  it("refuses a run whose triggering user message has no text, instead of sending a request ending in an assistant message", async () => {
+    await expect(
+      runAdapter(makeCtx(), new AbortController().signal, [
+        { role: "user", content: [{ type: "text", text: "Hi" }] },
+        { role: "assistant", content: [{ type: "text", text: "Hello" }] },
+        { role: "user", content: [{ type: "image", image: "x" }] },
+      ]),
+    ).rejects.toThrow("There is no message to send");
+    expect(wire.calls).toHaveLength(0);
+  });
+
+  it("a tool round after earlier turns keeps order: …, user, assistant(tool_calls), tool", async () => {
+    wire.rounds.push([call(0, "c9", "list_files", "{}")], text("done"));
+    await runAdapter(makeCtx(), new AbortController().signal, [
+      { role: "user", content: [{ type: "text", text: "one" }] },
+      { role: "assistant", content: [{ type: "text", text: "first" }] },
+      { role: "user", content: [{ type: "text", text: "two" }] },
+    ]);
+    expect(wire.calls[1].messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user", "assistant", "tool"]);
   });
 
   it("runs the agentic loop: round → tool execution → next round with the results", async () => {

@@ -8,10 +8,15 @@ vi.mock("@/lib/lan-llm", () => lan);
 
 import { streamWireRound, toWireMessages, type WireStreamEvent } from "@/lib/chat-wire";
 import { DEFAULT_CHAT_SETTINGS, type ChatSettings } from "@/lib/chat-settings";
+import { validateWireRequest } from "../support/fake-engine";
 
 const msg = (m: unknown) => m as ThreadMessage;
 const user = (text: string) => msg({ role: "user", content: [{ type: "text", text }] });
 const assistant = (...content: unknown[]) => msg({ role: "assistant", content });
+
+// Every mapped thread is checked against the strict engine fake as the request
+// the runtime would send (system prompt + wire).
+const asRequest = (wire: ReturnType<typeof toWireMessages>) => [{ role: "system", content: "sys" }, ...wire];
 
 describe("toWireMessages", () => {
   it("skips system messages and concatenates a user message's text parts", () => {
@@ -49,9 +54,11 @@ describe("toWireMessages", () => {
           { id: "c2", type: "function", function: { name: "read_file", arguments: '{"path":"main.tex"}' } },
         ],
       },
-      // c2 has no result yet: no tool message for it
       { role: "tool", tool_call_id: "c1", content: "Main file: main.tex" },
+      // c2 never got a result (run stopped): answered with a terminal one, never left dangling
+      { role: "tool", tool_call_id: "c2", content: "ERROR: the conversation was stopped before this tool ran." },
     ]);
+    expect(() => validateWireRequest([{ role: "system", content: "s" }, ...out])).not.toThrow();
   });
 
   it("a text part after pending tool calls starts a new assistant message", () => {
@@ -110,6 +117,80 @@ const run = (settings: ChatSettings, signal = new AbortController().signal) =>
     tools: [{ type: "function" }],
     signal,
   });
+
+describe("toWireMessages: multi-turn threads keep thread order (regression: 'the last message must have role user or tool')", () => {
+  const reasoned = (t: string) => assistant({ type: "reasoning", text: "thinking" }, { type: "text", text: t });
+
+  it("[user, assistant(reasoning+text), user] stays in order and ends with the user message", () => {
+    const out = toWireMessages([user("Hi"), reasoned("Hello! How can I assist you?"), user("how are you?")]);
+    expect(out).toEqual([
+      { role: "user", content: "Hi" },
+      { role: "assistant", content: "Hello! How can I assist you?" },
+      { role: "user", content: "how are you?" },
+    ]);
+    expect(() => validateWireRequest(asRequest(out))).not.toThrow();
+  });
+
+  it("a long alternating conversation maps one-to-one", () => {
+    const out = toWireMessages([user("1"), reasoned("a"), user("2"), reasoned("b"), user("3")]);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant", "user"]);
+    expect(() => validateWireRequest(asRequest(out))).not.toThrow();
+  });
+
+  it("a tool turn in the middle: assistant(tool_calls) → tool → assistant text, then the next user message", () => {
+    const out = toWireMessages([
+      user("what files?"),
+      assistant(
+        { type: "tool-call", toolCallId: "c1", toolName: "list_files", args: {}, result: "main.tex" },
+        { type: "text", text: "Just main.tex." },
+      ),
+      user("thanks"),
+    ]);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant", "user"]);
+    expect(() => validateWireRequest(asRequest(out))).not.toThrow();
+  });
+
+  it("a tool-only assistant message (no text) before the next user message is closed with its results", () => {
+    const out = toWireMessages([
+      user("go"),
+      assistant({ type: "tool-call", toolCallId: "c1", toolName: "compile", args: {}, result: "ok" }),
+      user("next"),
+    ]);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "tool", "user"]);
+    expect(() => validateWireRequest(asRequest(out))).not.toThrow();
+  });
+
+  it("assistant messages that carry nothing (error / cancelled / reasoning-only) are dropped, not emitted empty", () => {
+    const out = toWireMessages([user("a"), assistant(), user("b"), assistant({ type: "reasoning", text: "only thinking" }), user("c")]);
+    expect(out).toEqual([
+      { role: "user", content: "a" },
+      { role: "user", content: "b" },
+      { role: "user", content: "c" },
+    ]);
+    expect(() => validateWireRequest(asRequest(out))).not.toThrow();
+  });
+
+  it("an interrupted tool turn (calls without results) is closed so the next user message is valid", () => {
+    const out = toWireMessages([
+      user("go"),
+      assistant({ type: "tool-call", toolCallId: "c1", toolName: "compile", args: {} }, { type: "tool-call", toolCallId: "c2", toolName: "list_files", args: {} }),
+      user("never mind"),
+    ]);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "tool", "tool", "user"]);
+    expect(() => validateWireRequest(asRequest(out))).not.toThrow();
+  });
+
+  it("the strict fake rejects the old [user, user, assistant] shape (the screenshot's error)", () => {
+    expect(() =>
+      validateWireRequest([
+        { role: "system", content: "s" },
+        { role: "user", content: "Hi" },
+        { role: "user", content: "how are you?" },
+        { role: "assistant", content: "Hello" },
+      ]),
+    ).toThrow('the last message must have role "user" or "tool"');
+  });
+});
 
 describe("endpoint backend (e2e chat check 12: direct SSE, Bearer key)", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
