@@ -3,7 +3,7 @@
 // plumbing: the page <-> engine wire protocol that the old browser suite
 // sniffed from a live engine, here driven by hand.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MachLLM } from "@/lib/mach-llm-sdk";
+import { MachLLM, type LanProgress } from "@/lib/mach-llm-sdk";
 
 const ORIGIN = "http://engine.test:3001";
 const NS = "mach-llm";
@@ -19,7 +19,7 @@ function fromEngine(iframe: HTMLIFrameElement, data: unknown, origin = ORIGIN) {
   window.dispatchEvent(new MessageEvent("message", { data, origin, source: iframe.contentWindow }));
 }
 
-async function connect(opts: { timeoutMs?: number; onProgress?: (p: never) => void } = {}) {
+async function connect(opts: { timeoutMs?: number; onProgress?: (p: LanProgress) => void } = {}) {
   const p = MachLLM.connect({ engineUrl: ORIGIN + "/", ...opts });
   const iframe = iframeOf();
   const posted: Posted[] = [];

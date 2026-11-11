@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildTar } from "../support/tar-builder";
-import { installCtanStub, simplePkg, sty, type CtanStub, type Pkg } from "../support/ctan-fixtures";
+import { installCtanStub, simplePkg, sty, type Pkg } from "../support/ctan-fixtures";
 import { existsPath, listDir, readText, resetOpfs, seedFile } from "../support/memfs";
 
 // xz is the only thing mocked inside the store: containers are plain tars in
@@ -15,7 +15,7 @@ vi.mock("xz-decompress", () => ({
 
 type Store = typeof import("@/lib/ctan-store");
 let store: Store;
-let stub: CtanStub;
+let stub: ReturnType<typeof installCtanStub>;
 
 /** Fresh module state (the store caches the tlpdb and the op chain at module level). */
 async function boot(pkgs: Pkg[], basic?: string[], keepStore = false): Promise<Store> {

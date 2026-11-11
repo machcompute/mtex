@@ -32,7 +32,7 @@ const endpointSettings = (over: Partial<ChatSettings> = {}): ChatSettings => ({
   endpointModel: "gpt-mock",
   ...over,
 });
-const useSettings = (s: ChatSettings) => localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify(s));
+const applySettings = (s: ChatSettings) => localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify(s));
 
 // --- an OpenAI-compatible endpoint stub ------------------------------------------
 type Capture = { url: string; headers: Record<string, string>; body: { model?: string; stream: boolean; messages: { role: string; content: string }[]; tools: unknown[] } };
@@ -94,7 +94,7 @@ const system = (i: number) => bodyOf(i).messages[0].content;
 
 describe("endpoint backend (chat check 12)", () => {
   it("the rail carries Files/Search/Chat/Log; Chat opens the pane with an input and a send button", async () => {
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     await mountEditor(seed);
     await rail("chat");
     expect(railActive()).toEqual(["chat"]);
@@ -104,7 +104,7 @@ describe("endpoint backend (chat check 12)", () => {
   });
 
   it("streams the reply into the thread; the page calls the endpoint DIRECTLY with the user's Bearer key, model and stream:true (never /api/chat)", async () => {
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     scripted.push(textReply("pong"));
     await mountEditor(seed);
     await rail("chat");
@@ -124,7 +124,7 @@ describe("endpoint backend (chat check 12)", () => {
   });
 
   it("the system prompt carries the active file, and the cursor line/column (read at send time)", async () => {
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     scripted.push(textReply("ok"));
     await mountEditor(seed);
     monacoState.selection = new FakeSelection(3, 7, 3, 7);
@@ -137,7 +137,7 @@ describe("endpoint backend (chat check 12)", () => {
   });
 
   it("a selection is quoted with its line range so 'fix this' has a target", async () => {
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     scripted.push(textReply("ok"));
     await mountEditor(seed);
     monacoState.selection = new FakeSelection(3, 1, 3, 6); // "Hello"
@@ -147,7 +147,7 @@ describe("endpoint backend (chat check 12)", () => {
   });
 
   it("with a binary file active the prompt says so; with a stale cursor on a closed model nothing is quoted", async () => {
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     scripted.push(textReply("ok"));
     await mountEditor({ ...seed, files: { ...seed.files, "pic.png": new Uint8Array([137, 80, 78, 71, 255]) } as never, openPaths: ["main.tex", "pic.png"], activePath: "pic.png" });
     await rail("chat");
@@ -157,7 +157,7 @@ describe("endpoint backend (chat check 12)", () => {
   });
 
   it("the system prompt is rebuilt every round (an accepted edit changes the file the model sees next)", async () => {
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     scripted.push(toolReply("e1", "apply_edit", { path: "main.tex", old: "Hello world", new: "Hello EDITED" }), textReply("Done."));
     await mountEditor(seed);
     await rail("chat");
@@ -172,7 +172,7 @@ describe("endpoint backend (chat check 12)", () => {
 
 describe("agentic tools (chat checks 6-9)", () => {
   async function chatWith(replies: (() => Response)[]) {
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     scripted.push(...replies);
     await mountEditor(seed);
     await rail("chat");
@@ -299,7 +299,7 @@ describe("agentic tools (chat checks 6-9)", () => {
   });
 
   it("apply_edit refuses binary files", async () => {
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     scripted.push(toolReply("e1", "apply_edit", { path: "pic.png", old: "a", new: "b" }), textReply("ok"));
     await mountEditor({ ...seed, files: { ...seed.files, "pic.png": new Uint8Array([137, 80, 78, 71, 255]) } as never });
     await rail("chat");
@@ -339,7 +339,7 @@ describe("agentic tools (chat checks 6-9)", () => {
   it("Clear empties the conversation; the Log pane still shows the build log (check 10)", async () => {
     FakeBusyTex.autoReady = true;
     FakeBusyTex.handler = async () => ({ pdf: new Uint8Array([1]), log: "THE BUILD LOG", synctex: null, buildState: null });
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     scripted.push(textReply("pong"));
     await mountEditor(seed);
     await advance(10);
@@ -364,7 +364,7 @@ describe("agentic tools (chat checks 6-9)", () => {
 
 describe("endpoint errors", () => {
   it("an HTTP failure shows in the error box (no settings link for the endpoint backend)", async () => {
-    useSettings(endpointSettings());
+    applySettings(endpointSettings());
     scripted.push(() => new Response(JSON.stringify({ error: "invalid api key" }), { status: 401 }));
     await mountEditor(seed);
     await rail("chat");
@@ -374,7 +374,7 @@ describe("endpoint errors", () => {
   });
 
   it("no endpoint address configured: tells the user to open the chat settings", async () => {
-    useSettings(endpointSettings({ endpointUrl: "" }));
+    applySettings(endpointSettings({ endpointUrl: "" }));
     await mountEditor(seed);
     await rail("chat");
     await send("hi");

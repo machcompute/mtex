@@ -18,6 +18,13 @@ const eslintConfig = defineConfig([
     // first request (minified vendor JS — never lint).
     ".texlive-cache/**",
   ]),
+  // The unit-test stubs stand in for heavy components (Monaco, pdf.js, the
+  // packages modal) and deliberately record their props/state in module-level
+  // test controls; the React Compiler's purity rule is meant for app code.
+  {
+    files: ["tests/support/stubs/**"],
+    rules: { "react-hooks/immutability": "off" },
+  },
 ]);
 
 export default eslintConfig;

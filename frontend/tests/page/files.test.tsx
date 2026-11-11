@@ -4,7 +4,7 @@ import { fireEvent } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { FakeBusyTex } from "../support/fake-busytex";
 import { monacoState } from "../support/stubs/monaco";
-import { click, newFile, openFile, q, qa, rail, renameFile, rowFor, tab, typeInEditor } from "../support/page-actions";
+import { click, newFile, q, qa, rail, renameFile, rowFor, tab, typeInEditor } from "../support/page-actions";
 import { activeTab, advance, fileRows, mountEditor, noticeText, openTabs, railActive, settle, statusText, stored } from "../support/page-utils";
 
 beforeEach(() => {

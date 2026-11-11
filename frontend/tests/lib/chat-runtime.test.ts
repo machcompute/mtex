@@ -100,7 +100,7 @@ describe("createChatModelAdapter", () => {
     // the system prompt is rebuilt every round
     expect(ctx.system).toHaveBeenCalledTimes(2);
     // the final yield carries both rounds: the tool part (with result) and the answer
-    const parts = out.at(-1)!.content! as { type: string; toolName?: string; result?: string; text?: string }[];
+    const parts = out.at(-1)!.content! as unknown as { type: string; toolName?: string; result?: string; text?: string }[];
     expect(parts.map((p) => p.type)).toEqual(["tool-call", "text"]);
     expect(parts[0]).toMatchObject({ toolName: "list_files", result: "Main file: main.tex", isError: false });
     expect(parts[1].text).toBe("You have main.tex.");
@@ -112,14 +112,14 @@ describe("createChatModelAdapter", () => {
     ctx.exec.mockResolvedValue('ERROR: no file "x"');
     const out = await runAdapter(ctx);
     expect(ctx.exec.mock.calls[0][0]).toBe("gen0-0");
-    const tool = (out.at(-1)!.content as { type: string; isError?: boolean }[]).find((p) => p.type === "tool-call");
+    const tool = (out.at(-1)!.content as unknown as { type: string; isError?: boolean }[]).find((p) => p.type === "tool-call");
     expect(tool?.isError).toBe(true);
   });
 
   it("ends a stuck run after 12 tool rounds with a note", async () => {
     for (let i = 0; i < 12; i++) wire.rounds.push([call(0, `c${i}`, "list_files", "{}")]);
     const out = await runAdapter(makeCtx());
-    const last = out.at(-1)!.content as { type: string; text?: string }[];
+    const last = out.at(-1)!.content as unknown as { type: string; text?: string }[];
     expect(last.at(-1)).toMatchObject({ type: "text", text: expect.stringContaining("stopped: the model kept calling tools") });
     expect(wire.calls).toHaveLength(12);
   });
@@ -162,7 +162,7 @@ describe("createChatModelAdapter", () => {
       threw = e;
     }
     expect(threw).toMatchObject({ name: "AbortError" });
-    const parts = seen.at(-1)!.content as { toolCallId: string; result?: string }[];
+    const parts = seen.at(-1)!.content as unknown as { toolCallId: string; result?: string }[];
     expect(parts.find((p) => p.toolCallId === "e1")?.result).toContain("not applied");
   });
 

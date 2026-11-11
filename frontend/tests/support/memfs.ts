@@ -26,7 +26,7 @@ const faults: FaultPlan = { failWrites: false, failRoot: false, gate: null };
 
 export class MemFile {
   readonly kind = "file" as const;
-  data = new Uint8Array(0);
+  data: Uint8Array<ArrayBuffer> = new Uint8Array(0);
   constructor(readonly name: string) {}
 
   async getFile() {
@@ -46,13 +46,10 @@ export class MemFile {
 
   async createWritable() {
     if (faults.failWrites) throw domError("InvalidModificationError", "write failed");
-    let pending: Uint8Array | null = null;
+    let pending: Uint8Array<ArrayBuffer> | null = null;
     return {
       write: async (chunk: Uint8Array | string) => {
-        pending =
-          typeof chunk === "string"
-            ? new TextEncoder().encode(chunk)
-            : new Uint8Array(chunk);
+        pending = typeof chunk === "string" ? new Uint8Array(new TextEncoder().encode(chunk)) : new Uint8Array(chunk);
       },
       close: async () => {
         // Real writables commit on close; an empty write leaves an empty file.
