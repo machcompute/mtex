@@ -93,6 +93,23 @@ describe("build state persistence and seeding (S1/S2)", () => {
   });
 });
 
+describe("main files with dots in the name (#14a)", () => {
+  it("a.text.tex compiles as the main file and its build state is keyed by the stem 'a.text'", async () => {
+    FakeBusyTex.handler = pipeline("bibtex8");
+    const { id } = await mountEditor({ name: "dots", mainPath: "a.text.tex", files: { "a.text.tex": main("DOTS"), "refs.bib": refs("1984") } });
+    await advance(10);
+    expect(FakeBusyTex.calls[0].main).toBe("a.text.tex");
+    expect(pdfState.text()).toContain("DOTS");
+    const st = (await loadBuildState(id!, "a.text.tex"))!;
+    expect(Array.from(st.aux!)).toEqual([1]);
+    expect(existsPath(`artifacts/${id}/build/a.text.aux`)).toBe(true);
+    await typeInEditor(main("DOTS2"));
+    await click(compileButton());
+    await advance(10);
+    expect(Array.from(FakeBusyTex.calls[1].files["a.text.aux"] as Uint8Array)).toEqual([1]); // seeded under the right name
+  });
+});
+
 describe("whole-build cache (S1 build 3, part A)", () => {
   it("an unchanged recompile is answered from the cache: the engine is not run and the cached PDF is shown", async () => {
     FakeBusyTex.handler = pipeline("biber");

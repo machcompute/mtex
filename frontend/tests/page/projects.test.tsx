@@ -218,6 +218,29 @@ describe("editor project load and persistence (projects.cjs)", () => {
     expect(q("[data-save-state]")!.textContent).toContain("Saved");
   });
 
+  it("the thumbnail and build artifacts never appear in the file list (dashboard: preview.png not in the file list)", async () => {
+    const id = await createProject("Beta doc", { "main.tex": "b" }, { mainPath: "main.tex", openPaths: ["main.tex"], activePath: "main.tex" });
+    await savePreview(id, new Uint8Array([137, 80, 78, 71]));
+    localStorage.setItem(ACTIVE_PROJECT_KEY, id);
+    await mountEditor();
+    expect(projectNameValue()).toBe("Beta doc");
+    expect(fileRows()).toEqual(["main.tex"]);
+  });
+
+  it("delete-to-empty: deleting every project and opening the editor restores one fresh default with its files", async () => {
+    const id = await createProject("Doomed", { "main.tex": "x" });
+    localStorage.setItem(ACTIVE_PROJECT_KEY, id);
+    const { deleteProject } = await import("@/lib/opfs");
+    await deleteProject(id);
+    expect(await listProjects()).toEqual([]);
+    await mountEditor();
+    const list = await listProjects();
+    expect(list).toHaveLength(1);
+    expect(list[0].name).toBe("LaTeX project");
+    expect(fileRows().sort()).toEqual(["main.tex", "refs.bib"]);
+    expect((await loadProject(list[0].id)).files).toEqual(DEFAULT_FILES);
+  });
+
   it("the open-time compile of a seeded project uses the loaded files, and the cache dir never leaks into the file list", async () => {
     FakeBusyTex.autoReady = true;
     const { id } = await mountEditor({ name: "t", mainPath: "main.tex", files: { "main.tex": "x" } });
