@@ -24,6 +24,10 @@ import {
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import { useComposerSend } from "@assistant-ui/core/react";
+import {
+  EngineProgressRow,
+  type EngineProgressState,
+} from "@/components/engine-progress";
 import { IconGear, IconSpinner } from "@/components/icons";
 
 // A file change the assistant proposed and the user has not decided yet.
@@ -87,6 +91,8 @@ type Props = {
   onOpenSettings: () => void;
   /** LAN backend in use → the error box links to the settings modal. */
   isLanBackend: boolean;
+  /** Latest engine model-load progress (null when idle / not loading). */
+  engineProgress?: EngineProgressState | null;
 };
 
 export default function ChatDrawer({
@@ -98,6 +104,7 @@ export default function ChatDrawer({
   onClear,
   onOpenSettings,
   isLanBackend,
+  engineProgress = null,
 }: Props) {
   return (
     <div
@@ -149,6 +156,7 @@ export default function ChatDrawer({
                 onDecide={onDecideEdit}
               />
             ))}
+            <ChatEngineProgress state={engineProgress} />
             <ChatErrorBox
               isLanBackend={isLanBackend}
               onOpenSettings={onOpenSettings}
@@ -270,6 +278,14 @@ function ChatToolCallPart({
       </div>
     </div>
   );
+}
+
+/** The model load / download indicator: shown only while a run is in
+ *  flight (the runtime clears the state once the reply starts streaming). */
+function ChatEngineProgress({ state }: { state: EngineProgressState | null }) {
+  const running = useAuiState((s) => s.thread.isRunning);
+  if (!running || state === null) return null;
+  return <EngineProgressRow state={state} />;
 }
 
 /**

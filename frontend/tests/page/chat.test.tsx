@@ -18,7 +18,7 @@ import { LanEngineUnreachableError } from "@/lib/lan-llm";
 import { FakeBusyTex } from "../support/fake-busytex";
 import { click, openFile, q, qa, rail } from "../support/page-actions";
 import { FakeSelection, monacoState } from "../support/stubs/monaco";
-import { act, advance, mountEditor, railActive, settle } from "../support/page-utils";
+import { act, advance, deferred, mountEditor, railActive, settle } from "../support/page-utils";
 import { ctan } from "../support/stubs/ctan";
 
 const MAIN = "\\documentclass{article}\n\\begin{document}\nHello world\n\\end{document}\n";
@@ -483,5 +483,161 @@ describe("LAN backend (chat checks 3, 5, 11-13)", () => {
     expect(assistantText()).toContain("back online");
     expect(q("[data-chat-error]")).toBeNull();
     void openFile;
+  });
+});
+
+describe("LAN model load / download indicator", () => {
+  type Ev = { stage: string; message: string; progress: number | null };
+  const ev = (stage: string, progress: number | null, message = `${stage} message`): Ev => ({ stage, message, progress });
+  const reply = (chunks: unknown[]) => ({
+    completion: null,
+    controller: new AbortController(),
+    async *[Symbol.asyncIterator]() {
+      for (const c of chunks) yield c;
+    },
+  });
+  const sayChunks = (t: string) => [{ choices: [{ delta: { content: t }, finish_reason: null }] }, { choices: [{ delta: {}, finish_reason: "stop" }] }];
+
+  // A LAN send that blocks in the "engine is loading" phase until released;
+  // `emit` plays engine progress events into the subscription the chat passed.
+  function gatedEngine() {
+    const gate = deferred<void>();
+    let onProgress: ((p: Ev) => void) | undefined;
+    lan.lanStreamChat.mockImplementation(async (_u: string, _p: unknown, signal: AbortSignal, cb?: (p: Ev) => void) => {
+      onProgress = cb;
+      // like the real engine request, a Stop rejects the pending load with an AbortError
+      await Promise.race([
+        gate.promise,
+        new Promise<never>((_, rej) =>
+          signal.addEventListener("abort", () => rej(Object.assign(new Error("aborted"), { name: "AbortError" }))),
+        ),
+      ]);
+      return reply(sayChunks("model says hi"));
+    });
+    return {
+      emit: async (p: Ev) => {
+        await act(async () => onProgress!(p));
+      },
+      release: async () => {
+        gate.resolve();
+        await advance(50);
+      },
+    };
+  }
+  const row = () => q("[data-chat-engine-progress]");
+  const part = (n: string) => q(`[data-chat-engine-progress] [data-engine-progress="${n}"]`);
+  const sendOnly = async (text: string) => {
+    fireEvent.change(input(), { target: { value: text } });
+    await settle();
+    await click(q("[data-chat-send]"), "send");
+    await advance(50);
+  };
+
+  it("shows nothing for a send that never reports progress", async () => {
+    lan.lanStreamChat.mockResolvedValue(reply(sayChunks("quick")));
+    await mountEditor(seed);
+    await rail("chat");
+    expect(row()).toBeNull();
+    await send("hi");
+    expect(assistantText()).toContain("quick");
+    expect(row()).toBeNull();
+  });
+
+  it("shows the stage label and a % bar while the model downloads, updating on every event", async () => {
+    const engine = gatedEngine();
+    await mountEditor(seed);
+    await rail("chat");
+    await sendOnly("hi");
+    expect(row()).toBeNull(); // nothing yet: the engine has not reported
+
+    await engine.emit(ev("download", 0.25, "Downloading qwen3-27b.gguf"));
+    expect(row()).not.toBeNull();
+    expect(row()!.getAttribute("data-stage")).toBe("download");
+    expect(part("label")!.textContent).toBe("Downloading model…");
+    expect(part("message")!.textContent).toBe("Downloading qwen3-27b.gguf");
+    expect(part("pct")!.textContent).toBe("25%");
+    const bar = part("bar")!;
+    expect(bar.getAttribute("role")).toBe("progressbar");
+    expect(bar.getAttribute("aria-valuenow")).toBe("25");
+    expect(bar.hasAttribute("data-indeterminate")).toBe(false);
+    expect((bar.firstElementChild as HTMLElement).style.width).toBe("25%");
+
+    await engine.emit(ev("download", 0.5, "Downloading qwen3-27b.gguf"));
+    expect(part("pct")!.textContent).toBe("50%");
+    expect((part("bar")!.firstElementChild as HTMLElement).style.width).toBe("50%");
+
+    // the stage moves on: label follows
+    await engine.emit(ev("quantize", 0.9, "Quantizing"));
+    expect(row()!.getAttribute("data-stage")).toBe("quantize");
+    expect(part("label")!.textContent).toBe("Preparing model weights…");
+    expect(part("pct")!.textContent).toBe("90%");
+    await engine.release();
+  });
+
+  it("is indeterminate with an elapsed clock when progress is null, and keeps counting across a long download", async () => {
+    const engine = gatedEngine();
+    await mountEditor(seed);
+    await rail("chat");
+    await sendOnly("hi");
+    await engine.emit(ev("gpu", null, "Requesting a GPU adapter"));
+    expect(part("label")!.textContent).toBe("Initializing GPU…");
+    expect(part("pct")).toBeNull();
+    expect(part("bar")!.hasAttribute("data-indeterminate")).toBe(true);
+    expect(part("bar")!.hasAttribute("aria-valuenow")).toBe(false);
+    expect(part("elapsed")!.textContent).toBe("0s");
+
+    await advance(5_000);
+    expect(part("elapsed")!.textContent).toBe("5s");
+
+    // a ten-minute download: the row is still there, still ticking, and the elapsed
+    // clock runs from the FIRST event of the load, not from the latest one
+    await engine.emit(ev("download", 0.01));
+    await advance(10 * 60_000);
+    await engine.emit(ev("download", 0.97));
+    expect(row()).not.toBeNull();
+    expect(part("pct")!.textContent).toBe("97%");
+    expect(part("elapsed")!.textContent).toBe("10m 05s");
+    await engine.release();
+  });
+
+  it("clears when the reply starts streaming (the ready event too) and ignores late events", async () => {
+    const engine = gatedEngine();
+    await mountEditor(seed);
+    await rail("chat");
+    await sendOnly("hi");
+    await engine.emit(ev("download", 0.99));
+    expect(row()).not.toBeNull();
+    await engine.emit(ev("ready", 1, "Model ready"));
+    expect(row()).toBeNull(); // "ready" alone removes it (the reply has not even started)
+    await engine.emit(ev("prefill", null));
+    expect(row()).not.toBeNull(); // still the same run, still waiting on the engine
+    await engine.release();
+    expect(assistantText()).toContain("model says hi");
+    expect(row()).toBeNull(); // the reply streamed
+    await engine.emit(ev("download", 0.3)); // a stale event from the long-lived connection
+    expect(row()).toBeNull();
+  });
+
+  it("goes away when the engine fails, and when the user stops the run", async () => {
+    // failure
+    lan.lanStreamChat.mockImplementation(async (_u: string, _p: unknown, _s: AbortSignal, cb?: (p: Ev) => void) => {
+      cb!(ev("download", 0.4));
+      throw new LanEngineUnreachableError("http://localhost:3001", new Error("gone"));
+    });
+    await mountEditor(seed);
+    await rail("chat");
+    await send("hi");
+    expect(q("[data-chat-error]")).not.toBeNull();
+    expect(row()).toBeNull();
+
+    // stop mid-download
+    const engine = gatedEngine();
+    await sendOnly("again");
+    await engine.emit(ev("download", 0.1));
+    expect(row()).not.toBeNull();
+    await click(q("[data-chat-stop]"), "stop");
+    await advance(50);
+    expect(row()).toBeNull();
+    await engine.release();
   });
 });

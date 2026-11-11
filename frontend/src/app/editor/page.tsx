@@ -52,6 +52,7 @@ import {
 } from "@/components/icons";
 import GitHubModal, { type PullRequest, type PushRequest } from "@/components/github-modal";
 import PackagesModal from "@/components/packages-modal";
+import { useEngineProgress } from "@/components/engine-progress";
 import ChatDrawer, { type PendingEdit } from "@/components/chat-drawer";
 import ChatSettingsModal from "@/components/chat-settings-modal";
 import {
@@ -908,10 +909,12 @@ export default function EditorPage() {
   // agentic loop (model round → tool execution → next round) runs inside
   // the adapter's run(); this page's executeChatTool — with the apply_edit
   // user-approval gate — is the only place tools ever execute.
+  const engineProgress = useEngineProgress();
   const chatRuntimeCtx: ChatRuntimeCtx = {
     getSettings: () => chatSettings,
     buildSystemPrompt: buildChatSystemPrompt,
     executeTool: executeChatTool,
+    onEngineProgress: engineProgress.report,
   };
   const chatModelAdapter = createChatModelAdapter(() => chatRuntimeCtx);
   const runtime = useLocalRuntime(chatModelAdapter);
@@ -2918,6 +2921,7 @@ export default function EditorPage() {
             onClear={clearChat}
             onOpenSettings={() => setChatSettingsModalOpen(true)}
             isLanBackend={chatSettings.backend === "lan"}
+            engineProgress={engineProgress.state}
           />
           {leftPane === "log" ? (
             <div className="flex min-w-0 flex-1 flex-col bg-white">

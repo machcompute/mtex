@@ -46,8 +46,13 @@ export type ChatRuntimeCtx = {
     name: string,
     argsRaw: string,
   ) => Promise<string>;
-  /** Engine progress (model load stages) while the LAN backend is busy. */
-  onEngineProgress?: (p: LanProgress) => void;
+  /**
+   * Engine progress (model load stages) while the LAN backend is busy.
+   * Called with `null` when the run no longer waits on the engine (reply
+   * started streaming, run ended or failed) and at run start (clears
+   * anything stale) — the indicator should disappear.
+   */
+  onEngineProgress?: (p: LanProgress | null) => void;
 };
 
 // Safety cap on tool rounds (the old loop was unbounded): a model that
@@ -120,9 +125,35 @@ async function* runLoop(
 ): AsyncGenerator<ChatModelRunResult> {
   const ctx = getCtx();
   const settings = ctx.getSettings();
-  const signal = options.abortSignal;
-  throwIfAborted(signal);
+  throwIfAborted(options.abortSignal);
 
+  // Engine progress only matters until the reply starts: late events from
+  // the (long-lived) connection subscription are dropped after that.
+  let waitingOnEngine = true;
+  const stopWaiting = () => {
+    if (!waitingOnEngine) return;
+    waitingOnEngine = false;
+    ctx.onEngineProgress?.(null);
+  };
+  const onEngineProgress = (p: LanProgress) => {
+    if (waitingOnEngine) ctx.onEngineProgress?.(p);
+  };
+  ctx.onEngineProgress?.(null);
+  try {
+    yield* runRounds(options, ctx, settings, onEngineProgress, stopWaiting);
+  } finally {
+    stopWaiting();
+  }
+}
+
+async function* runRounds(
+  options: ChatModelRunOptions,
+  ctx: ChatRuntimeCtx,
+  settings: ChatSettings,
+  onEngineProgress: (p: LanProgress) => void,
+  stopWaiting: () => void,
+): AsyncGenerator<ChatModelRunResult> {
+  const signal = options.abortSignal;
   // The conversation so far, including the triggering user message.
   const wire: WireMessage[] = toWireMessages(options.messages);
   // Parts from finished rounds; each round appends its own parts.
@@ -169,8 +200,9 @@ async function* runLoop(
       messages: roundWire,
       tools: CHAT_TOOLS,
       signal,
-      onEngineProgress: ctx.onEngineProgress,
+      onEngineProgress,
     })) {
+      stopWaiting();
       if (ev.type === "text") {
         text += ev.text;
       } else if (ev.type === "reasoning") {

@@ -2,14 +2,18 @@ import type { ChatModelRunResult } from "@assistant-ui/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WireStreamEvent } from "@/lib/chat-wire";
 import type { WireMessage } from "@/lib/chat-wire";
+import type { LanProgress } from "@/lib/lan-llm";
 
-const wire = vi.hoisted(() => ({ rounds: [] as unknown[], calls: [] as { messages: WireMessage[] }[] }));
+const wire = vi.hoisted(() => ({
+  rounds: [] as unknown[],
+  calls: [] as { messages: WireMessage[]; onEngineProgress?: (p: LanProgress) => void }[],
+}));
 vi.mock("@/lib/chat-wire", async (orig) => {
   const actual = await orig<typeof import("@/lib/chat-wire")>();
   return {
     ...actual,
-    streamWireRound: vi.fn(async function* (opts: { messages: WireMessage[] }) {
-      wire.calls.push({ messages: JSON.parse(JSON.stringify(opts.messages)) });
+    streamWireRound: vi.fn(async function* (opts: { messages: WireMessage[]; onEngineProgress?: (p: LanProgress) => void }) {
+      wire.calls.push({ messages: JSON.parse(JSON.stringify(opts.messages)), onEngineProgress: opts.onEngineProgress });
       const round = wire.rounds.shift() as WireStreamEvent[] | (() => AsyncGenerator<WireStreamEvent>) | undefined;
       if (!round) throw new Error("no scripted round");
       if (typeof round === "function") yield* round();
@@ -183,5 +187,55 @@ describe("createChatModelAdapter", () => {
     const getSettings = vi.fn(() => DEFAULT_CHAT_SETTINGS);
     await runAdapter(makeCtx({ getSettings }));
     expect(getSettings).toHaveBeenCalled();
+  });
+
+  describe("engine progress (model load indicator)", () => {
+    const ev = (stage: string, progress: number | null, message = stage): LanProgress => ({ stage, message, progress });
+
+    it("forwards engine events to ctx.onEngineProgress while the engine loads, and clears (null) when the reply starts", async () => {
+      const seen: (LanProgress | null)[] = [];
+      wire.rounds.push(async function* () {
+        // the engine streams progress BEFORE the first token
+        wire.calls[0].onEngineProgress!(ev("download", 0.25, "Downloading weights"));
+        wire.calls[0].onEngineProgress!(ev("download", 0.5, "Downloading weights"));
+        yield { type: "text", text: "hi" } as WireStreamEvent;
+        yield { type: "done", finishReason: "stop" } as WireStreamEvent;
+      } as never);
+      const gen = createChatModelAdapter(() => makeCtx({ onEngineProgress: (p) => seen.push(p) })).run({
+        messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+        abortSignal: new AbortController().signal,
+      } as never) as AsyncGenerator<ChatModelRunResult>;
+      await gen.next();
+      // run start clears anything stale, then both events arrive, then the first token clears
+      expect(seen).toEqual([null, ev("download", 0.25, "Downloading weights"), ev("download", 0.5, "Downloading weights"), null]);
+      for await (const _ of gen) void _;
+    });
+
+    it("drops late events from the long-lived connection subscription once the reply streamed (or the run ended)", async () => {
+      const seen: (LanProgress | null)[] = [];
+      wire.rounds.push(text("ok"));
+      await runAdapter(makeCtx({ onEngineProgress: (p) => seen.push(p) }));
+      const before = seen.length;
+      wire.calls[0].onEngineProgress!(ev("prefill", 0.9));
+      expect(seen).toHaveLength(before);
+      expect(seen.at(-1)).toBeNull();
+    });
+
+    it("a failed or aborted run clears the indicator too", async () => {
+      const seen: (LanProgress | null)[] = [];
+      wire.rounds.push(async function* () {
+        wire.calls[0].onEngineProgress!(ev("download", null));
+        throw new Error("engine blew up");
+        yield { type: "done", finishReason: null } as WireStreamEvent;
+      } as never);
+      await expect(runAdapter(makeCtx({ onEngineProgress: (p) => seen.push(p) }))).rejects.toThrow("engine blew up");
+      expect(seen).toEqual([null, ev("download", null), null]);
+    });
+
+    it("works without an onEngineProgress callback", async () => {
+      wire.rounds.push(text("fine"));
+      const out = await runAdapter(makeCtx());
+      expect(out.at(-1)!.content).toEqual([{ type: "text", id: "t0", text: "fine" }]);
+    });
   });
 });
