@@ -12,7 +12,14 @@ const lan = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/lan-llm", async (orig) => {
   const actual = await orig<typeof import("@/lib/lan-llm")>();
-  return { ...actual, lanStreamChat: lan.lanStreamChat, lanListModels: lan.lanListModels, lanEngineDefaultModel: lan.lanEngineDefaultModel, lanPreloadModel: lan.lanPreloadModel, closeLanLlm: vi.fn() };
+  // Every request goes through the strict engine-validation fake first (the
+  // real engine rejects e.g. a last message that is not user/tool).
+  const { validateWireRequest } = await import("../support/fake-engine");
+  const validated = (...args: Parameters<typeof actual.lanStreamChat>) => {
+    validateWireRequest(args[1].messages);
+    return lan.lanStreamChat(...args);
+  };
+  return { ...actual, lanStreamChat: validated, lanListModels: lan.lanListModels, lanEngineDefaultModel: lan.lanEngineDefaultModel, lanPreloadModel: lan.lanPreloadModel, closeLanLlm: vi.fn() };
 });
 
 import { CHAT_SETTINGS_KEY, DEFAULT_CHAT_SETTINGS, type ChatSettings } from "@/lib/chat-settings";
@@ -22,6 +29,7 @@ import { click, openFile, q, qa, rail } from "../support/page-actions";
 import { FakeSelection, monacoState } from "../support/stubs/monaco";
 import { act, advance, deferred, mountEditor, railActive, settle } from "../support/page-utils";
 import { ctan } from "../support/stubs/ctan";
+import { validateWireRequest } from "../support/fake-engine";
 
 const MAIN = "\\documentclass{article}\n\\begin{document}\nHello world\n\\end{document}\n";
 const seed = { name: "chat", mainPath: "main.tex", files: { "main.tex": MAIN, "refs.bib": "@book{k}" } };
@@ -75,6 +83,7 @@ beforeEach(() => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/chat/completions")) validateWireRequest(JSON.parse(String(init?.body ?? "{}")).messages);
       wireCaptures.push({ url, headers: (init?.headers ?? {}) as Record<string, string>, body: JSON.parse(String(init?.body ?? "{}")) });
       const next = scripted.shift();
       if (!next) throw new Error(`no scripted endpoint reply for ${url}`);
@@ -810,5 +819,65 @@ describe("chat settings: local-model install warning + Start download", () => {
     await click(startBtn());
     expect(modal().querySelector("[data-chat-model-download-error]")).toBeNull();
     expect(modal().textContent).toContain("Starting the download…");
+  });
+});
+
+// Regression: turn 2 of a conversation failed on the LAN engine with 'the last
+// message must have role "user" or "tool"' because the thread was mapped to the
+// wire as [user, user, assistant]. Every request in this file is validated by
+// the strict engine fake (tests/support/fake-engine.ts), these pin the shapes.
+describe("multi-turn conversations against a validating engine", () => {
+  const stream = (chunks: unknown[]) => ({ completion: null, controller: new AbortController(), async *[Symbol.asyncIterator]() { for (const c of chunks) yield c; } });
+  const delta = (d: Record<string, unknown>, finish: string | null = null) => ({ choices: [{ delta: d, finish_reason: finish }] });
+  const wireOf = (i: number) => (lan.lanStreamChat.mock.calls[i][1].messages as { role: string; content: string }[]).map((m) => [m.role, m.content] as const).slice(1); // minus the system prompt
+
+  it("LAN, reasoning + text reply then a second user message: the request ends with the user message, in thread order", async () => {
+    const replies = [
+      [delta({ reasoning_content: "The user greets me." }), delta({ content: "Hello! How can I assist you with your thesis today?" }), delta({}, "stop")],
+      [delta({ reasoning_content: "Small talk." }), delta({ content: "Doing well, thanks." }), delta({}, "stop")],
+      [delta({ content: "Third." }), delta({}, "stop")],
+    ];
+    lan.lanStreamChat.mockImplementation(async () => stream(replies.shift()!));
+    await mountEditor(seed);
+    await rail("chat");
+    await send("Hi");
+    await send("how are you?");
+    expect(q("[data-chat-error]")).toBeNull();
+    expect(assistantText()).toContain("Doing well, thanks.");
+    expect(wireOf(1)).toEqual([["user", "Hi"], ["assistant", "Hello! How can I assist you with your thesis today?"], ["user", "how are you?"]]); // reasoning never goes back
+    await send("and now?");
+    expect(q("[data-chat-error]")).toBeNull();
+    expect(wireOf(2).map(([r]) => r)).toEqual(["user", "assistant", "user", "assistant", "user"]);
+  });
+
+  it("endpoint backend: the same two-turn conversation", async () => {
+    applySettings(endpointSettings());
+    scripted.push(textReply("first answer"), textReply("second answer"));
+    await mountEditor(seed);
+    await rail("chat");
+    await send("one");
+    await send("two");
+    expect(q("[data-chat-error]")).toBeNull();
+    expect(bodyOf(1).messages.slice(1)).toEqual([
+      { role: "user", content: "one" },
+      { role: "assistant", content: "first answer" },
+      { role: "user", content: "two" },
+    ]);
+  });
+
+  it("a tool turn followed by a second user message keeps assistant(tool_calls) → tool → assistant → user in order", async () => {
+    applySettings(endpointSettings());
+    scripted.push(toolReply("c1", "list_files", {}), textReply("You have two files."), textReply("Sure."));
+    await mountEditor(seed);
+    await rail("chat");
+    await send("what files?");
+    await send("thanks");
+    expect(q("[data-chat-error]")).toBeNull();
+    const last = bodyOf(2).messages.slice(1) as { role: string; content: string; tool_calls?: { id: string }[]; tool_call_id?: string }[];
+    expect(last.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant", "user"]);
+    expect(last[1].tool_calls![0].id).toBe("c1");
+    expect(last[2].tool_call_id).toBe("c1");
+    expect(last[3].content).toBe("You have two files.");
+    expect(last[4].content).toBe("thanks");
   });
 });

@@ -45,6 +45,10 @@ export type WireStreamEvent =
 // build log once is enough; keeps the prompt bounded).
 const TOOL_RESULT_CAP = 16_000;
 
+// Stand-in result for a tool call whose run ended before it produced one.
+const INTERRUPTED_TOOL_RESULT =
+  "ERROR: the conversation was stopped before this tool ran.";
+
 function argsToJson(args: unknown): string {
   try {
     return JSON.stringify(args ?? {});
@@ -56,8 +60,8 @@ function argsToJson(args: unknown): string {
 /**
  * Map the thread (the branch up to and including the triggering user
  * message — the in-flight assistant reply is not part of it) into wire
- * messages. System messages are skipped (the caller prepends a fresh
- * system prompt every round); user text parts are concatenated; an
+ * messages, in thread order. System messages are skipped (the caller
+ * prepends a fresh system prompt every round); user text parts are concatenated; an
  * assistant message's parts are flushed in order — a text part that
  * follows pending tool calls starts a new assistant message (the wire
  * format requires tool results between them), followed by one tool
@@ -90,12 +94,18 @@ export function toWireMessages(
             }
           : {}),
       });
+      // Every call must be answered right after the assistant message
+      // (the engine and OpenAI templates reject dangling calls). A call
+      // without a result — a run stopped or failed before the tool ran —
+      // gets a terminal result instead of being left open.
       for (const c of pending) {
-        if (c.result === undefined) continue;
         out.push({
           role: "tool",
           tool_call_id: c.id,
-          content: c.result.slice(0, TOOL_RESULT_CAP),
+          content: (c.result ?? INTERRUPTED_TOOL_RESULT).slice(
+            0,
+            TOOL_RESULT_CAP,
+          ),
         });
       }
     }
@@ -128,8 +138,12 @@ export function toWireMessages(
       }
       // reasoning and other part types do not go back to the model
     }
+    // Close the assistant message at ITS boundary, so it lands before the
+    // next user message. (Flushing only at the very end reordered
+    // [user, assistant, user] into [user, user, assistant], which the
+    // engine rejects: "the last message must have role user or tool".)
+    flush();
   }
-  flush();
   return out;
 }
 
