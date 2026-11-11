@@ -48,7 +48,8 @@ export async function mountEditor(seed?: Seed, opts: { engineReady?: boolean } =
   const utils = render(<EditorPage />);
   await settle();
   void opts;
-  return { id, ...utils };
+  // A first run creates its default project: its id is the active-project key.
+  return { id: id ?? localStorage.getItem(ACTIVE_PROJECT_KEY), ...utils };
 }
 
 // --- DOM readers mirroring the e2e helpers ------------------------------------
