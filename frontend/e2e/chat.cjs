@@ -119,8 +119,12 @@ const GEAR = 'button[title="Chat settings (backend, URL, model, endpoint)"]';
 //   executed JS there.
 // On FATAL the current page state (URL, iframes, modal, max gap) is
 // dumped next to the error.
+// addInitScript (NOT one-shot evaluate): the probe must survive navigations.
+// The one-shot version was installed before the pre-check-12 commit reload
+// and was gone in the new document, so its dump read an undefined
+// __e2eTicks and reported a bogus "0 ticks / 0 ms gap" (chatstandalone5b).
 function installEvidenceProbe(page) {
-  return page.evaluate(() => {
+  return page.addInitScript(() => {
     window.__e2eTicks = [];
     (function tick() {
       window.__e2eTicks.push(performance.now());
@@ -142,7 +146,7 @@ async function dumpFatalEvidence({ r, page }) {
   if (!page) return;
   const os = require("os");
   try {
-    const ev = await page.evaluate(() => {
+    const ev = await page.evaluate((gearSel) => {
       const t = window.__e2eTicks ?? [];
       let max = 0;
       let at = 0;
@@ -151,6 +155,26 @@ async function dumpFatalEvidence({ r, page }) {
           max = t[i] - t[i - 1];
           at = t[i];
         }
+      // Layer the gear click's failure path: what the PAGE sees (a fresh
+      // query — connectivity, box, hidden ancestors, active rail) versus
+      // what the CDP box queries the click itself relies on see (logged
+      // from Node below). page-visible + CDP-null = query-layer failure
+      // under load; page-hidden = a real app-state problem.
+      let gear = "absent";
+      const b = document.querySelector(gearSel);
+      if (b) {
+        const r2 = b.getBoundingClientRect();
+        let hiddenAt = null;
+        for (let el = b; el; el = el.parentElement) {
+          const cs = getComputedStyle(el);
+          if (cs.display === "none" || cs.visibility === "hidden") {
+            hiddenAt = el.tagName + "." + String(el.className).slice(0, 40);
+            break;
+          }
+        }
+        const active = document.querySelector('[data-rail][data-active]');
+        gear = `connected=${b.isConnected} box=${Math.round(r2.width)}x${Math.round(r2.height)} hiddenAncestor=${hiddenAt ?? "none"} activeRail=${active ? active.getAttribute("data-rail") : "none"}`;
+      }
       return {
         maxGapMs: max,
         atMs: at,
@@ -162,8 +186,16 @@ async function dumpFatalEvidence({ r, page }) {
           (f) => f.src,
         ),
         modal: !!document.querySelector("[data-modal]"),
+        gear,
       };
-    });
+    }, GEAR);
+    // The CDP-side box of the SAME fresh query the click uses
+    // (DOM.getBoxModel/getContentQuads). null with a live in-page box
+    // localizes the stall to the CDP query layer, not the app.
+    const cdpBox = await page
+      .locator(GEAR)
+      .boundingBox({ timeout: 5000 })
+      .catch((e) => "error: " + String(e).slice(0, 80));
     const load = os.loadavg().map((x) => x.toFixed(1)).join(", ");
     // Note: this dump evaluated IN-PAGE, so the main thread was
     // responsive at FATAL time — a long rAF gap therefore proves
@@ -182,6 +214,7 @@ async function dumpFatalEvidence({ r, page }) {
     console.error(
       `EVIDENCE: url=${ev.url} modal=${ev.modal} iframes=${JSON.stringify(ev.iframes)}`,
     );
+    console.error(`EVIDENCE: gear ${ev.gear} | cdpBox=${JSON.stringify(cdpBox)}`);
     for (const line of ev.events) console.error(`EVIDENCE: ${line}`);
   } catch (d) {
     console.error(
