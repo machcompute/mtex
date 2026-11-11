@@ -192,3 +192,36 @@ export async function lanListModels(
   const res = await llm.models.list();
   return res.data;
 }
+
+/** The model the engine loads when none is requested (best effort: null if
+ *  the engine's status cannot be read). */
+export async function lanEngineDefaultModel(url: string): Promise<string | null> {
+  const llm = await ensureLanLlm(url);
+  const status = await llm.status();
+  return status.defaultModel || null;
+}
+
+/**
+ * Preheat: connect and have the engine load `model` (or its default) NOW —
+ * the first load downloads the GGUF weights from Hugging Face into the
+ * browser cache, then installs them on the GPU. Resolves when the model is
+ * ready; every engine progress event is forwarded to `onProgress` for the
+ * duration of the load only. Rejects with LanEngineUnreachableError when the
+ * engine cannot be reached, or the engine's own error (no WebGPU, checksum
+ * mismatch, …).
+ */
+export async function lanPreloadModel(
+  url: string,
+  model: string | undefined,
+  onProgress: (p: LanProgress) => void,
+): Promise<void> {
+  const llm = await ensureLanLlm(url);
+  // Subscribe on the connection itself (not via ensureLanLlm's per-connection
+  // set) so the handler goes away when this load ends.
+  llm.on("progress", onProgress);
+  try {
+    await llm.load(model ? { model } : undefined);
+  } finally {
+    llm.off("progress", onProgress);
+  }
+}

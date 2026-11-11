@@ -59,7 +59,7 @@ npx tsc --noEmit && npm run lint  # the other two gates
 | `incremental.cjs` | build state persisted, seeded into the next build, `.bib` hashes, cached PDF reuse, one entry per input set, failed build keeps previous PDF, old PDF shown during a build | `page/incremental`, `lib/opfs` |
 | `babel-pt.cjs` / `babel-pt-log.cjs` | `Unknown option 'portuguese'` → install the tlpkg that ships the `.ldf`, restart, recompile; once per language | `page/incremental`, `lib/ctan-store` (`packageForFile`) |
 | `defaults.cjs` | first-run sweep: all defaults installed once, progress bar, no resurrection of removed defaults, version bump | `lib/ctan-store`, `page/defaults` |
-| `chat.cjs` | rail/chat pane, endpoint streaming w/ Bearer key, LAN vs endpoint, system prompt carries file + cursor/selection, tools (list/read/compile/log/search/install), apply_edit accept/reject/stop, clear, settings modal (live models, Save), dead engine → graceful box, deleted `/api/chat` never hit | `page/chat` (incl. the model-load indicator), `lib/chat-wire`, `lib/chat-runtime`, `lib/engine-progress`, `lib/lan-llm`, `lib/mach-llm-sdk`, `lib/chat-settings` |
+| `chat.cjs` | rail/chat pane, endpoint streaming w/ Bearer key, LAN vs endpoint, system prompt carries file + cursor/selection, tools (list/read/compile/log/search/install), apply_edit accept/reject/stop, clear, settings modal (live models, Save), dead engine → graceful box, deleted `/api/chat` never hit | `page/chat` (incl. the model-load indicator and the settings install warning + Start download), `lib/chat-wire`, `lib/chat-runtime`, `lib/engine-progress`, `lib/lan-llm`, `lib/mach-llm-sdk`, `lib/chat-settings` |
 | `helpers.cjs` | Runner/waitReady plumbing | n/a (replaced by `tests/support`) |
 
 ## Not unit-testable (and why)

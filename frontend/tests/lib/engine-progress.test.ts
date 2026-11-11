@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { engineProgressPct, engineStageLabel, formatElapsed, isEngineReady } from "@/lib/engine-progress";
+import { engineProgressPct, engineStageLabel, formatElapsed, isEngineReady, modelDownloadSize } from "@/lib/engine-progress";
 
 const p = (stage: string, progress: number | null, message = "") => ({ stage, message, progress });
 
@@ -43,5 +43,16 @@ describe("formatElapsed / isEngineReady", () => {
   it("only the ready stage is ready", () => {
     expect(isEngineReady(p("ready", 1))).toBe(true);
     expect(isEngineReady(p("prefill", 1))).toBe(false);
+  });
+});
+
+describe("modelDownloadSize", () => {
+  it("sums every GGUF a model needs, in decimal GB like the engine's own message", () => {
+    expect(modelDownloadSize("Qwen/Qwen3.5-4B")).toBe("2.7 GB"); // 2_669_209_920 bytes
+    expect(modelDownloadSize("google/gemma-4-E2B")).toBe("3.8 GB"); // weights + mmproj
+    expect(modelDownloadSize("google/gemma-4-E4B")).toBe("5.6 GB");
+  });
+  it("is null for a model the registry does not know", () => {
+    expect(modelDownloadSize("someone/else")).toBeNull();
   });
 });

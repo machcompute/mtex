@@ -7,10 +7,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const lan = vi.hoisted(() => ({
   lanStreamChat: vi.fn(),
   lanListModels: vi.fn(),
+  lanEngineDefaultModel: vi.fn(),
+  lanPreloadModel: vi.fn(),
 }));
 vi.mock("@/lib/lan-llm", async (orig) => {
   const actual = await orig<typeof import("@/lib/lan-llm")>();
-  return { ...actual, lanStreamChat: lan.lanStreamChat, lanListModels: lan.lanListModels, closeLanLlm: vi.fn() };
+  return { ...actual, lanStreamChat: lan.lanStreamChat, lanListModels: lan.lanListModels, lanEngineDefaultModel: lan.lanEngineDefaultModel, lanPreloadModel: lan.lanPreloadModel, closeLanLlm: vi.fn() };
 });
 
 import { CHAT_SETTINGS_KEY, DEFAULT_CHAT_SETTINGS, type ChatSettings } from "@/lib/chat-settings";
@@ -67,6 +69,9 @@ beforeEach(() => {
   scripted = [];
   lan.lanStreamChat.mockReset();
   lan.lanListModels.mockReset();
+  lan.lanEngineDefaultModel.mockReset();
+  lan.lanEngineDefaultModel.mockResolvedValue(null);
+  lan.lanPreloadModel.mockReset();
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -639,5 +644,171 @@ describe("LAN model load / download indicator", () => {
     await advance(50);
     expect(row()).toBeNull();
     await engine.release();
+  });
+});
+
+describe("chat settings: local-model install warning + Start download", () => {
+  type Ev = { stage: string; message: string; progress: number | null };
+  const ev = (stage: string, progress: number | null, message = `${stage} message`): Ev => ({ stage, message, progress });
+  const QWEN = "Qwen/Qwen3.5-4B";
+  const model = (id: string, label: string, cached: boolean | null) => ({ object: "model", id, label, modalities: ["text"], maxContext: 65536, cached });
+  const modal = () => q('[data-modal="chat-settings"]')!;
+  const warning = () => modal().querySelector("[data-chat-model-download]");
+  const startBtn = () => modal().querySelector<HTMLButtonElement>('button[data-action="start-model-download"]');
+  const modalRow = () => modal().querySelector("[data-chat-engine-progress]");
+  const part = (n: string) => modal().querySelector(`[data-engine-progress="${n}"]`);
+  async function openSettings() {
+    await mountEditor(seed);
+    await rail("chat");
+    await click(q('button[title^="Chat settings"]'));
+    await advance(10);
+  }
+
+  // The engine preheat, held until released; `emit` plays progress into the modal.
+  function gatedPreload() {
+    const gate = deferred<void>();
+    let onProgress: ((p: Ev) => void) | undefined;
+    lan.lanPreloadModel.mockImplementation(async (_u: string, _m: string | undefined, cb: (p: Ev) => void) => {
+      onProgress = cb;
+      await gate.promise;
+    });
+    return {
+      emit: async (p: Ev) => {
+        await act(async () => onProgress!(p));
+      },
+      finish: async () => {
+        gate.resolve();
+        await advance(50);
+      },
+      fail: async (e: Error) => {
+        gate.reject(e);
+        await advance(50);
+      },
+    };
+  }
+
+  it("warns that the chat installs a local model (with its size) while the selected model is not cached, and offers Start download", async () => {
+    lan.lanListModels.mockResolvedValue([model(QWEN, "Qwen 3.5 4B", false), model("google/gemma-4-E2B", "Gemma 4 E2B", true)]);
+    lan.lanEngineDefaultModel.mockResolvedValue(QWEN); // "Engine default" → Qwen
+    await openSettings();
+    const w = warning()!;
+    expect(w).not.toBeNull();
+    expect(w.textContent).toContain("installs a local model in your browser");
+    expect(w.textContent).toContain("about 2.7 GB");
+    expect(w.textContent).toContain("Hugging Face");
+    expect(startBtn()!.textContent).toBe("Start download (2.7 GB)");
+    expect(modalRow()).toBeNull();
+
+    // the warning follows the picker: a cached model has none, an uncached one has its own size
+    const sel = modal().querySelector("select")!;
+    fireEvent.change(sel, { target: { value: "google/gemma-4-E2B" } });
+    await settle();
+    expect(warning()).toBeNull();
+    expect(startBtn()).toBeNull();
+  });
+
+  it("shows no warning or button for a cached default model, an unknown cache state, or an unreachable engine", async () => {
+    lan.lanListModels.mockResolvedValue([model(QWEN, "Qwen 3.5 4B", true)]);
+    lan.lanEngineDefaultModel.mockResolvedValue(QWEN);
+    await openSettings();
+    expect(modal().textContent).toContain("Engine reachable — 1 model listed.");
+    expect(warning()).toBeNull();
+    expect(startBtn()).toBeNull();
+    await click(modal().querySelector('button[title="Close"]'));
+
+    lan.lanListModels.mockResolvedValue([model(QWEN, "Qwen 3.5 4B", null)]);
+    await click(q('button[title^="Chat settings"]'));
+    await advance(10);
+    expect(warning()).toBeNull(); // cached: null = the engine could not tell
+    await click(modal().querySelector('button[title="Close"]'));
+
+    lan.lanListModels.mockRejectedValue(new LanEngineUnreachableError("http://localhost:3001", new Error("down")));
+    await click(q('button[title^="Chat settings"]'));
+    await advance(10);
+    expect(modal().textContent).toContain("Could not reach the LAN LLM engine");
+    expect(warning()).toBeNull();
+    expect(startBtn()).toBeNull();
+  });
+
+  it("Start download connects through the engine client, shows the progress row while it runs, and clears warning + button when the model is cached", async () => {
+    lan.lanListModels.mockResolvedValueOnce([model(QWEN, "Qwen 3.5 4B", false)]);
+    lan.lanEngineDefaultModel.mockResolvedValue(QWEN);
+    const engine = gatedPreload();
+    await openSettings();
+    // once loaded, the refreshed listing says cached
+    lan.lanListModels.mockResolvedValue([model(QWEN, "Qwen 3.5 4B", true)]);
+
+    await click(startBtn());
+    expect(lan.lanPreloadModel).toHaveBeenCalledTimes(1);
+    expect(lan.lanPreloadModel.mock.calls[0][0]).toBe(DEFAULT_CHAT_SETTINGS.engineUrl);
+    expect(lan.lanPreloadModel.mock.calls[0][1]).toBe(QWEN);
+    expect(startBtn()).toBeNull(); // no double start while it runs
+    expect(warning()).not.toBeNull(); // the warning stays visible during the download
+    expect(modalRow()).toBeNull(); // nothing reported yet…
+    expect(modal().textContent).toContain("Starting the download…");
+
+    await engine.emit(ev("download", 0.45, "Downloading GGUF 1/1: 1.20 / 2.67 GB (40 MB/s)"));
+    expect(modalRow()!.getAttribute("data-stage")).toBe("download");
+    expect(part("label")!.textContent).toBe("Downloading model…");
+    expect(part("pct")!.textContent).toBe("45%");
+    expect(part("message")!.textContent).toBe("Downloading GGUF 1/1: 1.20 / 2.67 GB (40 MB/s)"); // byte counts straight from the engine
+
+    await engine.emit(ev("pipelines", null, "Building pipelines"));
+    expect(part("label")!.textContent).toBe("Compiling GPU pipelines…");
+    expect(part("pct")).toBeNull();
+    await engine.emit(ev("ready", 1, "Qwen 3.5 4B ready."));
+    expect(modalRow()).toBeNull(); // "ready" clears the indicator
+
+    await engine.finish();
+    expect(lan.lanListModels).toHaveBeenCalledTimes(2); // the listing was refreshed…
+    expect(warning()).toBeNull(); // …the cached flag flipped: warning + button are gone
+    expect(startBtn()).toBeNull();
+    expect(modalRow()).toBeNull();
+    expect([...modal().querySelector("select")!.options].map((o) => o.textContent)).toContain("Qwen 3.5 4B — Qwen/Qwen3.5-4B (cached)");
+  });
+
+  it("preheats the model picked in the dropdown, not the engine default", async () => {
+    lan.lanListModels.mockResolvedValue([model(QWEN, "Qwen 3.5 4B", true), model("google/gemma-4-E4B", "Gemma 4 E4B", false)]);
+    lan.lanEngineDefaultModel.mockResolvedValue(QWEN);
+    gatedPreload();
+    await openSettings();
+    expect(warning()).toBeNull();
+    fireEvent.change(modal().querySelector("select")!, { target: { value: "google/gemma-4-E4B" } });
+    await settle();
+    expect(warning()!.textContent).toContain("about 5.6 GB");
+    await click(startBtn());
+    expect(lan.lanPreloadModel.mock.calls[0][1]).toBe("google/gemma-4-E4B");
+  });
+
+  it("an unreachable engine during the download shows the graceful engine message and brings the button back", async () => {
+    lan.lanListModels.mockResolvedValue([model(QWEN, "Qwen 3.5 4B", false)]);
+    lan.lanEngineDefaultModel.mockResolvedValue(QWEN);
+    const engine = gatedPreload();
+    await openSettings();
+    await click(startBtn());
+    await engine.emit(ev("download", 0.2));
+    expect(modalRow()).not.toBeNull();
+    await engine.fail(new LanEngineUnreachableError("http://localhost:3001", new Error("Timed out")));
+    const err = modal().querySelector("[data-chat-model-download-error]")!;
+    expect(err.textContent).toContain("Could not reach the LAN LLM engine at http://localhost:3001");
+    expect(err.textContent).not.toContain("Timed out connecting");
+    expect(modalRow()).toBeNull(); // the indicator is gone
+    expect(warning()).not.toBeNull(); // still not installed
+    expect(startBtn()).not.toBeNull(); // retry
+    expect(lan.lanListModels).toHaveBeenCalledTimes(1); // no refresh on failure
+  });
+
+  it("any other engine failure (e.g. no WebGPU) is shown the same way and a retry clears it", async () => {
+    lan.lanListModels.mockResolvedValue([model(QWEN, "Qwen 3.5 4B", false)]);
+    lan.lanEngineDefaultModel.mockResolvedValue(QWEN);
+    lan.lanPreloadModel.mockRejectedValueOnce(new Error("WebGPU is not available in this browser"));
+    await openSettings();
+    await click(startBtn());
+    await advance(10);
+    expect(modal().querySelector("[data-chat-model-download-error]")!.textContent).toContain("WebGPU is not available");
+    lan.lanPreloadModel.mockImplementation(() => new Promise(() => {})); // second try hangs
+    await click(startBtn());
+    expect(modal().querySelector("[data-chat-model-download-error]")).toBeNull();
+    expect(modal().textContent).toContain("Starting the download…");
   });
 });

@@ -1,10 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { IconClose, IconSpinner } from "@/components/icons";
 import {
+  EngineProgressRow,
+  useEngineProgress,
+} from "@/components/engine-progress";
+import { modelDownloadSize } from "@/lib/engine-progress";
+import {
   closeLanLlm,
+  lanEngineDefaultModel,
   lanListModels,
+  lanPreloadModel,
   type LanProgress,
   type ListedModel,
 } from "@/lib/lan-llm";
@@ -56,6 +63,25 @@ export default function ChatSettingsModal({
     error: string;
   } | null>(null);
   const [progress, setProgress] = useState<LanProgress | null>(null);
+  // The engine's default model id (what "Engine default" resolves to).
+  const [defaultModel, setDefaultModel] = useState<{
+    url: string;
+    id: string | null;
+  } | null>(null);
+  // "Start download": a preheat of the selected model through the engine,
+  // reported with the same indicator the chat uses.
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [listTick, setListTick] = useState(0);
+  const engineProgress = useEngineProgress();
+  const reportProgress = engineProgress.report;
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   // Listing the models IS the connection test: it opens the engine
   // connection (iframe handshake) if needed. No weights load — that only
@@ -66,9 +92,15 @@ export default function ChatSettingsModal({
     lanListModels(settings.engineUrl, (p) => {
       if (!cancelled) setProgress(p);
     })
-      .then((models) => {
+      .then(async (models) => {
+        // Which model "Engine default" means — best effort; without it the
+        // default pick simply gets no warning.
+        const defId = await lanEngineDefaultModel(settings.engineUrl).catch(
+          () => null,
+        );
         if (cancelled) return;
         setModelList({ url: settings.engineUrl, models });
+        setDefaultModel({ url: settings.engineUrl, id: defId });
         setListError(null);
       })
       .catch((e) => {
@@ -79,7 +111,7 @@ export default function ChatSettingsModal({
     return () => {
       cancelled = true;
     };
-  }, [settings.backend, settings.engineUrl]);
+  }, [settings.backend, settings.engineUrl, listTick]);
 
   const models =
     modelList && modelList.url === settings.engineUrl
@@ -90,6 +122,16 @@ export default function ChatSettingsModal({
       ? listError.error
       : null;
   const connecting = !models && !listErr;
+  // The model the picker currently points at, and whether its weights are
+  // still to be downloaded (cached === null = unknown: no warning).
+  const defaultId =
+    defaultModel && defaultModel.url === settings.engineUrl
+      ? defaultModel.id
+      : null;
+  const selectedId = model !== "" ? model : defaultId;
+  const selected = models?.find((m) => m.id === selectedId) ?? null;
+  const needsDownload = selected !== null && selected.cached === false;
+  const sizeText = selected ? modelDownloadSize(selected.id) : null;
   const dirty =
     url.trim() !== settings.engineUrl ||
     model !== settings.model ||
@@ -100,6 +142,40 @@ export default function ChatSettingsModal({
   const changeBackend = (backend: ChatBackend) => {
     if (backend === settings.backend) return;
     onChange({ ...settings, backend });
+  };
+
+  const startDownload = async () => {
+    if (!selected || loading) return;
+    const engineUrl = settings.engineUrl;
+    setLoading(true);
+    setLoadError(null);
+    reportProgress(null);
+    try {
+      await lanPreloadModel(engineUrl, selected.id, reportProgress);
+      // Loaded: the engine's cache now has the weights — flip the flag
+      // right away (warning + button go away) and re-list to confirm.
+      if (alive.current) {
+        const id = selected.id;
+        setModelList((cur) =>
+          cur && cur.url === engineUrl
+            ? {
+                ...cur,
+                models: cur.models.map((m) =>
+                  m.id === id ? { ...m, cached: true } : m,
+                ),
+              }
+            : cur,
+        );
+        setListTick((t) => t + 1);
+      }
+    } catch (e) {
+      // An unreachable engine reads like it does in the chat (its message
+      // already points at the engine URL above).
+      if (alive.current) setLoadError(errMsg(e));
+    } finally {
+      reportProgress(null);
+      if (alive.current) setLoading(false);
+    }
   };
 
   const save = () => {
@@ -224,6 +300,55 @@ export default function ChatSettingsModal({
                 Engine reachable — {models.length} model
                 {models.length === 1 ? "" : "s"} listed.
               </p>
+            )}
+
+            {needsDownload && selected && (
+              <div
+                data-chat-model-download
+                className="mb-2 rounded border border-stone/30 bg-peach/30 px-2 py-2 text-xs text-ink"
+              >
+                <p className="mb-1 font-semibold">
+                  This chat installs a local model in your browser
+                </p>
+                <p className="mb-2 text-stone">
+                  {selected.label} is not installed yet. The first use
+                  downloads
+                  {sizeText ? ` about ${sizeText} of` : ""} model weights from
+                  Hugging Face into this browser&apos;s storage and sets them
+                  up on your GPU — it can take 10+ minutes on a slow
+                  connection, and it needs WebGPU. It is a one-time step:
+                  afterwards the model is cached and chats start right away.
+                </p>
+                {loading ? (
+                  engineProgress.state ? (
+                    <EngineProgressRow state={engineProgress.state} />
+                  ) : (
+                    <p
+                      data-engine-progress="starting"
+                      className="flex items-center gap-1.5 text-stone"
+                    >
+                      <IconSpinner className="h-3 w-3" />
+                      Starting the download…
+                    </p>
+                  )
+                ) : (
+                  <button
+                    data-action="start-model-download"
+                    onClick={startDownload}
+                    className="rounded bg-mint px-3 py-1.5 text-xs font-semibold text-ink transition-opacity hover:opacity-80"
+                  >
+                    Start download{sizeText ? ` (${sizeText})` : ""}
+                  </button>
+                )}
+                {loadError && (
+                  <p
+                    data-chat-model-download-error
+                    className="mt-2 rounded bg-peach/60 px-2 py-1 text-ink"
+                  >
+                    {loadError}
+                  </p>
+                )}
+              </div>
             )}
           </>
         ) : (

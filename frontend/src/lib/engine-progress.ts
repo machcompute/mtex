@@ -39,3 +39,23 @@ export function formatElapsed(ms: number): string {
 export function isEngineReady(p: LanProgress): boolean {
   return p.stage === "ready";
 }
+
+/**
+ * Download size (bytes) of each model the engine registers: every GGUF the
+ * model needs (weights + the multimodal projector for Gemma), exactly as
+ * pinned in the engine's gguf/sources.js. The wire does not expose sizes
+ * (models.list has no byte count), so this mirrors the engine's registry;
+ * unknown ids simply get no size.
+ */
+export const MODEL_DOWNLOAD_BYTES: Record<string, number> = {
+  "Qwen/Qwen3.5-4B": 2_669_209_920,
+  "google/gemma-4-E2B": 2_841_481_184 + 986_833_664,
+  "google/gemma-4-E4B": 4_590_807_392 + 991_552_256,
+};
+
+/** "2.7 GB" (decimal, like the engine's own download message) or null when
+ *  the model's size is not known. */
+export function modelDownloadSize(modelId: string): string | null {
+  const bytes = MODEL_DOWNLOAD_BYTES[modelId];
+  return bytes === undefined ? null : `${(bytes / 1e9).toFixed(1)} GB`;
+}
