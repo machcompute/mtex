@@ -18,9 +18,11 @@ export type FaultPlan = {
   failWrites: boolean;
   /** getDirectory() itself rejects (OPFS unavailable). */
   failRoot: boolean;
+  /** When set, getDirectory() waits for it (a slow OPFS under load). */
+  gate: Promise<void> | null;
 };
 
-const faults: FaultPlan = { failWrites: false, failRoot: false };
+const faults: FaultPlan = { failWrites: false, failRoot: false, gate: null };
 
 export class MemFile {
   readonly kind = "file" as const;
@@ -118,6 +120,19 @@ export function resetOpfs(): void {
   root = new MemDir("");
   faults.failWrites = false;
   faults.failRoot = false;
+  faults.gate = null;
+}
+
+/** Make OPFS slow: getDirectory() stalls until the returned release() is called. */
+export function gateOpfs(): () => void {
+  let release!: () => void;
+  faults.gate = new Promise<void>((res) => {
+    release = () => {
+      faults.gate = null;
+      res();
+    };
+  });
+  return release;
 }
 
 /** Point navigator.storage.getDirectory() at the in-memory root. */
@@ -127,6 +142,7 @@ export function installMemOpfs(): void {
     configurable: true,
     value: {
       getDirectory: async () => {
+        if (faults.gate) await faults.gate;
         if (faults.failRoot) throw new Error("OPFS unavailable");
         return root;
       },
