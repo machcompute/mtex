@@ -10,7 +10,7 @@ export const ctan = {
     unresolved: [] as string[],
   })),
   packageForFile: vi.fn<(basename: string) => Promise<string | null>>(async () => null),
-  searchPackages: vi.fn<(query: string, limit?: number) => Promise<{ name: string; installed: boolean; shortdesc: string }[]>>(async () => []),
+  searchPackages: vi.fn<(query: string, limit?: number) => Promise<{ name: string; installed: boolean; shortdesc: string; size?: number }[]>>(async () => []),
   remotePackageNames: vi.fn(async () => [] as string[]),
   storeFiles: vi.fn(async () => []),
   listPackages: vi.fn(async () => []),
