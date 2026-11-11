@@ -487,6 +487,12 @@ export default function EditorPage() {
     meta: ProjectMeta,
     files: Record<string, FileData>,
     list: ProjectSummary[],
+    // The mount restore is not a switch: it has no outgoing project, and
+    // its OPFS read settles async — under load seconds after mount, when
+    // the user may already have picked another pane (e.g. Chat). A reset
+    // there would yank that pane mid-session; on a fast restore the pane
+    // is still the initial "files", so skipping it changes nothing.
+    resetPane = true,
   ) => {
     const m = monacoRef.current;
     if (m) {
@@ -535,10 +541,10 @@ export default function EditorPage() {
     setLiveLog("");
     setSyncEntries(null);
     setStatus({ kind: "idle" });
-    // The left panel shows the new project's files — never inherit the
-    // outgoing project's auto-opened log pane (its failed build's error
-    // state would otherwise survive the switch).
-    setLeftPane("files");
+    // A project switch shows the incoming project's files and never
+    // inherits the outgoing project's auto-opened log pane (its failed
+    // build's error state would otherwise survive the switch).
+    if (resetPane) setLeftPane("files");
     // The build history belongs to the outgoing project's session.
     setCompileHistory([]);
     setHistoryOpen(false);
@@ -944,7 +950,7 @@ export default function EditorPage() {
           (stored ? list.find((p) => p.id === stored) : undefined) ?? list[0];
         const { meta, files: loadedFiles } = await loadProject(picked.id);
         if (cancelled) return;
-        applyProject(picked.id, meta, loadedFiles, list);
+        applyProject(picked.id, meta, loadedFiles, list, false);
       } catch {
         if (!cancelled) {
           // OPFS unavailable: the session still works in memory, but nothing
