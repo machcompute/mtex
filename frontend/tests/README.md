@@ -35,7 +35,7 @@ npx tsc --noEmit && npm run lint  # the other two gates
 | Path | What |
 | --- | --- |
 | `tests/lib/*.test.ts` | Node: OPFS store, GitHub client, synctex, tar, CTAN store, TeX worker wrapper, chat wire/runtime/settings, LAN client + SDK, preview, CTAN/texlive routes |
-| `tests/page/*.test.tsx` | jsdom: the real editor page, dashboard and modals over the stubs above |
+| `tests/page/*.test.tsx` | jsdom: the real editor page, dashboard and modals over the stubs above (`pdf-viewer.test` runs the real PDF viewer over a mocked pdf.js) |
 | `tests/support/` | the OPFS shim, fixtures (GitHub, CTAN, tar, synctex), fake engine/worker, UI stubs, drivers |
 
 ## Old browser e2e → unit tests

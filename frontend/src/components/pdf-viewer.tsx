@@ -37,6 +37,14 @@ export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
 }
 
+function errorBox(message: string): HTMLElement {
+  const error = document.createElement("div");
+  error.dataset.renderError = "";
+  error.className = "p-4 text-sm text-red-600";
+  error.textContent = `Failed to render PDF: ${message}`;
+  return error;
+}
+
 export type PdfViewerHandle = {
   /**
    * Jump to a synctex position: scroll the given PDF page so the position
@@ -119,10 +127,9 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const taskRef = useRef<pdfjsLib.PDFDocumentLoadingTask | null>(null);
-  // Identity of the data prop currently rendered; page-state resets (below)
-  // only happen when it changes, never on zoom/fit re-renders.
-  const renderedDataRef = useRef<Uint8Array | null | undefined>(undefined);
+  // The document the pane currently shows pages of; lets a re-render of the
+  // SAME document (zoom/fit) swap pages in atomically instead of blanking.
+  const renderedPdfRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
   // Keep the latest callbacks without re-rendering the PDF on every change.
   const clickRef = useRef(onPageClick);
   clickRef.current = onPageClick;
@@ -138,6 +145,12 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
   const [numPages, setNumPages] = useState(0);
   const [pageWidthPts, setPageWidthPts] = useState<number | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
+  // The loaded document, tagged with the bytes it was loaded from.
+  const [loaded, setLoaded] = useState<{
+    data: Uint8Array;
+    pdf: pdfjsLib.PDFDocumentProxy;
+  } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const fitScale = useMemo(() => {
     if (!pageWidthPts || containerWidth <= 0) return 1.5;
@@ -160,154 +173,208 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
     return () => ro.disconnect();
   }, []);
 
-  // Build (or rebuild) the pages whenever the PDF, zoom or fit changes.
+  // Load the document ONLY when the PDF bytes change. Zoom / fit / pane-resize
+  // never come through here: tearing the loading task down on those would
+  // destroy the document, reload the worker and blank the pane (the flash).
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    taskRef.current?.destroy().catch(() => {});
-    taskRef.current = null;
-    container.replaceChildren();
-    if (renderedDataRef.current !== data) {
-      // A new PDF (or none) arrived: reset the per-document state. Must not
-      // run on zoom/fit re-renders — setPageWidthPts(null) there would flip
-      // fitScale back to its default and re-trigger this effect forever.
-      renderedDataRef.current = data;
-      setNumPages(0);
-      numPagesRef.current?.(0);
-      setPageWidthPts(null);
-      setPage(1);
-    }
-
-    if (!data || data.byteLength === 0) {
-      const empty = document.createElement("div");
-      empty.className =
-        "flex h-full flex-col items-center justify-center gap-2 text-stone";
-      // Same document glyph as IconFile (imperative DOM — keep in sync).
-      empty.innerHTML =
-        '<svg viewBox="0 0 16 16" class="h-10 w-10 text-stone/40" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h5.5L13 5v8.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5z"/><path d="M9.5 1.5V5H13"/></svg>';
-      const label = document.createElement("p");
-      label.className = "text-sm";
-      label.textContent = "No PDF output yet — press Recompile.";
-      empty.append(label);
-      container.append(empty);
-      return;
-    }
+    // A new PDF (or none) arrived: reset the per-document state.
+    setLoaded(null);
+    setLoadError(null);
+    setNumPages(0);
+    numPagesRef.current?.(0);
+    setPageWidthPts(null);
+    setPage(1);
+    if (!data || data.byteLength === 0) return;
 
     // Hand pdf.js a COPY: it transfers the buffer to its worker, which
-    // detaches it — re-reading `data.byteLength` afterwards (the effect
-    // re-runs on every fit/zoom change) would see 0 and show the empty
-    // state for a perfectly good PDF.
+    // detaches it, and the caller's bytes (still used by Download and the
+    // hasPdf check) must stay readable.
     const task = pdfjsLib.getDocument({ data: data.slice() });
-    taskRef.current = task;
-
     let cancelled = false;
     task.promise
       .then(async (pdf) => {
         if (cancelled) return;
+        // Page 1's width drives fit-to-width; set it together with the
+        // document so the first render already happens at the fit scale.
+        const first = await pdf.getPage(1);
+        if (cancelled) return;
         setNumPages(pdf.numPages);
         numPagesRef.current?.(pdf.numPages);
-        const s =
-          scale ?? (pageWidthPts && containerWidth > 0 ? fitScale : 1.5);
-        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-          if (cancelled) return;
-          const pageObj = await pdf.getPage(pageNum);
-          const base = pageObj.getViewport({ scale: 1 });
-          if (pageNum === 1 && pageWidthPts !== base.width) {
-            setPageWidthPts(base.width);
-          }
-          const viewport = pageObj.getViewport({ scale: s });
-          const heightPts = base.height;
-
-          const wrapper = document.createElement("div");
-          wrapper.className =
-            "relative mx-auto block bg-white shadow-sm " +
-            (pageNum > 1 ? "mt-4 " : "");
-          wrapper.dataset.page = String(pageNum);
-          wrapper.dataset.heightPts = String(heightPts);
-          wrapper.dataset.scale = String(s);
-          wrapper.style.width = `${Math.floor(viewport.width)}px`;
-          wrapper.style.height = `${Math.floor(viewport.height)}px`;
-
-          const canvas = document.createElement("canvas");
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          canvas.className = "block";
-          wrapper.append(canvas);
-
-          // Text layer: transparent spans positioned exactly over the
-          // rendered text (pdf.js-style), so the reader can select and
-          // copy PDF text like in any other PDF viewer.
-          const layer = document.createElement("div");
-          layer.className = "absolute inset-0";
-          layer.dataset.textLayer = "";
-          wrapper.append(layer);
-
-          // Click → synctex lookup. A click that merely ends a
-          // drag-selection must not trigger a jump to the source.
-          wrapper.addEventListener("click", (e) => {
-            const selection = window.getSelection();
-            if (selection && selection.toString().length > 0) return;
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const yTop = e.clientY - rect.top;
-            if (x < 0 || yTop < 0 || x > rect.width || yTop > rect.height) return;
-            // A click on a rendered text span snaps to that line's
-            // baseline: glyph ink sits ABOVE the baseline, so the raw
-            // click y could otherwise land closer to the line above and
-            // the lookup would jump one line too early.
-            const target = e.target as HTMLElement | null;
-            const span = (target
-              ? target.closest("span[data-baseline]")
-              : null) as HTMLElement | null;
-            const baselineCss = span
-              ? Number.parseFloat(span.dataset.baseline || "")
-              : NaN;
-            clickRef.current?.(
-              pageNum,
-              x / s,
-              (Number.isFinite(baselineCss) ? baselineCss : yTop) / s,
-            );
-          });
-
-          container.append(wrapper);
-          await pageObj.render({ canvas, viewport }).promise;
-
-          const content = await pageObj.getTextContent();
-          for (const item of content.items) {
-            if (!("str" in item) || item.str.length === 0) continue;
-            const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-            const fontHeight = Math.hypot(tx[2], tx[3]);
-            if (fontHeight < 0.5) continue;
-            const span = document.createElement("span");
-            span.textContent = item.str;
-            span.style.position = "absolute";
-            span.style.left = `${tx[4]}px`;
-            span.style.top = `${tx[5] - fontHeight}px`;
-            span.style.height = `${fontHeight}px`;
-            span.style.fontSize = `${fontHeight}px`;
-            span.style.color = "transparent";
-            span.style.whiteSpace = "pre";
-            // Baseline of this line in CSS px from the top of the page —
-            // used to snap synctex clicks on rendered text (see above).
-            span.dataset.baseline = String(tx[5]);
-            layer.append(span);
-          }
-        }
+        setPageWidthPts(first.getViewport({ scale: 1 }).width);
+        setLoaded({ data, pdf });
       })
       .catch((err) => {
-        if (cancelled) return;
-        const error = document.createElement("div");
-        error.dataset.renderError = "";
-        error.className = "p-4 text-sm text-red-600";
-        error.textContent = `Failed to render PDF: ${err}`;
-        container.append(error);
+        if (!cancelled) setLoadError(String(err));
       });
+    return () => {
+      cancelled = true;
+      task.destroy().catch(() => {});
+    };
+  }, [data]);
+
+  // The document that belongs to the current `data` (never a stale one while
+  // a new PDF is still loading).
+  const pdf = loaded && loaded.data === data ? loaded.pdf : null;
+  const hasPdf = !!data && data.byteLength > 0;
+
+  // (Re)build the pages of the loaded document whenever it, the zoom or the
+  // fit changes. The document itself is kept; only the page rendering reruns.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    if (!pdf) {
+      renderedPdfRef.current = null;
+      container.replaceChildren();
+      if (loadError) {
+        container.append(errorBox(loadError));
+      } else if (!hasPdf) {
+        const empty = document.createElement("div");
+        empty.className =
+          "flex h-full flex-col items-center justify-center gap-2 text-stone";
+        // Same document glyph as IconFile (imperative DOM — keep in sync).
+        empty.innerHTML =
+          '<svg viewBox="0 0 16 16" class="h-10 w-10 text-stone/40" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h5.5L13 5v8.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5z"/><path d="M9.5 1.5V5H13"/></svg>';
+        const label = document.createElement("p");
+        label.className = "text-sm";
+        label.textContent = "No PDF output yet — press Recompile.";
+        empty.append(label);
+        container.append(empty);
+      }
+      return;
+    }
+
+    const s = effScale;
+    // A document seen for the first time streams its pages into the pane as
+    // they render. A re-render of the SAME document (zoom, fit, pane resize)
+    // builds the new pages off-screen and swaps them in at once, so the pane
+    // never blanks or jumps to the top while it re-renders.
+    const streaming = renderedPdfRef.current !== pdf;
+    renderedPdfRef.current = pdf;
+    const stage: HTMLElement = streaming
+      ? container
+      : document.createElement("div");
+    if (streaming) container.replaceChildren();
+
+    let cancelled = false;
+    let renderTask: pdfjsLib.RenderTask | null = null;
+
+    const flush = () => {
+      if (stage === container) return;
+      const prevTop = container.scrollTop;
+      const prevScale = Number.parseFloat(
+        container.querySelector<HTMLElement>("[data-page]")?.dataset.scale ??
+          "",
+      );
+      container.replaceChildren(...Array.from(stage.childNodes));
+      // Keep the reader at the same spot of the document across a zoom.
+      if (Number.isFinite(prevScale) && prevScale > 0 && prevScale !== s) {
+        container.scrollTop = prevTop * (s / prevScale);
+      } else {
+        container.scrollTop = prevTop;
+      }
+    };
+
+    (async () => {
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        if (cancelled) return;
+        const pageObj = await pdf.getPage(pageNum);
+        if (cancelled) return;
+        const base = pageObj.getViewport({ scale: 1 });
+        const viewport = pageObj.getViewport({ scale: s });
+        const heightPts = base.height;
+
+        const wrapper = document.createElement("div");
+        wrapper.className =
+          "relative mx-auto block bg-white shadow-sm " +
+          (pageNum > 1 ? "mt-4 " : "");
+        wrapper.dataset.page = String(pageNum);
+        wrapper.dataset.heightPts = String(heightPts);
+        wrapper.dataset.scale = String(s);
+        wrapper.style.width = `${Math.floor(viewport.width)}px`;
+        wrapper.style.height = `${Math.floor(viewport.height)}px`;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        canvas.className = "block";
+        wrapper.append(canvas);
+
+        // Text layer: transparent spans positioned exactly over the
+        // rendered text (pdf.js-style), so the reader can select and
+        // copy PDF text like in any other PDF viewer.
+        const layer = document.createElement("div");
+        layer.className = "absolute inset-0";
+        layer.dataset.textLayer = "";
+        wrapper.append(layer);
+
+        // Click → synctex lookup. A click that merely ends a
+        // drag-selection must not trigger a jump to the source.
+        wrapper.addEventListener("click", (e) => {
+          const selection = window.getSelection();
+          if (selection && selection.toString().length > 0) return;
+          const rect = canvas.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const yTop = e.clientY - rect.top;
+          if (x < 0 || yTop < 0 || x > rect.width || yTop > rect.height) return;
+          // A click on a rendered text span snaps to that line's
+          // baseline: glyph ink sits ABOVE the baseline, so the raw
+          // click y could otherwise land closer to the line above and
+          // the lookup would jump one line too early.
+          const target = e.target as HTMLElement | null;
+          const span = (target
+            ? target.closest("span[data-baseline]")
+            : null) as HTMLElement | null;
+          const baselineCss = span
+            ? Number.parseFloat(span.dataset.baseline || "")
+            : NaN;
+          clickRef.current?.(
+            pageNum,
+            x / s,
+            (Number.isFinite(baselineCss) ? baselineCss : yTop) / s,
+          );
+        });
+
+        stage.append(wrapper);
+        renderTask = pageObj.render({ canvas, viewport });
+        await renderTask.promise;
+        renderTask = null;
+        if (cancelled) return;
+
+        const content = await pageObj.getTextContent();
+        if (cancelled) return;
+        for (const item of content.items) {
+          if (!("str" in item) || item.str.length === 0) continue;
+          const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+          const fontHeight = Math.hypot(tx[2], tx[3]);
+          if (fontHeight < 0.5) continue;
+          const span = document.createElement("span");
+          span.textContent = item.str;
+          span.style.position = "absolute";
+          span.style.left = `${tx[4]}px`;
+          span.style.top = `${tx[5] - fontHeight}px`;
+          span.style.height = `${fontHeight}px`;
+          span.style.fontSize = `${fontHeight}px`;
+          span.style.color = "transparent";
+          span.style.whiteSpace = "pre";
+          // Baseline of this line in CSS px from the top of the page —
+          // used to snap synctex clicks on rendered text (see above).
+          span.dataset.baseline = String(tx[5]);
+          layer.append(span);
+        }
+      }
+      flush();
+    })().catch((err) => {
+      if (cancelled) return;
+      flush();
+      container.append(errorBox(String(err)));
+    });
 
     return () => {
       cancelled = true;
+      renderTask?.cancel();
     };
-  }, [data, scale, fitScale, containerWidth, pageWidthPts]);
+  }, [pdf, effScale, hasPdf, loadError]);
 
   // Page tracking + viewport-top reporting while the reader scrolls.
   useEffect(() => {
@@ -441,8 +508,6 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
     }),
     [],
   );
-
-  const hasPdf = !!data && data.byteLength > 0;
 
   const zoomBy = (factor: number) => {
     setScale(
