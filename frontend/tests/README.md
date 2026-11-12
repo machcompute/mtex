@@ -53,7 +53,7 @@ npx tsc --noEmit && npm run lint  # the other two gates
 | `rename.cjs` | in-place rename keeps depth, move to root, invalid path notice (log stays closed), OPFS follows | `page/files` |
 | `fixes.cjs` | #1 rename-back/no stale model, #2/#3 failed engine load + recovery, #6/#16 nested/flat synctex click → file, #7 mid-compile edit, #8/#9/#14a compile payloads, status & log, dotted main names, #10/#12/#23 drops, #11 storage-failure notice, #13 collision refusal, #14c/#24 no main file, #15 non-UTF-8 bytes, #17 scroll restore, #18/#22 name validation, #20 auto-recompile off, #21 tab restore | `page/files`, `page/folder`, `page/compile`, `page/projects`, `page/incremental`, `lib/busytex` |
 | `projects.cjs` | first-run default, create/numbering, switch, rename + reload, delete (+confirm), delete-active, delete-to-empty → fresh default, dashboard listing | `page/projects`, `lib/defaults`, `lib/opfs` |
-| `layout.cjs` | app bar, toolbar order + inserts, save indicator, rail order/tooltips/bottom buttons, pane switching, search (rows, badge, no matches, jumps), swap button, workspace persistence, history popover, notes, page badge, stats | `page/layout`, `page/files`, `page/compile` |
+| `layout.cjs` | app bar, toolbar order + inserts, save indicator, rail order/tooltips/bottom buttons, pane switching, search (rows, badge, no matches, jumps), divider grip + jump arrows, workspace persistence, history popover, notes, page badge, stats | `page/layout`, `page/files`, `page/compile` |
 | `dashboard.cjs` | project cards, placeholder vs preview, open, new project, preview written after compile | `page/projects` (dashboard), `lib/preview`, `lib/opfs` |
 | `github.cjs` | PAT sign-in/persist/Bearer, repo + branch lists, default-branch preselect, pull (dotfile skipped before download, blobs fetched once, no codeload), OPFS persistence + source record, Re-pull same id/replace/delete stale, push: blobs → trees deepest-first → commit (`machlatex <ts>`, authored user) → non-forced ref, source recorded | `page/github`, `lib/github` |
 | `firefox.cjs` | `webkitdirectory` picker + folder import | `page/folder` (picker input), `page/folder` (import) |
@@ -78,7 +78,7 @@ npx tsc --noEmit && npm run lint  # the other two gates
   The inputs and the `DataTransfer`/`FileSystemEntry` handling (incl. Chromium's 100-entry batches) are covered.
 * **Real OPFS quirks** — browser quota, structured-clone/locking behaviour, cross-tab effects. The in-memory
   shim models the handle API and failure modes, not browser internals.
-* **Layout geometry** — "rail sits in the left column" (pixel positions), CSS hover reveal of the swap button,
-  pointer-drag resizing of panes (jsdom has no layout; the persisted/clamped values are tested).
+* **Layout geometry** — "rail sits in the left column" (pixel positions), pointer-drag resizing of panes
+  (jsdom has no layout; the persisted/clamped values are tested).
 * **Live CTAN / GitHub / mirror availability** — all upstreams are stubbed; the proxy's mirror fallback logic is
   tested, not the mirrors.

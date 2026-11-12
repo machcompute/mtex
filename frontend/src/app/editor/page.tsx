@@ -40,13 +40,14 @@ import {
   IconClock,
   IconFile,
   IconNote,
+  IconChevronLeft,
+  IconChevronRight,
   IconSearch,
   IconGitHub,
   IconImage,
   IconLink,
   IconPlay,
   IconSpinner,
-  IconSwap,
   IconSync,
   IconTable,
 } from "@/components/icons";
@@ -175,8 +176,9 @@ type ChatToolCtx = {
 // --- workspace layout ----------------------------------------------------
 // The panes are user-arrangeable: drag the files panel's right edge to
 // resize it, drag the handle between the editor and PDF to re-split them,
-// click the arrows on that handle to swap the two panes. The arrangement
-// persists in localStorage (like the active project) and survives reloads.
+// and its always-visible arrows jump between the two panes (top: editor
+// cursor → PDF, bottom: PDF viewport → editor). The arrangement persists
+// in localStorage (like the active project) and survives reloads.
 type WorkspaceLayout = {
   filesW: number; // files panel width, px
   split: number; // editor's share of the editor+PDF row, 0.2–0.8
@@ -357,9 +359,10 @@ export default function EditorPage() {
   // auto-compile effect keys on it so a re-pull of the SAME project id
   // still re-triggers, while plain re-renders never do.
   const [projectVersion, setProjectVersion] = useState(0);
-  // The user's pane arrangement (drag edges to resize, swap the panes):
-  // the first render uses the defaults, as SSR did, so hydration never
-  // mismatches; the mount effect swaps in the saved layout.
+  // The user's pane arrangement (drag the files edge or the divider to
+  // re-split): the first render uses the defaults, as SSR did, so
+  // hydration never mismatches; the mount effect swaps in the saved
+  // layout.
   const [workspace, setWorkspace] = useState<WorkspaceLayout>(DEFAULT_WORKSPACE);
   // The saved layout has been applied; until then the persist effect must
   // not write, or it would race the load and clobber the saved layout
@@ -2056,6 +2059,25 @@ export default function EditorPage() {
     });
   };
 
+  /** Inverse sync: jump the editor to the PDF's current viewport top. */
+  const gotoEditor = () => {
+    if (!syncEntries) return;
+    // The viewer reports its live viewport (the same value its scroll
+    // events feed handleViewportTop), so no separate tracking ref is
+    // needed — this is exactly the PDF-click path without a click.
+    const viewport = pdfRef.current?.getViewportTop();
+    if (!viewport) return;
+    // x = 0: as in the scroll-follow, the leftmost line of the physical
+    // line is the right one (single-column documents).
+    const entry = findSourceForPoint(
+      syncEntries,
+      viewport.page,
+      0,
+      viewport.yTop,
+    );
+    if (entry) jumpToSource(entry, false);
+  };
+
   // --- formatting toolbar (inscribe.io style) -----------------------------
   // All inserts go through editor.executeEdits, so the normal
   // onChange → setFiles pipeline handles the file state, the debounced OPFS
@@ -2335,8 +2357,9 @@ export default function EditorPage() {
   // --- workspace panes ----------------------------------------------------
   // The editor and PDF panes carry flex-grow ratios (zero basis), so the
   // fixed-width divider is absorbed and the editor's share of the row is
-  // exactly `split`. The values travel WITH the panes, so a swap keeps
-  // each pane's size.
+  // exactly `split`. The values travel WITH the panes, so a swapped
+  // layout (editorFirst persisted from a previous session) keeps each
+  // pane's size.
   const editorPane = (
     <div
       style={{ flex: `${workspace.split} 1 0%` }}
@@ -2731,10 +2754,16 @@ export default function EditorPage() {
     </div>
   );
 
-  // Draggable divider between the panes. The swap button only appears on
-  // hover: the divider is 6 px wide but the button is not, so an always-
-  // visible button sits on top of the editor's scrollbar and eats its
-  // clicks. At rest it is invisible and click-through.
+  // Draggable divider between the panes, carrying an always-visible grip
+  // and a pair of jump arrows: the top one takes the editor cursor to the
+  // PDF, the bottom one takes the PDF's current viewport back to the
+  // editor. The divider itself stays the drag surface: the stack around
+  // the buttons is pointer-events-none (nothing taller than a button is
+  // interactive), the grip is decorative, and the buttons stop
+  // propagation on pointerdown so a press on them never starts a drag.
+  // The buttons are a few pixels wider than the 6 px divider and may
+  // overlap the editor's scrollbar; that is accepted — they are slim
+  // pills, and the divider remains draggable everywhere outside them.
   const divider = (
     <div
       onPointerDown={(e) => {
@@ -2749,22 +2778,48 @@ export default function EditorPage() {
           setWorkspace((ws) => ({
             ...ws,
             split: clampN(base + (dir * dx) / w, SPLIT.min, SPLIT.max),
-          })),
+          }))
         );
       }}
-      title="Drag to re-split — hover for the swap button"
-      className="group relative z-10 w-1.5 shrink-0 cursor-col-resize bg-ink/10 transition-colors hover:bg-mint"
+      title="Drag to re-split"
+      className="relative z-10 w-1.5 shrink-0 cursor-col-resize bg-ink/10 transition-colors hover:bg-mint"
     >
-      <button
-        onPointerDown={(e) => e.stopPropagation()}
-        onClick={() =>
-          setWorkspace((w) => ({ ...w, editorFirst: !w.editorFirst }))
-        }
-        title="Swap editor and PDF"
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded bg-white p-0.5 text-stone opacity-0 shadow-sm transition-opacity pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 hover:bg-mint hover:text-ink"
-      >
-        <IconSwap className="h-3 w-3" />
-      </button>
+      <div className="pointer-events-none absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1">
+        <button
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={gotoPdf}
+          disabled={!syncEntries}
+          title="Go to PDF"
+          className="pointer-events-auto flex h-5 w-6 items-center justify-center rounded-full border border-stone/40 bg-white text-stone shadow-sm transition-colors hover:bg-mint hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {/* Toward the PDF pane (right of the divider unless swapped). */}
+          {workspace.editorFirst ? (
+            <IconChevronRight className="h-3.5 w-3.5" />
+          ) : (
+            <IconChevronLeft className="h-3.5 w-3.5" />
+          )}
+        </button>
+        {/* 2x3 dot grip — purely visual; the divider is the drag surface. */}
+        <span aria-hidden className="pointer-events-none grid grid-cols-2 gap-px p-0.5">
+          {Array.from({ length: 6 }, (_, i) => (
+            <span key={i} className="h-0.5 w-0.5 rounded-full bg-stone/50" />
+          ))}
+        </span>
+        <button
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={gotoEditor}
+          disabled={!syncEntries}
+          title="Go to editor"
+          className="pointer-events-auto flex h-5 w-6 items-center justify-center rounded-full border border-stone/40 bg-white text-stone shadow-sm transition-colors hover:bg-mint hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {/* Toward the editor pane (left of the divider unless swapped). */}
+          {workspace.editorFirst ? (
+            <IconChevronLeft className="h-3.5 w-3.5" />
+          ) : (
+            <IconChevronRight className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
     </div>
   );
 
@@ -3088,8 +3143,8 @@ export default function EditorPage() {
           />
         </div>
 
-        {/* Editor + PDF: a draggable divider splits them, the arrows
-            swap the panes */}
+        {/* Editor + PDF: a draggable divider splits them; its grip and
+            arrows jump between the two panes */}
         <div ref={splitRef} className="flex min-w-0 flex-1">
           {workspace.editorFirst ? (
             <>

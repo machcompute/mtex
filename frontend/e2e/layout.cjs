@@ -2,7 +2,8 @@
 // only — project management moved to the dashboard), the icon rail that
 // switches the left panel (files/search/chat/log) with GitHub + Packages
 // anchored at its bottom, the search view itself, and the divider's
-// hover-only swap button, the formatting toolbar + save indicator row,
+// always-visible grip and jump arrows, the formatting toolbar + save
+// indicator row,
 // the PDF pane's right group (compile history, notes, page badge), the
 // files-panel stats popover. No compiles of its own (the first load
 // auto-compiles) and no project management — dashboard.cjs and
@@ -283,37 +284,29 @@ async function poll(r, fn, tries = 40, every = 250) {
     JSON.stringify(jump),
   );
 
-  // --- divider swap button: hidden until hover, swaps the two panes -------
-  const swapBtn = r.page.locator('button[title="Swap editor and PDF"]');
-  const divider = r.page.locator('div[title="Drag to re-split — hover for the swap button"]');
-  const rest = await swapBtn.evaluate((el) => {
-    const cs = getComputedStyle(el);
-    return `${cs.opacity}|${cs.pointerEvents}`;
-  });
-  r.ok(
-    "swap: invisible and click-through at rest",
-    rest === "0|none",
-    rest,
+  // --- divider: always-visible grip + jump arrows (no hover gating) -------
+  const divider = r.page.locator('div[title="Drag to re-split"]');
+  const arrows = ["Go to PDF", "Go to editor"].map((t) => r.page.locator(`button[title="${t}"]`));
+  const rest = await Promise.all(
+    arrows.map((b) =>
+      b.evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return `${cs.opacity}|${cs.pointerEvents}`;
+      }),
+    ),
   );
-  await divider.hover();
-  await poll(r, () => getComputedStyle(document.querySelector('button[title="Swap editor and PDF"]')).opacity === "1");
-  const box = (sel) => r.page.locator(sel).first().boundingBox();
-  const before = { ed: await box(".monaco-editor"), pdf: await box("[data-pdf-viewer]") };
-  await swapBtn.click();
-  let after = null;
-  for (let i = 0; i < 40; i++) {
-    const ed = await box(".monaco-editor");
-    const pdf = await box("[data-pdf-viewer]");
-    if (ed && pdf && ed.x > pdf.x) {
-      after = { ed: ed.x, pdf: pdf.x };
-      break;
-    }
-    await sleep(250);
-  }
   r.ok(
-    "swap: the editor and the PDF exchange places",
-    before.ed.x < before.pdf.x && after !== null,
-    JSON.stringify({ before, after }),
+    "divider: the jump arrows are visible and clickable at rest (no hover)",
+    rest.every((v) => v === "1|auto"),
+    JSON.stringify(rest),
+  );
+  r.ok(
+    "divider: the old swap button is gone",
+    (await r.page.locator('button[title="Swap editor and PDF"]').count()) === 0,
+  );
+  r.ok(
+    "divider: the 6-dot grip sits between the arrows",
+    (await divider.locator('span[aria-hidden] span').count()) === 6,
   );
 
   // --- the PDF pane's right group: history, notes, page badge --------------

@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { CompileResult } from "@/lib/busytex";
 import { FakeBusyTex, fakePdfFor, type CompileCall } from "../support/fake-busytex";
-import { autoButton, click, compileButton, gotoPdfButton, q, rail, tab, typeInEditor } from "../support/page-actions";
+import { autoButton, click, compileButton, dividerArrow, gotoPdfButton, q, rail, tab, typeInEditor } from "../support/page-actions";
 import {
   act,
   activeTab,
@@ -356,6 +356,60 @@ describe("PDF <-> source navigation (#6 #16, synctex)", () => {
     await advance(10);
     expect(statusText()).toMatch(/^Compiled in/);
     expect(gotoPdfButton()!.disabled).toBe(true);
+  });
+});
+
+describe("divider jump arrows (synctex)", () => {
+  const files = {
+    "main.tex": "\\documentclass{article}\n\\begin{document}\nMAIN LINE\n\\input{a/inner}\n\\input{inner}\n\\end{document}\n",
+    "a/inner.tex": "line one\nNESTEDMARK\n",
+    "inner.tex": "FLATMARK\n",
+  };
+  const synctex = () =>
+    synctexDoc({ 1: `${ABS}main.tex`, 2: `${ABS}a/inner.tex`, 3: `${ABS}inner.tex`, 4: `${ABS}main.bbl` }, [
+      glyph(1, 3, 72, 100),
+      glyph(2, 2, 72, 150),
+      glyph(3, 1, 72, 200),
+      glyph(4, 7, 72, 250),
+    ]);
+
+  async function openWithSync() {
+    FakeBusyTex.handler = (call) => result({ pdf: fakePdfFor(call), synctex: synctex() });
+    await mountEditor({ name: "t", mainPath: "main.tex", files });
+    await advance(10);
+  }
+
+  it("both arrows are disabled until a synctex map exists", async () => {
+    await mountEditor({ name: "t", files: { "main.tex": doc("x") } });
+    await advance(10);
+    expect(dividerArrow("Go to PDF")!.disabled).toBe(true);
+    expect(dividerArrow("Go to editor")!.disabled).toBe(true);
+  });
+
+  it("both arrows enable after a compile with a synctex map", async () => {
+    await openWithSync();
+    expect(dividerArrow("Go to PDF")!.disabled).toBe(false);
+    expect(dividerArrow("Go to editor")!.disabled).toBe(false);
+  });
+
+  it("'Go to PDF' (top arrow) jumps the viewer to the line under the editor cursor", async () => {
+    await openWithSync();
+    monacoState.selection = new (monacoState.selection.constructor as new (a: number, b: number, c: number, d: number) => typeof monacoState.selection)(3, 1, 3, 1);
+    await click(dividerArrow("Go to PDF"));
+    const s = pdfState.scrolls.at(-1)!;
+    expect(s.page).toBe(1);
+    expect(s.y).toBeCloseTo(100, 1);
+    expect(s.opts).toEqual({ select: true, instant: false });
+  });
+
+  it("'Go to editor' (bottom arrow) jumps the editor to the PDF's current viewport top", async () => {
+    await openWithSync();
+    pdfState.viewportTop = { page: 1, yTop: 150 };
+    await click(dividerArrow("Go to editor"));
+    // y=150 on page 1 is a/inner.tex:2 (same mapping as the PDF-click path)
+    expect(activeTab()).toBe("a/inner.tex");
+    expect(monacoState.reveals.at(-1)).toBe(2);
+    expect(monacoState.selection.startLineNumber).toBe(2);
   });
 });
 

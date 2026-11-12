@@ -1,10 +1,12 @@
-// The inscribe.io layout: app bar, formatting toolbar, search pane, pane swap,
-// workspace persistence, notes and stats popovers (e2e: layout.cjs, regression brand link).
+// The inscribe.io layout: app bar, formatting toolbar, search pane, the
+// divider's grip + jump arrows, workspace persistence, notes and stats
+// popovers (e2e: layout.cjs, regression brand link).
 import { fireEvent } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
-import { FakeBusyTex } from "../support/fake-busytex";
-import { click, openFile, q, qa, rail, typeInEditor } from "../support/page-actions";
-import { advance, fileRows, mountEditor, settle } from "../support/page-utils";
+import { FakeBusyTex, fakePdfFor } from "../support/fake-busytex";
+import { click, dividerArrow, openFile, q, qa, rail, typeInEditor } from "../support/page-actions";
+import { act, advance, fileRows, mountEditor, settle } from "../support/page-utils";
+import { ABS, glyph, synctexDoc } from "../support/synctex-builder";
 import { FakeSelection, monacoState } from "../support/stubs/monaco";
 import { pdfState } from "../support/stubs/pdf-viewer";
 
@@ -150,33 +152,102 @@ describe("search pane (layout.cjs)", () => {
   });
 });
 
-describe("pane swap and workspace persistence", () => {
-  const order = () => {
-    const kids = [...(q('[data-testid="monaco"]')?.closest("div.flex.min-w-0.flex-1")?.children ?? [])];
-    return kids.map((c) => (c.querySelector('[data-testid="monaco"]') ? "editor" : c.querySelector('[data-testid="pdf"]') ? "pdf" : "divider"));
-  };
+describe("divider: grip, jump arrows and workspace persistence", () => {
+  const rowKids = () =>
+    [...(q('[data-testid="monaco"]')?.closest("div.flex.min-w-0.flex-1")?.children ?? [])];
+  const order = () =>
+    rowKids().map((c) => (c.querySelector('[data-testid="monaco"]') ? "editor" : c.querySelector('[data-testid="pdf"]') ? "pdf" : "divider"));
+  const dividerEl = () =>
+    rowKids().find((c) => !c.querySelector('[data-testid="monaco"]') && !c.querySelector('[data-testid="pdf"]')) ?? null;
+  /** The editor pane's flex-grow share (= workspace.split). */
+  const editorShare = () =>
+    (rowKids().find((c) => c.querySelector('[data-testid="monaco"]')) as HTMLElement).style.flex;
 
-  it("the swap button is invisible and click-through at rest, and exchanges the panes", async () => {
+  /**
+   * Press `el` and drag it dx px. Raw MouseEvents of the pointer types:
+   * jsdom's PointerEvent drops clientX, so fireEvent.pointerDown would
+   * feed the drag handler NaN deltas.
+   */
+  async function drag(el: Element, dx: number) {
+    await act(async () => {
+      el.dispatchEvent(new MouseEvent("pointerdown", { clientX: 0, clientY: 0, bubbles: true, cancelable: true }));
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: dx, clientY: 0, bubbles: true }));
+      window.dispatchEvent(new MouseEvent("pointerup", { clientX: dx, clientY: 0, bubbles: true }));
+    });
+  }
+
+  it("the grip and both jump arrows are always present (no hover gating); the swap button is gone", async () => {
     await mountEditor(seed);
-    const btn = q('button[title="Swap editor and PDF"]')!;
-    expect(btn.className).toContain("opacity-0");
-    expect(btn.className).toContain("pointer-events-none");
+    expect(q('button[title="Swap editor and PDF"]')).toBeNull();
+    const top = q<HTMLButtonElement>('button[title="Go to PDF"]')!;
+    const bottom = q<HTMLButtonElement>('button[title="Go to editor"]')!;
+    expect(top).not.toBeNull();
+    expect(bottom).not.toBeNull();
+    for (const b of [top, bottom]) {
+      expect(b.className).not.toContain("opacity-0");
+      expect(b.className).not.toContain("pointer-events-none");
+    }
+    // The stack is arrow / grip / arrow: the grip is a 6-dot span that is
+    // pointer-events-none (the divider stays the drag surface).
+    const stack = top.parentElement!;
+    expect(stack.children).toHaveLength(3);
+    expect(stack.children[0]).toBe(top);
+    expect(stack.children[2]).toBe(bottom);
+    const grip = stack.children[1] as HTMLElement;
+    expect(grip.className).toContain("pointer-events-none");
+    expect(grip.querySelectorAll("span")).toHaveLength(6);
     expect(order()).toEqual(["editor", "divider", "pdf"]);
-    await click(btn);
-    expect(order()).toEqual(["pdf", "divider", "editor"]);
+  });
+
+  it("the divider still drags to re-split", async () => {
+    await mountEditor(seed);
+    expect(editorShare()).toBe("0.5 1 0%");
+    // jsdom leaves clientWidth at 0, so give the split row a real width
+    // before dragging: a +200 px press on a 1000 px row grows the editor
+    // share by 0.2.
+    const splitRow = q('[data-testid="monaco"]')!.closest("div.flex.min-w-0.flex-1")!;
+    Object.defineProperty(splitRow, "clientWidth", { value: 1000, configurable: true });
+    await drag(dividerEl()!, 200);
+    expect(editorShare()).toBe("0.7 1 0%");
+  });
+
+  it("a press on a jump arrow never starts a divider drag", async () => {
+    // Compile with a synctex map first so the arrows are enabled.
+    const tex = "\\documentclass{article}\n\\begin{document}\nMAIN\n\\end{document}\n";
+    FakeBusyTex.autoReady = true; // the open-time compile must run
+    FakeBusyTex.handler = (call) => ({
+      pdf: fakePdfFor(call),
+      log: "ok",
+      synctex: synctexDoc({ 1: `${ABS}main.tex` }, [glyph(1, 3, 72, 100)]),
+      buildState: null,
+    });
+    await mountEditor({ name: "t", mainPath: "main.tex", files: { "main.tex": tex } });
+    await advance(10);
+    expect(dividerArrow("Go to PDF")!.disabled).toBe(false);
+    for (const title of ["Go to PDF", "Go to editor"]) {
+      // A drag gesture starting on the arrow must stay on the arrow.
+      await drag(dividerArrow(title)!, 300);
+    }
+    expect(editorShare()).toBe("0.5 1 0%");
+    await advance(300);
+    // The layout never changed (a press on an arrow is not a drag), so
+    // the debounced persist effect wrote nothing.
+    expect(localStorage.getItem("homehub-workspace-v1")).toBeNull();
   });
 
   it("persists the arrangement (debounced) and restores it clamped on the next load", async () => {
     const first = await mountEditor(seed);
-    await click(q('button[title="Swap editor and PDF"]'));
-    await advance(300);
-    expect(JSON.parse(localStorage.getItem("homehub-workspace-v1")!)).toMatchObject({ editorFirst: false, filesW: 256, split: 0.5 });
+    // Drag the files panel's right edge (a deterministic px delta) to
+    // change the arrangement.
+    await drag(q('div[title="Drag to resize the files panel"]')!, 100);
+    await advance(300); // the persist effect is debounced 250 ms
+    expect(JSON.parse(localStorage.getItem("homehub-workspace-v1")!)).toMatchObject({ filesW: 356, split: 0.5, editorFirst: true });
     first.unmount();
     localStorage.setItem("homehub-workspace-v1", JSON.stringify({ filesW: 9999, split: 0.95, editorFirst: false }));
     await mountEditor();
     const w = (q("nav[aria-label='Left panel']")!.nextElementSibling as HTMLElement).style.width;
     expect(w).toBe("480px"); // clamped to the max
-    expect(order()[0]).toBe("pdf");
+    expect(order()[0]).toBe("pdf"); // the swapped layout still loads
   });
 
   it("falls back to defaults for a corrupt layout", async () => {

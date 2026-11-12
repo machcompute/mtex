@@ -14,8 +14,8 @@ const suites = [
   // Projects menu), the icon rail switching the left panel (files /
   // search / chat / log) with GitHub + Packages at its bottom, the
   // search view (rows, badge, empty states, jump-to-line), and the
-  // divider's hover-only swap button. No CTAN, no project management
-  // (dashboard.cjs / projects.cjs own those).
+  // divider's always-visible grip and jump arrows. No CTAN, no project
+  // management (dashboard.cjs / projects.cjs own those).
   "layout.cjs",
   "dashboard.cjs",
   "github.cjs",

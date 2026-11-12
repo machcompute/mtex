@@ -161,3 +161,5 @@ void dropEvent;
 export const compileButton = () => q<HTMLButtonElement>('button[title^="Recompile"]');
 export const gotoPdfButton = () => qa<HTMLButtonElement>("button").find((b) => b.textContent === "Go to PDF") ?? null;
 export const autoButton = () => q<HTMLButtonElement>('button[title^="Auto recompile"]');
+/** The divider's always-visible jump arrow, by its title ("Go to PDF" / "Go to editor"). */
+export const dividerArrow = (title: string) => q<HTMLButtonElement>(`button[title="${title}"]`);
