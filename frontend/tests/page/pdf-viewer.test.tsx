@@ -4,7 +4,7 @@
 // pdf.worker.min when resizing"). The document must be loaded once per PDF and
 // only its pages re-rendered when the fit/zoom changes.
 import { createRef } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, deferred, render, screen, settle } from "../support/page-utils";
 
 type Viewer = typeof import("@/components/pdf-viewer").default;
@@ -337,6 +337,82 @@ describe("PdfViewer: callbacks survive a re-render", () => {
   });
 });
 
+// jsdom has no layout: give the fake text-layer spans the geometry the
+// selection logic reads, the same way the page layout tests fake clientWidth.
+function fakeLine(text: string, top: number, height: number): HTMLSpanElement {
+  const sp = document.createElement("span");
+  sp.textContent = text;
+  Object.defineProperty(sp, "offsetTop", { value: top });
+  Object.defineProperty(sp, "offsetHeight", { value: height });
+  return sp;
+}
+
+function fakeLayer(lines: [string, number, number][]): HTMLElement {
+  const layer = document.createElement("div");
+  for (const [text, top, height] of lines) layer.appendChild(fakeLine(text, top, height));
+  return layer;
+}
+
+// The page project mocks the whole viewer module (tests/support/page-setup);
+// the pure helper comes from the real module, same as the viewer itself.
+describe("matchLineSpans (the scrollToPosition selection target)", async () => {
+  let matchLineSpans: (layer: ParentNode, yCss: number) => HTMLSpanElement[];
+  beforeAll(async () => {
+    ({ matchLineSpans } = await vi.importActual<typeof import("@/components/pdf-viewer")>("@/components/pdf-viewer"));
+  });
+  it("does not throw Range.setStart when the target falls between lines", () => {
+    // Two 16px lines; the target lands 60px below the last line (a margin /
+    // empty region). No span is within 0.9 * 16 of it, so the old inline
+    // filter returned [] and range.setStart(matched[0], 0) threw
+    // "Range.setStart: Argument 1 is not an object".
+    const layer = fakeLayer([
+      ["first line", 0, 16],
+      ["second line", 32, 16],
+    ]);
+    const matched = matchLineSpans(layer, 100);
+    expect(matched.length).toBeGreaterThan(0); // never empty for a spanned layer
+    expect(matched).toEqual([layer.children[1]]); // the closest line
+    // And the range the caller builds from the result no longer throws
+    // (the spans must be connected for jsdom to keep the range).
+    const selection = window.getSelection();
+    if (!selection) throw new Error("jsdom selection unavailable");
+    document.body.appendChild(layer);
+    try {
+      const range = document.createRange();
+      range.setStart(matched[0], 0);
+      const last = matched[matched.length - 1];
+      range.setEnd(last, last.childNodes.length);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      expect(selection.rangeCount).toBe(1);
+      expect(selection.getRangeAt(0).startContainer).toBe(last);
+    } finally {
+      selection.removeAllRanges();
+      layer.remove();
+    }
+  });
+
+  it("selects exactly the spans of the line at the target when the target is on a line", () => {
+    const layer = fakeLayer([
+      ["line one", 0, 16],
+      ["line two left", 40, 16],
+      ["line two right", 40, 16],
+      ["line three", 80, 16],
+    ]);
+    // Line two's spans share center 48; the other lines are 40px away, well
+    // outside the 0.9 * 16 window.
+    expect(matchLineSpans(layer, 48).map((s) => s.textContent)).toEqual([
+      "line two left",
+      "line two right",
+    ]);
+    expect(matchLineSpans(layer, 8).map((s) => s.textContent)).toEqual(["line one"]);
+  });
+
+  it("returns empty for a layer without spans (no throw, no selection)", () => {
+    expect(matchLineSpans(document.createElement("div"), 42)).toEqual([]);
+  });
+});
+
 describe("PdfViewer: imperative handle", () => {
   it("scrollToPosition / getViewportTop work against the re-rendered pages", async () => {
     const { default: PdfViewer } = await vi.importActual<typeof import("@/components/pdf-viewer")>("@/components/pdf-viewer");
@@ -347,5 +423,26 @@ describe("PdfViewer: imperative handle", () => {
     expect(ref.current?.scrollToPosition(1, 100, { select: false, instant: true })).toBe(true);
     expect(ref.current?.getViewportTop()).toEqual({ page: 1, yTop: 0 });
     expect(ref.current?.scrollToPosition(9, 0)).toBe(false);
+  });
+
+  it("scrollToPosition selects the closest line without throwing when the target falls in a gap", async () => {
+    // Repro of the reported crash: the synctex target lands in a region with
+    // no rendered line within 0.9 line-heights, so the old matched list was
+    // empty and range.setStart(matched[0], 0) threw "Argument 1 is not an
+    // object" after the scroll had already happened.
+    const { default: PdfViewer } = await vi.importActual<typeof import("@/components/pdf-viewer")>("@/components/pdf-viewer");
+    const ref = createRef<import("@/components/pdf-viewer").PdfViewerHandle>();
+    render(<PdfViewer ref={ref} data={bytes()} />);
+    await settle();
+    await resizeTo(632); // scale 1
+    const span = wrappers()[0].querySelector("[data-text-layer] span") as HTMLElement;
+    // The page's only rendered line sits 400px below the requested target (20).
+    Object.defineProperty(span, "offsetTop", { value: 400 });
+    Object.defineProperty(span, "offsetHeight", { value: 16 });
+    expect(ref.current?.scrollToPosition(1, 20, { instant: true })).toBe(true);
+    const sel = window.getSelection();
+    expect(sel?.rangeCount).toBe(1); // the closest line is selected
+    expect(sel?.getRangeAt(0).startContainer).toBe(span);
+    sel?.removeAllRanges();
   });
 });

@@ -45,6 +45,36 @@ function errorBox(message: string): HTMLElement {
   return error;
 }
 
+/**
+ * The text-layer spans on the line at `yCss` (CSS px from the page top):
+ * the spans whose line centers lie within 0.9× the closest span's line
+ * height. Falls back to that closest span when no span is that close — a
+ * target in a paragraph gap, margin or empty region must still select the
+ * nearest line, and an empty result would make the caller's
+ * `range.setStart(matched[0], 0)` throw. Empty for a layer without spans.
+ */
+export function matchLineSpans(
+  layer: ParentNode,
+  yCss: number,
+): HTMLSpanElement[] {
+  const spans = Array.from(layer.querySelectorAll<HTMLSpanElement>("span"));
+  if (spans.length === 0) return [];
+  let best = spans[0];
+  let bestDist = Infinity;
+  for (const sp of spans) {
+    const dist = Math.abs(sp.offsetTop + sp.offsetHeight / 2 - yCss);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = sp;
+    }
+  }
+  const lineH = best.offsetHeight > 0 ? best.offsetHeight : 16;
+  const matched = spans.filter(
+    (sp) => Math.abs(sp.offsetTop + sp.offsetHeight / 2 - yCss) <= 0.9 * lineH,
+  );
+  return matched.length > 0 ? matched : [best];
+}
+
 export type PdfViewerHandle = {
   /**
    * Jump to a synctex position: scroll the given PDF page so the position
@@ -453,25 +483,10 @@ export default forwardRef<PdfViewerHandle, Props>(function PdfViewer(
         // The scroll happened — selection below is cosmetic.
         if (!select) return true;
         // Select the rendered line at that position so it stands out.
-        const spans = Array.from(
-          layer.querySelectorAll<HTMLSpanElement>("span"),
-        );
-        if (spans.length === 0) return true;
-        let best = spans[0];
-        let bestDist = Infinity;
-        for (const sp of spans) {
-          const dist = Math.abs(sp.offsetTop + sp.offsetHeight / 2 - yTopCss);
-          if (dist < bestDist) {
-            bestDist = dist;
-            best = sp;
-          }
-        }
-        const lineH = best.offsetHeight > 0 ? best.offsetHeight : 16;
-        const matched = spans.filter(
-          (sp) =>
-            Math.abs(sp.offsetTop + sp.offsetHeight / 2 - yTopCss) <=
-            0.9 * lineH,
-        );
+        // matchLineSpans never returns empty for a layer with spans (it
+        // falls back to the closest one), so range.setStart below is safe.
+        const matched = matchLineSpans(layer, yTopCss);
+        if (matched.length === 0) return true;
         const selection = window.getSelection();
         if (!selection) return true;
         const range = document.createRange();
